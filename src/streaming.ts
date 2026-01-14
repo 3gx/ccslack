@@ -201,9 +201,13 @@ export async function streamToSlack(
       // Handle result messages (final response)
       if (msg.type === 'result') {
         const resultMsg = msg as any;
-        if (resultMsg.result && resultMsg.result !== fullResponse) {
-          // Result differs from accumulated - update with result
-          fullResponse = resultMsg.result;
+        if (resultMsg.result) {
+          // If result differs from what we accumulated, use result instead
+          if (resultMsg.result !== fullResponse) {
+            fullResponse = resultMsg.result;
+            // Push the full result to Slack
+            await session.appendText(fullResponse);
+          }
         }
       }
     }

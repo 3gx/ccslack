@@ -236,6 +236,107 @@ app.action(/^answer_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
   }
 });
 
+// Handle "Abort" button for ask_user questions
+app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^abort_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`Abort clicked for question: ${questionId}`);
+
+  // Write abort answer to file
+  const answerFile = `${ANSWER_DIR}/${questionId}.json`;
+  try {
+    fs.writeFileSync(answerFile, JSON.stringify({ answer: '__ABORTED__', timestamp: Date.now() }));
+    console.log(`Wrote abort file: ${answerFile}`);
+  } catch (error) {
+    console.error('Error writing abort file:', error);
+  }
+
+  // Update message to show aborted
+  const bodyWithChannel = body as any;
+  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
+    try {
+      await client.chat.update({
+        channel: bodyWithChannel.channel.id,
+        ts: bodyWithChannel.message.ts,
+        text: `*Aborted* - Question cancelled by user`,
+        blocks: [],
+      });
+    } catch (error) {
+      console.error('Error updating message:', error);
+    }
+  }
+});
+
+// Handle "Type something" button - opens modal for free text input
+app.action(/^freetext_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^freetext_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`Freetext clicked for question: ${questionId}`);
+
+  const bodyWithTrigger = body as any;
+  const triggerId = bodyWithTrigger.trigger_id;
+
+  if (triggerId) {
+    try {
+      await client.views.open({
+        trigger_id: triggerId,
+        view: {
+          type: "modal",
+          callback_id: `freetext_modal_${questionId}`,
+          title: { type: "plain_text", text: "Your Answer" },
+          submit: { type: "plain_text", text: "Submit" },
+          close: { type: "plain_text", text: "Cancel" },
+          blocks: [
+            {
+              type: "input",
+              block_id: "answer_block",
+              element: {
+                type: "plain_text_input",
+                action_id: "answer_input",
+                multiline: true,
+                placeholder: { type: "plain_text", text: "Type your answer here..." },
+              },
+              label: { type: "plain_text", text: "Answer" },
+            },
+          ],
+        },
+      });
+    } catch (error) {
+      console.error('Error opening modal:', error);
+    }
+  }
+});
+
+// Handle modal submission for free text answers
+app.view(/^freetext_modal_(.+)$/, async ({ ack, body, view, client }) => {
+  await ack();
+
+  const callbackId = view.callback_id;
+  const match = callbackId.match(/^freetext_modal_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  const answer = view.state.values.answer_block.answer_input.value || '';
+
+  console.log(`Modal submitted for question: ${questionId}, answer: ${answer}`);
+
+  // Write answer to file
+  const answerFile = `${ANSWER_DIR}/${questionId}.json`;
+  try {
+    fs.writeFileSync(answerFile, JSON.stringify({ answer, timestamp: Date.now() }));
+    console.log(`Wrote answer file: ${answerFile}`);
+  } catch (error) {
+    console.error('Error writing answer file:', error);
+  }
+});
+
 // Handle concurrent session cancel button
 app.action(/^concurrent_cancel_(.+)$/, async ({ action, ack, body, client }) => {
   await ack();

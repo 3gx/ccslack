@@ -133,6 +133,7 @@ class AskUserMCPServer {
 
     // Add buttons if options provided
     if (options && options.length > 0) {
+      // Option buttons
       blocks.push({
         type: "actions",
         block_id: `question_${questionId}`,
@@ -143,14 +144,52 @@ class AskUserMCPServer {
           value: opt,
         })),
       });
+
+      // Divider
+      blocks.push({ type: "divider" });
+
+      // "Type something" and "Abort" buttons
+      blocks.push({
+        type: "actions",
+        block_id: `question_extra_${questionId}`,
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Type something..." },
+            action_id: `freetext_${questionId}`,
+            value: "freetext",
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Abort" },
+            style: "danger",
+            action_id: `abort_${questionId}`,
+            value: "abort",
+          },
+        ],
+      });
     } else {
-      // If no options, add a text input hint
+      // No options - show text input hint and abort
       blocks.push({
         type: "context",
         elements: [
           {
             type: "mrkdwn",
             text: "_Reply to this message with your answer_",
+          },
+        ],
+      });
+
+      blocks.push({
+        type: "actions",
+        block_id: `question_extra_${questionId}`,
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Abort" },
+            style: "danger",
+            action_id: `abort_${questionId}`,
+            value: "abort",
           },
         ],
       });
