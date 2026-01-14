@@ -96,7 +96,7 @@ async function handleMessage(params: {
 
   // Check for concurrent terminal session
   if (session.sessionId && !skipConcurrentCheck) {
-    const concurrentCheck = await isSessionActiveInTerminal(session.sessionId);
+    const concurrentCheck = await isSessionActiveInTerminal(session.sessionId, session.workingDir);
     if (concurrentCheck.active) {
       console.log(`Session ${session.sessionId} is active in terminal (PID: ${concurrentCheck.pid})`);
 
