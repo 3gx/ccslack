@@ -7,18 +7,16 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { WebClient } from '@slack/web-api';
+import fs from 'fs';
+
+// Answer directory for file-based communication with Slack bot
+const ANSWER_DIR = '/tmp/ccslack-answers';
 
 interface SlackContext {
   channel: string;
   threadTs?: string;
   user: string;
 }
-
-// Pending questions waiting for user response
-const pendingQuestions = new Map<string, {
-  resolve: (answer: string) => void;
-  reject: (error: Error) => void;
-}>();
 
 class AskUserMCPServer {
   private server: Server;
@@ -178,10 +176,32 @@ class AskUserMCPServer {
   }
 
   private async waitForAnswer(questionId: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      pendingQuestions.set(questionId, { resolve, reject });
-      // No timeout - can wait indefinitely (Phase 2 will add reminders)
-    });
+    const answerFile = `${ANSWER_DIR}/${questionId}.json`;
+    const pollInterval = 500; // 500ms
+
+    console.error(`[MCP] Waiting for answer file: ${answerFile}`);
+
+    // Poll for answer file
+    while (true) {
+      if (fs.existsSync(answerFile)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(answerFile, 'utf-8'));
+          const answer = data.answer;
+
+          // Delete file after reading
+          fs.unlinkSync(answerFile);
+          console.error(`[MCP] Got answer for ${questionId}: ${answer}`);
+
+          return answer;
+        } catch (error) {
+          console.error(`[MCP] Error reading answer file:`, error);
+          // Continue polling if file read fails
+        }
+      }
+
+      // Wait before next poll
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+    }
   }
 
   async run() {
@@ -189,17 +209,6 @@ class AskUserMCPServer {
     await this.server.connect(transport);
     console.error("[MCP] ask-user server started");
   }
-}
-
-// Export for resolving questions from Slack handler
-export function resolveQuestion(questionId: string, answer: string): boolean {
-  const pending = pendingQuestions.get(questionId);
-  if (pending) {
-    pending.resolve(answer);
-    pendingQuestions.delete(questionId);
-    return true;
-  }
-  return false;
 }
 
 // Run if executed directly

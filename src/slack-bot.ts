@@ -1,6 +1,10 @@
 import { App } from '@slack/bolt';
 import { streamClaude } from './claude-client.js';
 import { getSession, saveSession } from './session-manager.js';
+import fs from 'fs';
+
+// Answer directory for file-based communication with MCP subprocess
+const ANSWER_DIR = '/tmp/ccslack-answers';
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -162,18 +166,24 @@ app.action(/^answer_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
   await ack();
 
   // Extract question ID from action_id: "answer_{questionId}_{index}"
+  // Use regex to properly extract questionId (which contains underscores)
   const actionId = 'action_id' in action ? action.action_id : '';
-  const parts = actionId.split('_');
-  const questionId = parts[1];
+  const match = actionId.match(/^answer_(.+)_(\d+)$/);
+  const questionId = match ? match[1] : '';
   const answer = 'value' in action ? action.value : '';
 
   console.log(`Button clicked: questionId=${questionId}, answer=${answer}`);
 
-  // Note: The MCP server runs as a subprocess and handles its own state.
-  // Button clicks will be handled by the MCP server's Slack client directly.
-  // For Phase 1, we just acknowledge the click.
+  // Write answer to file for MCP subprocess to read
+  const answerFile = `${ANSWER_DIR}/${questionId}.json`;
+  try {
+    fs.writeFileSync(answerFile, JSON.stringify({ answer, timestamp: Date.now() }));
+    console.log(`Wrote answer file: ${answerFile}`);
+  } catch (error) {
+    console.error('Error writing answer file:', error);
+  }
 
-  // Update message to show selection (the MCP server will also update it)
+  // Update message to show selection
   const bodyWithChannel = body as any;
   if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
     try {
