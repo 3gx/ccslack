@@ -2,6 +2,7 @@ import { App } from '@slack/bolt';
 import { streamClaude } from './claude-client.js';
 import { getSession, saveSession } from './session-manager.js';
 import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
+import { streamToSlack } from './streaming.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
@@ -132,12 +133,9 @@ async function handleMessage(params: {
     }
   }
 
-  // Stream Claude response
-  let fullResponse = '';
-  let newSessionId: string | null = null;
-
+  // Stream Claude response to Slack with real-time updates
   try {
-    for await (const msg of streamClaude(userText!, {
+    const claudeStream = streamClaude(userText!, {
       sessionId: session.sessionId ?? undefined,
       workingDir: session.workingDir,
       slackContext: {
@@ -145,36 +143,18 @@ async function handleMessage(params: {
         threadTs,
         user: userId ?? 'unknown',
       },
-    })) {
-      // Capture session ID from init message
-      if (msg.type === 'system' && msg.subtype === 'init') {
-        newSessionId = (msg as any).session_id;
-        console.log(`Session initialized: ${newSessionId}`);
-      }
+    });
 
-      // Accumulate assistant content
-      if (msg.type === 'assistant' && 'content' in msg) {
-        const content = (msg as any).content;
-        if (typeof content === 'string') {
-          fullResponse += content;
-        } else if (Array.isArray(content)) {
-          // Handle content blocks
-          for (const block of content) {
-            if (block.type === 'text') {
-              fullResponse += block.text;
-            }
-          }
-        }
-      }
-
-      // Handle result messages (final response)
-      if (msg.type === 'result') {
-        const resultMsg = msg as any;
-        if (resultMsg.result) {
-          fullResponse = resultMsg.result;
-        }
-      }
-    }
+    // Use streaming module for real-time Slack updates
+    const { fullResponse, sessionId: newSessionId } = await streamToSlack(
+      client,
+      {
+        channel: channelId,
+        userId: userId ?? 'unknown',
+        threadTs,
+      },
+      claudeStream
+    );
 
     // Remove eyes reaction
     if (originalTs) {
@@ -187,15 +167,6 @@ async function handleMessage(params: {
       } catch (error) {
         console.error('Error removing reaction:', error);
       }
-    }
-
-    // Post response (in thread only if already in a thread)
-    if (fullResponse) {
-      await client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs, // undefined for channel messages, set for thread replies
-        text: fullResponse,
-      });
     }
 
     // Save session
