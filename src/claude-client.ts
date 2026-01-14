@@ -23,6 +23,8 @@ export async function* streamClaude(
   const queryOptions: Record<string, unknown> = {
     outputFormat: 'stream-json',
     permissionMode: 'bypassPermissions', // For now, auto-approve all
+    // Claude Code preset configuration
+    systemPrompt: 'claude_code',
   };
 
   if (options.workingDir) {
@@ -49,8 +51,8 @@ export async function* streamClaude(
         },
       },
     };
-    // Allow the ask_user tool
-    queryOptions.allowedTools = ['mcp__ask-user__ask_user'];
+    // Allow the MCP tools
+    queryOptions.allowedTools = ['mcp__ask-user__ask_user', 'mcp__ask-user__approve_action'];
     console.log('MCP ask-user server configured');
   }
 

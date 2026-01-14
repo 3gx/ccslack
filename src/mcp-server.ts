@@ -63,6 +63,24 @@ class AskUserMCPServer {
               required: ["question"],
             },
           },
+          {
+            name: "approve_action",
+            description: "Request user approval for an action via Slack. Use this when you need permission to proceed with something.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                action: {
+                  type: "string",
+                  description: "Description of the action that needs approval",
+                },
+                details: {
+                  type: "string",
+                  description: "Additional details about what will happen if approved",
+                },
+              },
+              required: ["action"],
+            },
+          },
         ],
       };
     });
@@ -73,6 +91,12 @@ class AskUserMCPServer {
         return await this.handleAskUser(request.params.arguments as {
           question: string;
           options?: string[];
+        });
+      }
+      if (request.params.name === "approve_action") {
+        return await this.handleApproveAction(request.params.arguments as {
+          action: string;
+          details?: string;
         });
       }
       throw new Error(`Unknown tool: ${request.params.name}`);
@@ -169,6 +193,112 @@ class AskUserMCPServer {
       };
     } catch (error: any) {
       console.error(`[MCP] Error asking user:`, error);
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+      };
+    }
+  }
+
+  private async handleApproveAction(params: { action: string; details?: string }) {
+    const { action, details } = params;
+
+    // Get Slack context from environment
+    const slackContextStr = process.env.SLACK_CONTEXT;
+    if (!slackContextStr) {
+      return {
+        content: [{ type: "text", text: "Error: No Slack context available" }],
+      };
+    }
+
+    const slackContext: SlackContext = JSON.parse(slackContextStr);
+    const { channel, threadTs } = slackContext;
+
+    // Generate unique approval ID
+    const approvalId = `a_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Build Slack blocks
+    const blocks: any[] = [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `*Claude needs your approval:*\n${action}`,
+        },
+      },
+    ];
+
+    if (details) {
+      blocks.push({
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: details,
+          },
+        ],
+      });
+    }
+
+    // Add Approve/Deny buttons
+    blocks.push({
+      type: "actions",
+      block_id: `approval_${approvalId}`,
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Approve" },
+          style: "primary",
+          action_id: `answer_${approvalId}_0`,
+          value: "approved",
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Deny" },
+          style: "danger",
+          action_id: `answer_${approvalId}_1`,
+          value: "denied",
+        },
+      ],
+    });
+
+    try {
+      // Post approval request to Slack
+      const result = await this.slack.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        blocks,
+        text: `Approval needed: ${action}`,
+      });
+
+      console.error(`[MCP] Posted approval request ${approvalId} to Slack`);
+
+      // Wait for user response
+      const answer = await this.waitForAnswer(approvalId);
+      const approved = answer === "approved";
+
+      // Update message to show result
+      if (result.ts) {
+        await this.slack.chat.update({
+          channel,
+          ts: result.ts,
+          blocks: [
+            {
+              type: "section",
+              text: {
+                type: "mrkdwn",
+                text: `*Approval request:* ${action}\n\n*Result:* ${approved ? "✅ Approved" : "❌ Denied"}`,
+              },
+            },
+          ],
+          text: `${approved ? "Approved" : "Denied"}: ${action}`,
+        });
+      }
+
+      return {
+        content: [{ type: "text", text: approved ? "approved" : "denied" }],
+      };
+    } catch (error: any) {
+      console.error(`[MCP] Error requesting approval:`, error);
       return {
         content: [{ type: "text", text: `Error: ${error.message}` }],
       };

@@ -1,10 +1,21 @@
 import { App } from '@slack/bolt';
 import { streamClaude } from './claude-client.js';
 import { getSession, saveSession } from './session-manager.js';
+import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
 const ANSWER_DIR = '/tmp/ccslack-answers';
+
+// Store pending messages when concurrent session detected
+interface PendingMessage {
+  channelId: string;
+  userId: string | undefined;
+  userText: string;
+  originalTs?: string;
+  threadTs?: string;
+}
+const pendingMessages = new Map<string, PendingMessage>();
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -60,13 +71,14 @@ app.message(async ({ message, client }) => {
 // Common message handler
 async function handleMessage(params: {
   channelId: string;
-  userId: string;
+  userId: string | undefined;
   userText: string;
   originalTs?: string;
   threadTs?: string;
   client: any;
+  skipConcurrentCheck?: boolean;
 }) {
-  const { channelId, userId, userText, originalTs, threadTs, client } = params;
+  const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck } = params;
 
   // Get or create session
   let session = getSession(channelId);
@@ -79,6 +91,32 @@ async function handleMessage(params: {
       lastActiveAt: Date.now(),
     };
     saveSession(channelId, session);
+  }
+
+  // Check for concurrent terminal session
+  if (session.sessionId && !skipConcurrentCheck) {
+    const concurrentCheck = await isSessionActiveInTerminal(session.sessionId);
+    if (concurrentCheck.active) {
+      console.log(`Session ${session.sessionId} is active in terminal (PID: ${concurrentCheck.pid})`);
+
+      // Store pending message for potential "proceed anyway"
+      pendingMessages.set(`${channelId}_${session.sessionId}`, {
+        channelId,
+        userId,
+        userText,
+        originalTs,
+        threadTs,
+      });
+
+      // Show warning with Cancel/Proceed buttons
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        blocks: buildConcurrentWarningBlocks(concurrentCheck.pid!, session.sessionId),
+        text: `Warning: This session is currently active in your terminal (PID: ${concurrentCheck.pid})`,
+      });
+      return;
+    }
   }
 
   // Add eyes reaction to show we're processing
@@ -105,7 +143,7 @@ async function handleMessage(params: {
       slackContext: {
         channel: channelId,
         threadTs,
-        user: userId,
+        user: userId ?? 'unknown',
       },
     })) {
       // Capture session ID from init message
@@ -224,6 +262,92 @@ app.action(/^answer_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
     } catch (error) {
       console.error('Error updating message:', error);
     }
+  }
+});
+
+// Handle concurrent session cancel button
+app.action(/^concurrent_cancel_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^concurrent_cancel_(.+)$/);
+  const sessionId = match ? match[1] : '';
+
+  console.log(`Concurrent cancel clicked for session: ${sessionId}`);
+
+  // Remove pending message
+  const bodyWithChannel = body as any;
+  const channelId = bodyWithChannel.channel?.id;
+  if (channelId) {
+    pendingMessages.delete(`${channelId}_${sessionId}`);
+  }
+
+  // Update message to show cancelled
+  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
+    await client.chat.update({
+      channel: bodyWithChannel.channel.id,
+      ts: bodyWithChannel.message.ts,
+      text: `Request cancelled. Continue in terminal with: \`claude --resume ${sessionId}\``,
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Cancelled.* Continue in terminal with:\n\`\`\`claude --resume ${sessionId}\`\`\``,
+          },
+        },
+      ],
+    });
+  }
+});
+
+// Handle concurrent session proceed button
+app.action(/^concurrent_proceed_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^concurrent_proceed_(.+)$/);
+  const sessionId = match ? match[1] : '';
+
+  console.log(`Concurrent proceed clicked for session: ${sessionId}`);
+
+  const bodyWithChannel = body as any;
+  const channelId = bodyWithChannel.channel?.id;
+
+  // Get and remove pending message
+  const pendingKey = `${channelId}_${sessionId}`;
+  const pending = pendingMessages.get(pendingKey);
+  pendingMessages.delete(pendingKey);
+
+  // Update warning message
+  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
+    await client.chat.update({
+      channel: bodyWithChannel.channel.id,
+      ts: bodyWithChannel.message.ts,
+      text: `Proceeding despite concurrent session...`,
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Proceeding...* Note: This may cause conflicts with the terminal session.`,
+          },
+        },
+      ],
+    });
+  }
+
+  // Process the pending message if we have it
+  if (pending && channelId) {
+    await handleMessage({
+      channelId: pending.channelId,
+      userId: pending.userId,
+      userText: pending.userText,
+      originalTs: pending.originalTs,
+      threadTs: pending.threadTs,
+      client,
+      skipConcurrentCheck: true, // Skip the check on retry
+    });
   }
 });
 
