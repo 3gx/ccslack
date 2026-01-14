@@ -23,7 +23,8 @@ app.event('app_mention', async ({ event, client }) => {
     channelId: event.channel,
     userId: event.user,
     userText,
-    threadTs: event.thread_ts || event.ts,
+    originalTs: event.ts,
+    threadTs: event.thread_ts, // Only set if already in a thread
     client,
   });
 });
@@ -43,6 +44,7 @@ app.message(async ({ message, client }) => {
   const channelId = message.channel;
   const userText = message.text!;
   const userId = 'user' in message ? message.user : 'unknown';
+  const messageTs = 'ts' in message ? message.ts : undefined;
 
   console.log(`Received DM from ${userId}: ${userText}`);
 
@@ -50,6 +52,7 @@ app.message(async ({ message, client }) => {
     channelId,
     userId,
     userText,
+    originalTs: messageTs,
     client,
   });
 });
@@ -59,10 +62,11 @@ async function handleMessage(params: {
   channelId: string;
   userId: string;
   userText: string;
+  originalTs?: string;
   threadTs?: string;
   client: any;
 }) {
-  const { channelId, userId, userText, threadTs, client } = params;
+  const { channelId, userId, userText, originalTs, threadTs, client } = params;
 
   // Get or create session
   let session = getSession(channelId);
@@ -77,18 +81,22 @@ async function handleMessage(params: {
     saveSession(channelId, session);
   }
 
-  // Post initial "thinking" message (in thread if applicable)
-  const result = await client.chat.postMessage({
-    channel: channelId,
-    thread_ts: threadTs,
-    text: '...',
-  });
-  const messageTs = result.ts!;
+  // Add eyes reaction to show we're processing
+  if (originalTs) {
+    try {
+      await client.reactions.add({
+        channel: channelId,
+        timestamp: originalTs,
+        name: 'eyes',
+      });
+    } catch (error) {
+      console.error('Error adding reaction:', error);
+    }
+  }
 
   // Stream Claude response
   let fullResponse = '';
   let newSessionId: string | null = null;
-  let lastUpdate = 0;
 
   try {
     for await (const msg of streamClaude(userText!, {
@@ -96,6 +104,7 @@ async function handleMessage(params: {
       workingDir: session.workingDir,
       slackContext: {
         channel: channelId,
+        threadTs,
         user: userId,
       },
     })) {
@@ -118,16 +127,6 @@ async function handleMessage(params: {
             }
           }
         }
-
-        // Update message every 2 seconds (rate limit safe)
-        if (Date.now() - lastUpdate >= 2000) {
-          await client.chat.update({
-            channel: channelId,
-            ts: messageTs,
-            text: fullResponse || '...',
-          });
-          lastUpdate = Date.now();
-        }
       }
 
       // Handle result messages (final response)
@@ -139,12 +138,27 @@ async function handleMessage(params: {
       }
     }
 
-    // Final update
-    await client.chat.update({
-      channel: channelId,
-      ts: messageTs,
-      text: fullResponse || 'Done.',
-    });
+    // Remove eyes reaction
+    if (originalTs) {
+      try {
+        await client.reactions.remove({
+          channel: channelId,
+          timestamp: originalTs,
+          name: 'eyes',
+        });
+      } catch (error) {
+        console.error('Error removing reaction:', error);
+      }
+    }
+
+    // Post response (in thread only if already in a thread)
+    if (fullResponse) {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs, // undefined for channel messages, set for thread replies
+        text: fullResponse,
+      });
+    }
 
     // Save session
     if (newSessionId) {
@@ -153,9 +167,23 @@ async function handleMessage(params: {
 
   } catch (error: any) {
     console.error('Error streaming Claude response:', error);
-    await client.chat.update({
+
+    // Remove eyes reaction on error
+    if (originalTs) {
+      try {
+        await client.reactions.remove({
+          channel: channelId,
+          timestamp: originalTs,
+          name: 'eyes',
+        });
+      } catch (e) {
+        // Ignore
+      }
+    }
+
+    await client.chat.postMessage({
       channel: channelId,
-      ts: messageTs,
+      thread_ts: threadTs,
       text: `Error: ${error.message}`,
     });
   }
