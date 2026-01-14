@@ -10,70 +10,95 @@ export interface ConcurrentCheckResult {
 }
 
 /**
- * Check if a session is currently active in a terminal
- * by finding claude processes with a TTY and matching their working directory
+ * Check if a session is currently active in a terminal.
  *
- * macOS `ps` truncates command-line args, so we can't search for `--resume <sessionId>`.
- * Instead, we check if any terminal claude process is in the same working directory.
+ * TODO: CONCURRENT SESSION DETECTION NEEDS INVESTIGATION
+ * ======================================================
+ *
+ * We need a robust way to detect if `claude --resume <sessionId>` is running
+ * in a terminal. Current approaches that DON'T work on macOS:
+ *
+ * 1. `ps aux | grep "claude --resume <sessionId>"`
+ *    - macOS truncates command-line args in ps output
+ *    - Only shows "claude" without the --resume argument
+ *
+ * 2. `lsof <session-file.jsonl>`
+ *    - Claude doesn't keep the session file open continuously
+ *    - Opens, writes, closes - so lsof finds nothing
+ *
+ * 3. Working directory matching via `lsof -d cwd`
+ *    - Too broad - catches ANY Claude in same directory
+ *    - False positives for unrelated Claude sessions
+ *
+ * 4. File modification time heuristics
+ *    - Unreliable, requires arbitrary thresholds
+ *
+ * DIRECTIONS TO INVESTIGATE:
+ * - macOS proc_info/libproc APIs for full command args
+ * - sysctl kern.procargs2 for process arguments
+ * - Whether Claude creates lock/PID files we can check
+ * - Claude hooks or config that tracks active sessions
+ * - FSEvents/kqueue for file system monitoring
+ * - DTrace for tracing file access
+ *
+ * For now, this feature is DISABLED until we find a robust solution.
  */
 export async function isSessionActiveInTerminal(
   sessionId: string,
   workingDir?: string
 ): Promise<ConcurrentCheckResult> {
-  if (!workingDir) {
+  // DISABLED: No reliable detection method found yet
+  // See TODO above for investigation directions
+  return { active: false };
+
+  /* Original implementation commented out:
+  if (!sessionId) {
     return { active: false };
   }
 
   try {
-    // Step 1: Find all claude processes with a TTY (terminal sessions)
-    // Format: PID TTY COMM - filter out processes with '??' (no TTY)
-    const { stdout: psOutput } = await execAsync(
-      `ps -eo pid,tty,comm | grep claude | grep -v "??" | grep -v grep`
+    const projectPath = workingDir?.replace(/\//g, '-').replace(/^-/, '-') || '';
+    const sessionFile = `${process.env.HOME}/.claude/projects/${projectPath}/${sessionId}.jsonl`;
+
+    const { stdout } = await execAsync(
+      `lsof "${sessionFile}" 2>/dev/null | grep -v "^COMMAND"`
     );
 
-    const lines = psOutput.trim().split('\n').filter(line => line.length > 0);
+    const lines = stdout.trim().split('\n').filter(line => line.length > 0);
 
     if (lines.length === 0) {
       return { active: false };
     }
 
-    // Step 2: For each claude process with TTY, check its working directory
     for (const line of lines) {
       const parts = line.trim().split(/\s+/);
-      const pid = parseInt(parts[0], 10);
+      const pid = parseInt(parts[1], 10);
 
       if (isNaN(pid)) continue;
 
       try {
-        // Get working directory using lsof
-        const { stdout: lsofOutput } = await execAsync(
-          `lsof -a -d cwd -p ${pid} 2>/dev/null | grep cwd`
+        const { stdout: psOutput } = await execAsync(
+          `ps -p ${pid} -o tty= 2>/dev/null`
         );
+        const tty = psOutput.trim();
 
-        // Parse lsof output to get the directory path
-        // Format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-        const lsofParts = lsofOutput.trim().split(/\s+/);
-        const processCwd = lsofParts[lsofParts.length - 1]; // Last column is NAME (path)
-
-        // Check if this process is in the same working directory
-        if (processCwd === workingDir) {
+        if (tty && tty !== '??' && tty !== '') {
           return {
             active: true,
             pid,
-            command: `claude (in ${workingDir})`,
+            command: `claude --resume ${sessionId}`,
           };
         }
       } catch {
-        // lsof failed for this PID, skip it
         continue;
       }
     }
 
     return { active: false };
   } catch (error) {
-    // No claude processes found or error
     return { active: false };
   }
+  */
 }
 
 /**
