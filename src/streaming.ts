@@ -14,11 +14,13 @@ export interface StreamingSession {
   appendText: (text: string) => Promise<void>;
   finish: () => Promise<void>;
   error: (message: string) => Promise<void>;
+  messageTs: string | null; // Timestamp of the streaming message (for cleanup)
 }
 
 /**
  * Start a streaming session to Slack.
  * Tries the native streaming API first, falls back to chat.update throttling.
+ * Exported for use in slack-bot.ts to get messageTs before streaming starts.
  */
 export async function startStreamingSession(
   client: WebClient,
@@ -57,6 +59,8 @@ async function startNativeStreaming(
   let accumulatedText = '';
 
   return {
+    messageTs: null, // Native streaming doesn't use a regular message
+
     async appendText(text: string) {
       accumulatedText += text;
       await (client.chat as any).appendStream({
@@ -129,6 +133,8 @@ async function startFallbackStreaming(
   }
 
   return {
+    messageTs, // Expose for cleanup on abort
+
     async appendText(text: string) {
       accumulatedText += text;
       await throttledUpdate();
@@ -173,7 +179,7 @@ export async function streamToSlack(
   client: WebClient,
   options: StreamingOptions,
   asyncIterator: AsyncIterable<{ type: string; content?: string | any[] }>
-): Promise<{ fullResponse: string; sessionId: string | null }> {
+): Promise<{ fullResponse: string; sessionId: string | null; streamingMsgTs: string | null }> {
   const session = await startStreamingSession(client, options);
 
   let fullResponse = '';
@@ -218,7 +224,7 @@ export async function streamToSlack(
     }
 
     await session.finish();
-    return { fullResponse, sessionId };
+    return { fullResponse, sessionId, streamingMsgTs: session.messageTs };
   } catch (err) {
     await session.error((err as Error).message);
     throw err;

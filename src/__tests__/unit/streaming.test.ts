@@ -30,6 +30,7 @@ describe('streaming', () => {
       expect(session.appendText).toBeDefined();
       expect(session.finish).toBeDefined();
       expect(session.error).toBeDefined();
+      expect(session.messageTs).toBeNull(); // Native streaming has no message to delete
     });
 
     it('should fall back to chat.postMessage when native fails', async () => {
@@ -47,6 +48,7 @@ describe('streaming', () => {
         text: '\u200B', // Zero-width space - invisible placeholder
       });
       expect(session.appendText).toBeDefined();
+      expect(session.messageTs).toBe('msg123'); // Fallback exposes messageTs for abort cleanup
     });
 
     it('should use native appendStream when available', async () => {
