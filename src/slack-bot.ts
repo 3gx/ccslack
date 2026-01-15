@@ -2,9 +2,9 @@ import { App } from '@slack/bolt';
 import { startClaudeQuery, ClaudeQuery } from './claude-client.js';
 import { getSession, saveSession } from './session-manager.js';
 import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
-import { streamToSlack, startStreamingSession } from './streaming.js';
 import { buildStatusBlocks } from './blocks.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
+import { markdownToSlack } from './utils.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
@@ -30,7 +30,6 @@ const busyConversations = new Set<string>();
 interface ActiveQuery {
   query: ClaudeQuery;
   statusMsgTs: string;
-  streamingMsgTs: string | null; // For cleanup on abort
 }
 const activeQueries = new Map<string, ActiveQuery>();
 
@@ -195,23 +194,15 @@ async function handleMessage(params: {
       },
     });
 
-    // Start streaming session first to get messageTs for abort cleanup
-    const streamingSession = await startStreamingSession(client, {
-      channel: channelId,
-      userId: userId ?? 'unknown',
-      threadTs,
-    });
-
-    // Track active query for abort capability (with streaming message ts)
+    // Track active query for abort capability
     if (statusMsgTs) {
       activeQueries.set(conversationKey, {
         query: claudeQuery,
         statusMsgTs,
-        streamingMsgTs: streamingSession.messageTs,
       });
     }
 
-    // Process stream manually (similar to streamToSlack but using pre-created session)
+    // Collect complete response from SDK (no streaming placeholder needed)
     let fullResponse = '';
     let newSessionId: string | null = null;
 
@@ -227,12 +218,10 @@ async function handleMessage(params: {
         const content = (msg as any).content;
         if (typeof content === 'string') {
           fullResponse += content;
-          await streamingSession.appendText(content);
         } else if (Array.isArray(content)) {
           for (const block of content) {
             if (block.type === 'text') {
               fullResponse += block.text;
-              await streamingSession.appendText(block.text);
             }
           }
         }
@@ -242,15 +231,19 @@ async function handleMessage(params: {
       if (msg.type === 'result') {
         const resultMsg = msg as any;
         if (resultMsg.result) {
-          if (resultMsg.result !== fullResponse) {
-            fullResponse = resultMsg.result;
-            await streamingSession.appendText(fullResponse);
-          }
+          fullResponse = resultMsg.result;
         }
       }
     }
 
-    await streamingSession.finish();
+    // Post complete response (only if not aborted and we have content)
+    if (!isAborted(conversationKey) && fullResponse) {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: markdownToSlack(fullResponse),
+      });
+    }
 
     // Delete status message when done (only if not aborted)
     if (statusMsgTs && !isAborted(conversationKey)) {
@@ -498,19 +491,6 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
         });
       } catch (error) {
         console.error('Error updating status to aborted:', error);
-      }
-
-      // Delete the streaming message (the blank placeholder)
-      if (active.streamingMsgTs) {
-        try {
-          await client.chat.delete({
-            channel: channelId,
-            ts: active.streamingMsgTs,
-          });
-          console.log(`Deleted streaming message: ${active.streamingMsgTs}`);
-        } catch (error) {
-          console.error('Error deleting streaming message:', error);
-        }
       }
     }
 
