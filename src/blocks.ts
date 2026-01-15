@@ -3,6 +3,8 @@
  * Centralizes construction of interactive message blocks.
  */
 
+import { PermissionMode } from './session-manager.js';
+
 // Slack Block Kit types (simplified for our use case)
 export interface Block {
   type: string;
@@ -38,6 +40,17 @@ export interface ReminderBlockParams {
 export interface StatusBlockParams {
   status: 'processing' | 'aborted' | 'error';
   messageTs?: string;
+  errorMessage?: string;
+}
+
+export interface HeaderBlockParams {
+  status: 'starting' | 'processing' | 'complete' | 'aborted' | 'error';
+  mode: PermissionMode;
+  conversationKey?: string; // For abort button
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  durationMs?: number;
   errorMessage?: string;
 }
 
@@ -322,6 +335,117 @@ export function buildStatusBlocks(params: StatusBlockParams): Block[] {
 }
 
 /**
+ * Build blocks for header message showing processing status.
+ * Shows: mode | model + Abort during processing
+ * Shows: mode | model | tokens | time when complete
+ */
+export function buildHeaderBlocks(params: HeaderBlockParams): Block[] {
+  const { status, mode, conversationKey, model, inputTokens, outputTokens, durationMs, errorMessage } = params;
+  const blocks: Block[] = [];
+
+  // SDK mode labels for display
+  const modeLabels: Record<PermissionMode, string> = {
+    plan: 'Plan',
+    default: 'Default',
+    bypassPermissions: 'Bypass',
+    acceptEdits: 'AcceptEdits',
+  };
+  const modeLabel = modeLabels[mode] || mode;
+
+  switch (status) {
+    case 'starting':
+      // Only mode known, waiting for init message
+      blocks.push({
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: `_${modeLabel}_`,
+        }],
+      });
+      if (conversationKey) {
+        blocks.push({
+          type: "actions",
+          block_id: `header_${conversationKey}`,
+          elements: [{
+            type: "button",
+            text: { type: "plain_text", text: "Abort" },
+            style: "danger",
+            action_id: `abort_query_${conversationKey}`,
+          }],
+        });
+      }
+      break;
+
+    case 'processing':
+      // Model known, show mode | model
+      blocks.push({
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: `_${modeLabel} | ${model || 'Claude'}_`,
+        }],
+      });
+      if (conversationKey) {
+        blocks.push({
+          type: "actions",
+          block_id: `header_${conversationKey}`,
+          elements: [{
+            type: "button",
+            text: { type: "plain_text", text: "Abort" },
+            style: "danger",
+            action_id: `abort_query_${conversationKey}`,
+          }],
+        });
+      }
+      break;
+
+    case 'complete':
+      // Show mode | model | tokens | time
+      const totalTokens = (inputTokens || 0) + (outputTokens || 0);
+      const tokensStr = totalTokens > 0 ? `${totalTokens.toLocaleString()} tokens` : '';
+      const durationStr = durationMs ? `${(durationMs / 1000).toFixed(1)}s` : '';
+
+      const parts = [modeLabel, model || 'Claude'];
+      if (tokensStr) parts.push(tokensStr);
+      if (durationStr) parts.push(durationStr);
+
+      blocks.push({
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: `_${parts.join(' | ')}_`,
+        }],
+      });
+      // No abort button when complete
+      break;
+
+    case 'aborted':
+      // Show mode | model | aborted (or just mode | aborted if no model yet)
+      const abortedParts = model ? [modeLabel, model, 'aborted'] : [modeLabel, 'aborted'];
+      blocks.push({
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: `_${abortedParts.join(' | ')}_`,
+        }],
+      });
+      break;
+
+    case 'error':
+      blocks.push({
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: `_Error: ${errorMessage || 'Unknown error'}_`,
+        }],
+      });
+      break;
+  }
+
+  return blocks;
+}
+
+/**
  * Build blocks for answered question display.
  */
 export function buildAnsweredBlocks(question: string, answer: string): Block[] {
@@ -347,6 +471,359 @@ export function buildApprovalResultBlocks(action: string, approved: boolean): Bl
         type: "mrkdwn",
         text: `*Approval request:* ${action}\n\n*Result:* ${approved ? "Approved" : "Denied"}`,
       },
+    },
+  ];
+}
+
+// ============================================================================
+// Phase 3: Command Response Blocks
+// ============================================================================
+
+export interface StatusDisplayParams {
+  sessionId: string | null;
+  mode: PermissionMode;
+  workingDir: string;
+  lastActiveAt: number;
+}
+
+/**
+ * Build blocks for /status command response.
+ */
+export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
+  const { sessionId, mode, workingDir, lastActiveAt } = params;
+
+  // SDK mode emojis for display
+  const modeEmoji: Record<PermissionMode, string> = {
+    plan: ':clipboard:',
+    default: ':question:',
+    bypassPermissions: ':rocket:',
+    acceptEdits: ':pencil:',
+  };
+  const lastActive = new Date(lastActiveAt).toLocaleString();
+
+  return [
+    {
+      type: "header",
+      text: { type: "plain_text", text: "Session Status" },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          `*Session ID:* \`${sessionId || 'None'}\``,
+          `*Mode:* ${modeEmoji[mode] || ''} ${mode}`,
+          `*Working Directory:* \`${workingDir}\``,
+          `*Last Active:* ${lastActive}`,
+        ].join('\n'),
+      },
+    },
+    {
+      type: "context",
+      elements: [{
+        type: "mrkdwn",
+        // NOTE: Terminal detection disabled - see README.md for details
+        text: ":warning: *Terminal detection:* _disabled (coming soon)_",
+      }],
+    },
+  ];
+}
+
+export interface TerminalCommandParams {
+  title: string;
+  description: string;
+  command: string;
+  workingDir: string;
+  sessionId: string;
+  note?: string;
+}
+
+/**
+ * Build blocks for /continue and /fork command responses.
+ */
+export function buildTerminalCommandBlocks(params: TerminalCommandParams): Block[] {
+  const { title, description, command, workingDir, sessionId, note } = params;
+
+  const blocks: Block[] = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: title },
+    },
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: description },
+    },
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: "```" + command + "```" },
+    },
+    {
+      type: "context",
+      elements: [{
+        type: "mrkdwn",
+        text: `:file_folder: Working directory: \`${workingDir}\`\n:key: Session: \`${sessionId}\``,
+      }],
+    },
+  ];
+
+  if (note) {
+    blocks.push({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `:bulb: ${note}` }],
+    });
+  }
+
+  return blocks;
+}
+
+/**
+ * Check if a message from Claude looks like a plan approval prompt.
+ * Used to detect when Claude in plan mode is asking to proceed.
+ */
+export function isPlanApprovalPrompt(message: string): boolean {
+  const lowerMessage = message.toLowerCase();
+
+  // Common phrases Claude uses when asking to proceed with a plan
+  const approvalPhrases = [
+    'would you like me to proceed',
+    'would you like to proceed',
+    'shall i proceed',
+    'ready to proceed',
+    'want me to proceed',
+    'like me to execute',
+    'shall i execute',
+    'want me to execute',
+    'would you like me to implement',
+    'shall i implement',
+    'ready to implement',
+    'would you like me to go ahead',
+    'shall i go ahead',
+    'want me to go ahead',
+    'should i proceed',
+    'should i go ahead',
+    'should i execute',
+    'should i implement',
+    'let me know if you\'d like me to proceed',
+    'let me know when you\'re ready',
+    'approve this plan',
+    'confirm you want',
+    'confirm to proceed',
+  ];
+
+  return approvalPhrases.some(phrase => lowerMessage.includes(phrase));
+}
+
+/**
+ * Parameters for plan approval blocks.
+ */
+export interface PlanApprovalBlockParams {
+  conversationKey: string;  // Used to identify the conversation for the response
+}
+
+/**
+ * Build blocks for plan approval prompt.
+ * Shown when Claude is in plan mode and asks to proceed.
+ */
+export function buildPlanApprovalBlocks(params: PlanApprovalBlockParams): Block[] {
+  const { conversationKey } = params;
+
+  return [
+    {
+      type: "divider",
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "*Ready to proceed?* Choose how to execute the plan:",
+      },
+    },
+    {
+      type: "actions",
+      block_id: `plan_approval_${conversationKey}`,
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: ":rocket: Proceed (auto-accept)" },
+          action_id: `plan_approve_auto_${conversationKey}`,
+          value: "bypassPermissions",
+          style: "primary",
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: ":question: Proceed (manual approve)" },
+          action_id: `plan_approve_manual_${conversationKey}`,
+          value: "default",
+          style: "primary",
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: ":x: Reject" },
+          action_id: `plan_reject_${conversationKey}`,
+          value: "reject",
+          style: "danger",
+        },
+      ],
+    },
+    {
+      type: "context",
+      elements: [{
+        type: "mrkdwn",
+        text: "_Auto-accept runs tools without prompting. Manual approve asks for each tool use._",
+      }],
+    },
+  ];
+}
+
+/**
+ * Build blocks for /mode command (button selection).
+ * Uses SDK permission mode names directly.
+ */
+export function buildModeSelectionBlocks(currentMode: PermissionMode): Block[] {
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Select Permission Mode*\nCurrent: \`${currentMode}\``,
+      },
+    },
+    {
+      type: "actions",
+      block_id: "mode_selection",
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: ":clipboard: plan" },
+          action_id: "mode_plan",
+          value: "plan",
+          ...(currentMode === 'plan' ? { style: "primary" } : {}),
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: ":question: default (ask)" },
+          action_id: "mode_default",
+          value: "default",
+          ...(currentMode === 'default' ? { style: "primary" } : {}),
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: ":rocket: bypassPermissions" },
+          action_id: "mode_bypassPermissions",
+          value: "bypassPermissions",
+          ...(currentMode === 'bypassPermissions' ? { style: "primary" } : {}),
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: ":pencil: acceptEdits" },
+          action_id: "mode_acceptEdits",
+          value: "acceptEdits",
+          ...(currentMode === 'acceptEdits' ? { style: "primary" } : {}),
+        },
+      ],
+    },
+    {
+      type: "context",
+      elements: [{
+        type: "mrkdwn",
+        text: "• *plan* - Read-only, writes to plan file\n• *default* - Prompts for approval\n• *bypassPermissions* - Runs without approval\n• *acceptEdits* - Accept code edits without prompting",
+      }],
+    },
+  ];
+}
+
+// ============================================================================
+// Tool Approval Blocks (for manual approval mode)
+// ============================================================================
+
+/**
+ * Parameters for tool approval blocks.
+ */
+export interface ToolApprovalBlockParams {
+  approvalId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+}
+
+/**
+ * Format tool input for display in Slack.
+ * Truncates long values to keep the message readable.
+ */
+export function formatToolInput(input: Record<string, unknown>): string {
+  const str = JSON.stringify(input, null, 2);
+  return str.length > 500 ? str.slice(0, 500) + '...' : str;
+}
+
+/**
+ * Build blocks for tool approval request.
+ * Shown when in default mode and Claude wants to use a tool.
+ */
+export function buildToolApprovalBlocks(params: ToolApprovalBlockParams): Block[] {
+  const { approvalId, toolName, toolInput } = params;
+  const inputPreview = formatToolInput(toolInput);
+
+  return [
+    { type: 'divider' },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Claude wants to use:* \`${toolName}\`\n\`\`\`${inputPreview}\`\`\``,
+      },
+    },
+    {
+      type: 'actions',
+      block_id: `tool_approval_${approvalId}`,
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Approve', emoji: true },
+          style: 'primary',
+          action_id: `tool_approve_${approvalId}`,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Deny', emoji: true },
+          style: 'danger',
+          action_id: `tool_deny_${approvalId}`,
+        },
+      ],
+    },
+  ];
+}
+
+// ============================================================================
+// Thread-to-Thread Fork Blocks
+// ============================================================================
+
+/**
+ * Parameters for fork anchor blocks.
+ */
+export interface ForkAnchorBlockParams {
+  description: string;
+}
+
+/**
+ * Build blocks for the anchor message when forking from thread to thread.
+ * This message serves as the parent for the new forked thread.
+ */
+export function buildForkAnchorBlocks(params: ForkAnchorBlockParams): Block[] {
+  const { description } = params;
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🔀 *Forked:* ${description}`,
+      },
+    },
+    {
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: '_Forked from thread_',
+      }],
     },
   ];
 }

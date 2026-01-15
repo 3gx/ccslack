@@ -1,13 +1,29 @@
 import { query, type SDKMessage } from '@anthropic-ai/claude-code';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { PermissionMode } from './session-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Permission result from canUseTool callback (must match SDK exactly)
+export type PermissionResult =
+  | { behavior: 'allow'; updatedInput: Record<string, unknown> }  // updatedInput is REQUIRED
+  | { behavior: 'deny'; message: string; interrupt?: boolean };   // message is REQUIRED
+
+// canUseTool callback signature from SDK
+export type CanUseToolCallback = (
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  options: { signal: AbortSignal }
+) => Promise<PermissionResult>;
+
 export interface StreamOptions {
   sessionId?: string;
   workingDir?: string;
+  mode?: PermissionMode;
+  forkSession?: boolean;  // Fork from sessionId instead of resuming
+  canUseTool?: CanUseToolCallback;  // For tool approval in default mode
   slackContext?: {
     channel: string;
     threadTs?: string;
@@ -28,9 +44,12 @@ export function startClaudeQuery(
   prompt: string,
   options: StreamOptions
 ): ClaudeQuery {
+  // Pass permission mode directly to SDK (we use SDK mode names)
+  const permissionMode = options.mode || 'default';
+
   const queryOptions: Record<string, unknown> = {
     outputFormat: 'stream-json',
-    permissionMode: 'bypassPermissions', // For now, auto-approve all
+    permissionMode,
     // Claude Code preset configuration
     systemPrompt: 'claude_code',
   };
@@ -40,8 +59,16 @@ export function startClaudeQuery(
   }
 
   if (options.sessionId) {
-    queryOptions.resume = options.sessionId;
-    console.log(`Resuming session: ${options.sessionId}`);
+    if (options.forkSession) {
+      // Fork from the parent session - creates a new session with shared history
+      queryOptions.resume = options.sessionId;
+      queryOptions.forkSession = true;
+      console.log(`Forking from session: ${options.sessionId}`);
+    } else {
+      // Resume existing session
+      queryOptions.resume = options.sessionId;
+      console.log(`Resuming session: ${options.sessionId}`);
+    }
   } else {
     console.log('Starting new Claude conversation');
   }
@@ -60,8 +87,21 @@ export function startClaudeQuery(
       },
     };
     // Allow the MCP tools
-    queryOptions.allowedTools = ['mcp__ask-user__ask_user', 'mcp__ask-user__approve_action'];
-    console.log('MCP ask-user server configured');
+    // In 'default' mode, canUseTool callback handles approval, so exclude approve_action
+    // to avoid double-approval prompts
+    if (permissionMode === 'default') {
+      queryOptions.allowedTools = ['mcp__ask-user__ask_user'];
+      console.log('MCP ask-user server configured (approve_action disabled - using canUseTool)');
+    } else {
+      queryOptions.allowedTools = ['mcp__ask-user__ask_user', 'mcp__ask-user__approve_action'];
+      console.log('MCP ask-user server configured');
+    }
+  }
+
+  // Add canUseTool callback for tool approval in default mode
+  if (options.canUseTool) {
+    queryOptions.canUseTool = options.canUseTool;
+    console.log('canUseTool callback configured for manual approval');
   }
 
   return query({

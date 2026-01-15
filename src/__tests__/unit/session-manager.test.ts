@@ -63,7 +63,7 @@ describe('session-manager', () => {
       const mockSession = {
         sessionId: 'sess-456',
         workingDir: '/home/user',
-        mode: 'auto' as const,
+        mode: 'bypassPermissions' as const,
         createdAt: 1000,
         lastActiveAt: 2000,
       };
@@ -89,7 +89,7 @@ describe('session-manager', () => {
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
 
       expect(writtenData.channels['C123'].sessionId).toBe('new-sess');
-      expect(writtenData.channels['C123'].mode).toBe('plan');
+      expect(writtenData.channels['C123'].mode).toBe('default');
       expect(writtenData.channels['C123'].lastActiveAt).toBeDefined();
     });
 

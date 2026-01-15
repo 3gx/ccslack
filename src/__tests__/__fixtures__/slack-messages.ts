@@ -86,6 +86,7 @@ export function createMockSlackClient() {
     chat: {
       postMessage: vi.fn().mockResolvedValue({ ts: 'msg123', channel: 'C123' }),
       update: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
       startStream: vi.fn().mockRejectedValue(new Error('Native streaming not available')),
       appendStream: vi.fn().mockResolvedValue({}),
       stopStream: vi.fn().mockResolvedValue({}),

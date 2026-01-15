@@ -1,8 +1,12 @@
 import { WebClient } from '@slack/web-api';
 import { markdownToSlack } from './utils.js';
+import { withSlackRetry } from './retry.js';
 
 // Throttle interval for fallback mode (2 seconds = 30 updates/min, well under 50/min limit)
 const UPDATE_INTERVAL_MS = 2000;
+
+// Max message length for Slack (actual limit is 40K, but 4K is better for readability)
+const SLACK_MAX_LENGTH = 4000;
 
 export interface StreamingOptions {
   channel: string;
@@ -228,5 +232,86 @@ export async function streamToSlack(
   } catch (err) {
     await session.error((err as Error).message);
     throw err;
+  }
+}
+
+// ============================================================================
+// Message Splitting for Long Responses
+// ============================================================================
+
+/**
+ * Split a long message into chunks that fit within Slack's limits.
+ * Tries to split at natural boundaries (newlines, then spaces).
+ */
+export function splitMessage(text: string, maxLength: number = SLACK_MAX_LENGTH): string[] {
+  if (text.length <= maxLength) {
+    return [text];
+  }
+
+  const parts: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLength) {
+      parts.push(remaining);
+      break;
+    }
+
+    // Find a good split point
+    let splitAt = maxLength;
+
+    // Look for newline within last 500 chars of the limit
+    const lastNewline = remaining.lastIndexOf('\n', maxLength);
+    if (lastNewline > maxLength - 500 && lastNewline > 0) {
+      splitAt = lastNewline + 1;
+    } else {
+      // Look for space within last 200 chars
+      const lastSpace = remaining.lastIndexOf(' ', maxLength);
+      if (lastSpace > maxLength - 200 && lastSpace > 0) {
+        splitAt = lastSpace + 1;
+      }
+      // Otherwise just split at maxLength (may cut mid-word)
+    }
+
+    parts.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt);
+  }
+
+  return parts;
+}
+
+/**
+ * Post a potentially long response, splitting into multiple messages if needed.
+ * Each part is posted with retry logic.
+ */
+export async function postSplitResponse(
+  client: WebClient,
+  channelId: string,
+  text: string,
+  threadTs?: string
+): Promise<void> {
+  const parts = splitMessage(text);
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const isLast = i === parts.length - 1;
+
+    // Add continuation indicator if split
+    const messageText = parts.length > 1 && !isLast
+      ? `${part}\n\n_... continued ..._`
+      : part;
+
+    await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: messageText,
+      })
+    );
+
+    // Small delay between parts to maintain order
+    if (!isLast) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
 }
