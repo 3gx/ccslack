@@ -8,9 +8,24 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { WebClient } from '@slack/web-api';
 import fs from 'fs';
+import {
+  buildQuestionBlocks,
+  buildApprovalBlocks,
+  buildAnsweredBlocks,
+  buildApprovalResultBlocks,
+  buildReminderBlocks,
+} from './blocks.js';
 
 // Answer directory for file-based communication with Slack bot
 const ANSWER_DIR = '/tmp/ccslack-answers';
+
+// Reminder configuration (in-memory only, lost on restart)
+const REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_REMINDERS = 7; // Stop after a week
+
+// Track active reminders (in-memory)
+const reminderIntervals = new Map<string, NodeJS.Timeout>();
+const reminderCounts = new Map<string, number>();
 
 interface SlackContext {
   channel: string;
@@ -59,6 +74,14 @@ class AskUserMCPServer {
                   items: { type: "string" },
                   description: "Optional list of choices for the user to select from",
                 },
+                multiSelect: {
+                  type: "boolean",
+                  description: "Allow multiple options to be selected (default: false). Auto-enabled for >5 options.",
+                },
+                codeContext: {
+                  type: "string",
+                  description: "Optional code snippet to display with the question",
+                },
               },
               required: ["question"],
             },
@@ -91,6 +114,8 @@ class AskUserMCPServer {
         return await this.handleAskUser(request.params.arguments as {
           question: string;
           options?: string[];
+          multiSelect?: boolean;
+          codeContext?: string;
         });
       }
       if (request.params.name === "approve_action") {
@@ -103,8 +128,13 @@ class AskUserMCPServer {
     });
   }
 
-  private async handleAskUser(params: { question: string; options?: string[] }) {
-    const { question, options } = params;
+  private async handleAskUser(params: {
+    question: string;
+    options?: string[];
+    multiSelect?: boolean;
+    codeContext?: string;
+  }) {
+    const { question, options, multiSelect, codeContext } = params;
 
     // Get Slack context from environment
     const slackContextStr = process.env.SLACK_CONTEXT;
@@ -115,85 +145,19 @@ class AskUserMCPServer {
     }
 
     const slackContext: SlackContext = JSON.parse(slackContextStr);
-    const { channel, threadTs, user } = slackContext;
+    const { channel, threadTs } = slackContext;
 
     // Generate unique question ID
     const questionId = `q_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // Build Slack blocks
-    const blocks: any[] = [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*Claude needs your input:*\n${question}`,
-        },
-      },
-    ];
-
-    // Add buttons if options provided
-    if (options && options.length > 0) {
-      // Option buttons
-      blocks.push({
-        type: "actions",
-        block_id: `question_${questionId}`,
-        elements: options.map((opt, i) => ({
-          type: "button",
-          text: { type: "plain_text", text: opt },
-          action_id: `answer_${questionId}_${i}`,
-          value: opt,
-        })),
-      });
-
-      // Divider
-      blocks.push({ type: "divider" });
-
-      // "Type something" and "Abort" buttons
-      blocks.push({
-        type: "actions",
-        block_id: `question_extra_${questionId}`,
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Type something..." },
-            action_id: `freetext_${questionId}`,
-            value: "freetext",
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Abort" },
-            style: "danger",
-            action_id: `abort_${questionId}`,
-            value: "abort",
-          },
-        ],
-      });
-    } else {
-      // No options - show text input hint and abort
-      blocks.push({
-        type: "context",
-        elements: [
-          {
-            type: "mrkdwn",
-            text: "_Reply to this message with your answer_",
-          },
-        ],
-      });
-
-      blocks.push({
-        type: "actions",
-        block_id: `question_extra_${questionId}`,
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Abort" },
-            style: "danger",
-            action_id: `abort_${questionId}`,
-            value: "abort",
-          },
-        ],
-      });
-    }
+    // Build Slack blocks using centralized builder
+    const blocks = buildQuestionBlocks({
+      question,
+      options,
+      questionId,
+      multiSelect,
+      codeContext,
+    });
 
     try {
       // Post question to Slack
@@ -206,6 +170,9 @@ class AskUserMCPServer {
 
       console.error(`[MCP] Posted question ${questionId} to Slack`);
 
+      // Start reminder for unanswered question (in-memory only)
+      this.startReminder(questionId, question, channel, threadTs);
+
       // Wait for user response (no timeout - can wait indefinitely)
       const answer = await this.waitForAnswer(questionId);
 
@@ -214,15 +181,7 @@ class AskUserMCPServer {
         await this.slack.chat.update({
           channel,
           ts: result.ts,
-          blocks: [
-            {
-              type: "section",
-              text: {
-                type: "mrkdwn",
-                text: `*Claude asked:* ${question}\n\n*You answered:* ${answer}`,
-              },
-            },
-          ],
+          blocks: buildAnsweredBlocks(question, answer),
           text: `Answered: ${answer}`,
         });
       }
@@ -255,49 +214,11 @@ class AskUserMCPServer {
     // Generate unique approval ID
     const approvalId = `a_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // Build Slack blocks
-    const blocks: any[] = [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*Claude needs your approval:*\n${action}`,
-        },
-      },
-    ];
-
-    if (details) {
-      blocks.push({
-        type: "context",
-        elements: [
-          {
-            type: "mrkdwn",
-            text: details,
-          },
-        ],
-      });
-    }
-
-    // Add Approve/Deny buttons
-    blocks.push({
-      type: "actions",
-      block_id: `approval_${approvalId}`,
-      elements: [
-        {
-          type: "button",
-          text: { type: "plain_text", text: "Approve" },
-          style: "primary",
-          action_id: `answer_${approvalId}_0`,
-          value: "approved",
-        },
-        {
-          type: "button",
-          text: { type: "plain_text", text: "Deny" },
-          style: "danger",
-          action_id: `answer_${approvalId}_1`,
-          value: "denied",
-        },
-      ],
+    // Build Slack blocks using centralized builder
+    const blocks = buildApprovalBlocks({
+      action,
+      details,
+      questionId: approvalId,
     });
 
     try {
@@ -320,15 +241,7 @@ class AskUserMCPServer {
         await this.slack.chat.update({
           channel,
           ts: result.ts,
-          blocks: [
-            {
-              type: "section",
-              text: {
-                type: "mrkdwn",
-                text: `*Approval request:* ${action}\n\n*Result:* ${approved ? "✅ Approved" : "❌ Denied"}`,
-              },
-            },
-          ],
+          blocks: buildApprovalResultBlocks(action, approved),
           text: `${approved ? "Approved" : "Denied"}: ${action}`,
         });
       }
@@ -361,6 +274,9 @@ class AskUserMCPServer {
           fs.unlinkSync(answerFile);
           console.error(`[MCP] Got answer for ${questionId}: ${answer}`);
 
+          // Clear reminder when answer received
+          this.clearReminder(questionId);
+
           return answer;
         } catch (error) {
           console.error(`[MCP] Error reading answer file:`, error);
@@ -370,6 +286,80 @@ class AskUserMCPServer {
 
       // Wait before next poll
       await new Promise(resolve => setTimeout(resolve, pollInterval));
+    }
+  }
+
+  /**
+   * Start a reminder for an unanswered question.
+   * Sends reminders every 24 hours, up to MAX_REMINDERS times.
+   * In-memory only - lost if bot restarts.
+   */
+  private startReminder(
+    questionId: string,
+    question: string,
+    channel: string,
+    threadTs?: string
+  ) {
+    const interval = setInterval(async () => {
+      const count = reminderCounts.get(questionId) || 0;
+
+      if (count >= MAX_REMINDERS) {
+        // Auto-expire after max reminders
+        console.error(`[MCP] Max reminders reached for ${questionId}, auto-aborting`);
+        this.clearReminder(questionId);
+
+        // Write abort to trigger MCP to stop waiting
+        const answerFile = `${ANSWER_DIR}/${questionId}.json`;
+        try {
+          fs.writeFileSync(answerFile, JSON.stringify({
+            answer: '__ABORTED__',
+            timestamp: Date.now(),
+            reason: 'max_reminders_reached',
+          }));
+        } catch (error) {
+          console.error(`[MCP] Error writing abort file:`, error);
+        }
+        return;
+      }
+
+      // Calculate wait time for display
+      const waitDays = count + 1;
+      const waitTime = waitDays === 1 ? '1 day' : `${waitDays} days`;
+
+      console.error(`[MCP] Sending reminder ${count + 1} for ${questionId}`);
+
+      try {
+        await this.slack.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          blocks: buildReminderBlocks({
+            originalQuestion: question,
+            questionId,
+            waitTime,
+          }),
+          text: `Reminder: Still waiting for your answer to "${question}"`,
+        });
+      } catch (error) {
+        console.error(`[MCP] Error sending reminder:`, error);
+      }
+
+      reminderCounts.set(questionId, count + 1);
+    }, REMINDER_INTERVAL_MS);
+
+    reminderIntervals.set(questionId, interval);
+    console.error(`[MCP] Started reminder for ${questionId}`);
+  }
+
+  /**
+   * Clear reminder when question is answered or aborted.
+   */
+  private clearReminder(questionId: string) {
+    const interval = reminderIntervals.get(questionId);
+    if (interval) {
+      clearInterval(interval);
+      reminderIntervals.delete(questionId);
+      reminderCounts.delete(questionId);
+      console.error(`[MCP] Cleared reminder for ${questionId}`);
     }
   }
 

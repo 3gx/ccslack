@@ -1,3 +1,5 @@
+import { vi } from 'vitest';
+
 /**
  * Test fixtures for Slack message events and interactions
  */

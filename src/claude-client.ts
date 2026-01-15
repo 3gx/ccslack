@@ -15,11 +15,19 @@ export interface StreamOptions {
   };
 }
 
-export async function* streamClaude(
+// Query type with interrupt method (from SDK)
+export interface ClaudeQuery extends AsyncGenerator<SDKMessage, void, unknown> {
+  interrupt(): Promise<void>;
+}
+
+/**
+ * Start a Claude query and return the Query object.
+ * The Query object can be iterated for messages and has an interrupt() method.
+ */
+export function startClaudeQuery(
   prompt: string,
   options: StreamOptions
-): AsyncGenerator<SDKMessage, void, unknown> {
-
+): ClaudeQuery {
   const queryOptions: Record<string, unknown> = {
     outputFormat: 'stream-json',
     permissionMode: 'bypassPermissions', // For now, auto-approve all
@@ -56,10 +64,20 @@ export async function* streamClaude(
     console.log('MCP ask-user server configured');
   }
 
-  for await (const message of query({
+  return query({
     prompt,
     options: queryOptions,
-  })) {
+  }) as ClaudeQuery;
+}
+
+/**
+ * @deprecated Use startClaudeQuery instead for abort support
+ */
+export async function* streamClaude(
+  prompt: string,
+  options: StreamOptions
+): AsyncGenerator<SDKMessage, void, unknown> {
+  for await (const message of startClaudeQuery(prompt, options)) {
     yield message;
   }
 }

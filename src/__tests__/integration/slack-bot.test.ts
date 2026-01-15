@@ -206,6 +206,126 @@ describe('slack-bot handlers', () => {
     });
   });
 
+  describe('multiselect handlers', () => {
+    it('should store pending selections on multiselect change', async () => {
+      const handler = registeredHandlers['action_^multiselect_(?!submit_)(.+)$'];
+      expect(handler).toBeDefined();
+
+      const ack = vi.fn();
+
+      await handler({
+        action: {
+          action_id: 'multiselect_q_multi_123',
+          selected_options: [
+            { value: 'Option A' },
+            { value: 'Option C' },
+          ],
+        },
+        ack,
+        body: {},
+        client: createMockSlackClient(),
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Selection should be stored internally (tested via submit)
+    });
+
+    it('should submit multiselect answer to file', async () => {
+      // First, simulate selection change
+      const selectHandler = registeredHandlers['action_^multiselect_(?!submit_)(.+)$'];
+      const submitHandler = registeredHandlers['action_^multiselect_submit_(.+)$'];
+      expect(selectHandler).toBeDefined();
+      expect(submitHandler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Simulate selection
+      await selectHandler({
+        action: {
+          action_id: 'multiselect_q_submit_test',
+          selected_options: [
+            { value: 'Python' },
+            { value: 'Go' },
+          ],
+        },
+        ack,
+        body: {},
+        client: mockClient,
+      });
+
+      // Simulate submit
+      await submitHandler({
+        action: { action_id: 'multiselect_submit_q_submit_test' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalledTimes(2);
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/tmp/ccslack-answers/q_submit_test.json',
+        expect.stringContaining('Python, Go')
+      );
+      expect(mockClient.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'You selected: *Python, Go*',
+        })
+      );
+    });
+
+    it('should handle empty multiselect submission', async () => {
+      const submitHandler = registeredHandlers['action_^multiselect_submit_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Submit without prior selection
+      await submitHandler({
+        action: { action_id: 'multiselect_submit_q_empty' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(mockClient.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'You selected: *(none)*',
+        })
+      );
+    });
+  });
+
+  describe('abort query handler', () => {
+    it('should register abort_query handler', async () => {
+      const handler = registeredHandlers['action_^abort_query_(.+)$'];
+      expect(handler).toBeDefined();
+    });
+
+    it('should acknowledge and log abort request', async () => {
+      const handler = registeredHandlers['action_^abort_query_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'abort_query_C123_thread456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+    });
+  });
+
   describe('concurrent session handlers', () => {
     it('should cancel and remove pending message on cancel click', async () => {
       const handler = registeredHandlers['action_^concurrent_cancel_(.+)$'];

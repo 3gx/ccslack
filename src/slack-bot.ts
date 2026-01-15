@@ -1,8 +1,9 @@
 import { App } from '@slack/bolt';
-import { streamClaude } from './claude-client.js';
+import { startClaudeQuery, ClaudeQuery } from './claude-client.js';
 import { getSession, saveSession } from './session-manager.js';
 import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
 import { streamToSlack } from './streaming.js';
+import { buildStatusBlocks } from './blocks.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
@@ -17,6 +18,24 @@ interface PendingMessage {
   threadTs?: string;
 }
 const pendingMessages = new Map<string, PendingMessage>();
+
+// Store pending multi-select selections (before user clicks Submit)
+const pendingSelections = new Map<string, string[]>();
+
+// Track busy conversations (processing a request)
+const busyConversations = new Set<string>();
+
+// Track active queries for abort capability
+interface ActiveQuery {
+  query: ClaudeQuery;
+  statusMsgTs: string;
+}
+const activeQueries = new Map<string, ActiveQuery>();
+
+// Helper to get unique conversation key (channel + thread)
+function getConversationKey(channelId: string, threadTs?: string): string {
+  return threadTs ? `${channelId}_${threadTs}` : channelId;
+}
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -80,6 +99,17 @@ async function handleMessage(params: {
   skipConcurrentCheck?: boolean;
 }) {
   const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck } = params;
+  const conversationKey = getConversationKey(channelId, threadTs);
+
+  // Check if conversation is busy
+  if (busyConversations.has(conversationKey)) {
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: "I'm busy with the current request. Please wait for it to complete, or click Abort.",
+    });
+    return;
+  }
 
   // Get or create session
   let session = getSession(channelId);
@@ -120,6 +150,9 @@ async function handleMessage(params: {
     }
   }
 
+  // Mark conversation as busy
+  busyConversations.add(conversationKey);
+
   // Add eyes reaction to show we're processing
   if (originalTs) {
     try {
@@ -133,9 +166,24 @@ async function handleMessage(params: {
     }
   }
 
+  // Post status message with abort button
+  let statusMsgTs: string | undefined;
+  try {
+    const statusResult = await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      blocks: buildStatusBlocks({ status: 'processing', messageTs: conversationKey }),
+      text: 'Processing...',
+    });
+    statusMsgTs = statusResult.ts;
+  } catch (error) {
+    console.error('Error posting status message:', error);
+  }
+
   // Stream Claude response to Slack with real-time updates
   try {
-    const claudeStream = streamClaude(userText!, {
+    // Start Claude query (returns Query object with interrupt() method)
+    const claudeQuery = startClaudeQuery(userText!, {
       sessionId: session.sessionId ?? undefined,
       workingDir: session.workingDir,
       slackContext: {
@@ -145,6 +193,14 @@ async function handleMessage(params: {
       },
     });
 
+    // Track active query for abort capability
+    if (statusMsgTs) {
+      activeQueries.set(conversationKey, {
+        query: claudeQuery,
+        statusMsgTs,
+      });
+    }
+
     // Use streaming module for real-time Slack updates
     const { fullResponse, sessionId: newSessionId } = await streamToSlack(
       client,
@@ -153,8 +209,22 @@ async function handleMessage(params: {
         userId: userId ?? 'unknown',
         threadTs,
       },
-      claudeStream
+      claudeQuery
     );
+
+    // Update status to "Done"
+    if (statusMsgTs) {
+      try {
+        await client.chat.update({
+          channel: channelId,
+          ts: statusMsgTs,
+          blocks: buildStatusBlocks({ status: 'done' }),
+          text: 'Done',
+        });
+      } catch (error) {
+        console.error('Error updating status to done:', error);
+      }
+    }
 
     // Remove eyes reaction
     if (originalTs) {
@@ -177,6 +247,20 @@ async function handleMessage(params: {
   } catch (error: any) {
     console.error('Error streaming Claude response:', error);
 
+    // Update status to error
+    if (statusMsgTs) {
+      try {
+        await client.chat.update({
+          channel: channelId,
+          ts: statusMsgTs,
+          blocks: buildStatusBlocks({ status: 'error', errorMessage: error.message }),
+          text: `Error: ${error.message}`,
+        });
+      } catch (e) {
+        console.error('Error updating status to error:', e);
+      }
+    }
+
     // Remove eyes reaction on error
     if (originalTs) {
       try {
@@ -195,6 +279,10 @@ async function handleMessage(params: {
       thread_ts: threadTs,
       text: `Error: ${error.message}`,
     });
+  } finally {
+    // Always clean up busy state and active queries
+    busyConversations.delete(conversationKey);
+    activeQueries.delete(conversationKey);
   }
 }
 
@@ -255,6 +343,9 @@ app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
     console.error('Error writing abort file:', error);
   }
 
+  // Clear any pending multiselect for this question
+  pendingSelections.delete(questionId);
+
   // Update message to show aborted
   const bodyWithChannel = body as any;
   if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
@@ -268,6 +359,105 @@ app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
     } catch (error) {
       console.error('Error updating message:', error);
     }
+  }
+});
+
+// Handle multi-select selection changes (stores selection, doesn't submit yet)
+app.action(/^multiselect_(?!submit_)(.+)$/, async ({ action, ack }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^multiselect_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  // Get selected options from the action
+  const selectedOptions = 'selected_options' in action ? action.selected_options : [];
+  const selections = selectedOptions?.map((opt: any) => opt.value) || [];
+
+  console.log(`Multi-select changed for ${questionId}: ${selections.join(', ')}`);
+
+  // Store selections (will be submitted when user clicks Submit)
+  pendingSelections.set(questionId, selections);
+});
+
+// Handle multi-select submit button
+app.action(/^multiselect_submit_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^multiselect_submit_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  // Get pending selections
+  const selections = pendingSelections.get(questionId) || [];
+  const answer = selections.join(', ');
+
+  console.log(`Multi-select submitted for ${questionId}: ${answer}`);
+
+  // Write answer to file
+  const answerFile = `${ANSWER_DIR}/${questionId}.json`;
+  try {
+    fs.writeFileSync(answerFile, JSON.stringify({ answer, timestamp: Date.now() }));
+    console.log(`Wrote answer file: ${answerFile}`);
+  } catch (error) {
+    console.error('Error writing answer file:', error);
+  }
+
+  // Clear pending selections
+  pendingSelections.delete(questionId);
+
+  // Update message to show selection
+  const bodyWithChannel = body as any;
+  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
+    try {
+      await client.chat.update({
+        channel: bodyWithChannel.channel.id,
+        ts: bodyWithChannel.message.ts,
+        text: `You selected: *${answer || '(none)'}*`,
+        blocks: [],
+      });
+    } catch (error) {
+      console.error('Error updating message:', error);
+    }
+  }
+});
+
+// Handle abort query button (abort during processing)
+app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^abort_query_(.+)$/);
+  const conversationKey = match ? match[1] : '';
+
+  console.log(`Abort query clicked for conversation: ${conversationKey}`);
+
+  const active = activeQueries.get(conversationKey);
+  if (active) {
+    try {
+      // Call interrupt() on the query - same as ESC in CLI
+      await active.query.interrupt();
+      console.log(`Interrupted query for: ${conversationKey}`);
+
+      // Update status message to "Aborted"
+      const bodyWithChannel = body as any;
+      if (bodyWithChannel.channel?.id) {
+        await client.chat.update({
+          channel: bodyWithChannel.channel.id,
+          ts: active.statusMsgTs,
+          blocks: buildStatusBlocks({ status: 'aborted' }),
+          text: 'Aborted',
+        });
+      }
+    } catch (error) {
+      console.error('Error interrupting query:', error);
+    }
+
+    // Clean up
+    activeQueries.delete(conversationKey);
+    busyConversations.delete(conversationKey);
+  } else {
+    console.log(`No active query found for: ${conversationKey}`);
   }
 });
 
