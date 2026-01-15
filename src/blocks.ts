@@ -36,7 +36,7 @@ export interface ReminderBlockParams {
 }
 
 export interface StatusBlockParams {
-  status: 'processing' | 'done' | 'aborted' | 'error';
+  status: 'processing' | 'aborted' | 'error';
   messageTs?: string;
   errorMessage?: string;
 }
@@ -295,16 +295,6 @@ export function buildStatusBlocks(params: StatusBlockParams): Block[] {
           ],
         });
       }
-      break;
-
-    case 'done':
-      blocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: "*Done*",
-        },
-      });
       break;
 
     case 'aborted':

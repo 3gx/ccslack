@@ -213,17 +213,15 @@ async function handleMessage(params: {
       claudeQuery
     );
 
-    // Update status to "Done" (only if not aborted)
+    // Delete status message when done (only if not aborted)
     if (statusMsgTs && !isAborted(conversationKey)) {
       try {
-        await client.chat.update({
+        await client.chat.delete({
           channel: channelId,
           ts: statusMsgTs,
-          blocks: buildStatusBlocks({ status: 'done' }),
-          text: 'Done',
         });
       } catch (error) {
-        console.error('Error updating status to done:', error);
+        console.error('Error deleting status message:', error);
       }
     }
 

@@ -44,7 +44,7 @@ describe('streaming', () => {
       expect(mockClient.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C123',
         thread_ts: '12345.67890',
-        text: '...',
+        text: '\u200B', // Zero-width space - invisible placeholder
       });
       expect(session.appendText).toBeDefined();
     });

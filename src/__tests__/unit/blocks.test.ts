@@ -151,15 +151,6 @@ describe('blocks', () => {
       expect(blocks[1].elements?.[0].action_id).toBe('abort_query_msg_123');
     });
 
-    it('should build done status', () => {
-      const blocks = buildStatusBlocks({
-        status: 'done',
-      });
-
-      expect(blocks).toHaveLength(1);
-      expect(blocks[0].text?.text).toContain('Done');
-    });
-
     it('should build aborted status', () => {
       const blocks = buildStatusBlocks({
         status: 'aborted',

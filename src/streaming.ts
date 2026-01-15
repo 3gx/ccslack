@@ -91,11 +91,11 @@ async function startFallbackStreaming(
   channel: string,
   threadTs?: string
 ): Promise<StreamingSession> {
-  // Post initial message
+  // Post initial message (use invisible placeholder - will be replaced with content)
   const result = await client.chat.postMessage({
     channel,
     thread_ts: threadTs,
-    text: '...',
+    text: '\u200B', // Zero-width space - invisible placeholder
   });
 
   const messageTs = result.ts!;

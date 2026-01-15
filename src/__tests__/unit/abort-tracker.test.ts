@@ -55,26 +55,26 @@ describe('abort-tracker', () => {
   });
 
   describe('race condition prevention', () => {
-    it('should prevent Done overwriting Aborted when markAborted is called first', () => {
+    it('should prevent status deletion when aborted', () => {
       const conversationKey = 'C123_thread456';
 
       // Simulate abort button click - markAborted is called FIRST (synchronous)
       markAborted(conversationKey);
 
-      // Simulate main flow checking if it should update to "Done"
+      // Simulate main flow checking if it should delete status message
       // This should return false because we already marked as aborted
-      const shouldUpdateToDone = !isAborted(conversationKey);
+      const shouldDeleteStatus = !isAborted(conversationKey);
 
-      expect(shouldUpdateToDone).toBe(false);
+      expect(shouldDeleteStatus).toBe(false);
     });
 
-    it('should allow Done update when not aborted', () => {
+    it('should allow status deletion when not aborted', () => {
       const conversationKey = 'C123_thread456';
 
       // Main flow completes normally, checks if aborted
-      const shouldUpdateToDone = !isAborted(conversationKey);
+      const shouldDeleteStatus = !isAborted(conversationKey);
 
-      expect(shouldUpdateToDone).toBe(true);
+      expect(shouldDeleteStatus).toBe(true);
     });
 
     it('should allow new requests after cleanup', () => {
@@ -89,8 +89,8 @@ describe('abort-tracker', () => {
       expect(isAborted(conversationKey)).toBe(false);
 
       // New request should work normally
-      const shouldUpdateToDone = !isAborted(conversationKey);
-      expect(shouldUpdateToDone).toBe(true);
+      const shouldDeleteStatus = !isAborted(conversationKey);
+      expect(shouldDeleteStatus).toBe(true);
     });
   });
 });
