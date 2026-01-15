@@ -1068,6 +1068,221 @@ describe('slack-bot handlers', () => {
     });
   });
 
+  describe('auto-fork (Reply in thread)', () => {
+    it('should link to last main conversation message in fork notification', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      const threadTs = '1000000000.000000';  // Message user clicked Reply on (10:00 AM)
+      const lastMainMessageTs = '1000000600.000000';  // Last message in main (10:10 AM)
+
+      // Mock main session
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+      });
+
+      // Mock thread session - new fork (isNewFork: true)
+      vi.mocked(getOrCreateThreadSession).mockReturnValue({
+        session: {
+          sessionId: null,
+          forkedFrom: 'main-session',
+          workingDir: '/test/dir',
+          mode: 'plan',
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+        },
+        isNewFork: true,  // This is a new fork
+      });
+
+      // Mock conversations.history to return messages after threadTs
+      mockClient.conversations.history.mockResolvedValue({
+        ok: true,
+        messages: [
+          { ts: lastMainMessageTs, text: 'Latest message in main', thread_ts: undefined },  // Last main message
+          { ts: '1000000300.000000', text: 'Middle message', thread_ts: undefined },
+          { ts: threadTs, text: 'Original message', thread_ts: undefined },  // Thread parent
+        ],
+      });
+
+      // Mock SDK
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'forked-session', model: 'claude-opus' };
+          yield { type: 'result', result: 'Response' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          text: '<@BOT123> help me',
+          channel: 'C123',
+          ts: '1111111111.111111',
+          thread_ts: threadTs,  // This is a thread message
+        },
+        client: mockClient,
+      });
+
+      // Should call conversations.history to get last message
+      expect(mockClient.conversations.history).toHaveBeenCalledWith({
+        channel: 'C123',
+        limit: 100,
+      });
+
+      // Find the fork notification message
+      const forkNotificationCall = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].text?.includes('Forked with conversation state')
+      );
+
+      expect(forkNotificationCall).toBeDefined();
+
+      // Should include link to LAST main message (not thread parent)
+      const expectedLink = `https://slack.com/archives/C123/p${lastMainMessageTs.replace('.', '')}`;
+      expect(forkNotificationCall[0].text).toContain(expectedLink);
+      expect(forkNotificationCall[0].text).toContain('this message');
+    });
+
+    it('should fallback to thread parent if no messages after thread creation', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      const threadTs = '1000000000.000000';
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+      });
+
+      vi.mocked(getOrCreateThreadSession).mockReturnValue({
+        session: {
+          sessionId: null,
+          forkedFrom: 'main-session',
+          workingDir: '/test/dir',
+          mode: 'plan',
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+        },
+        isNewFork: true,
+      });
+
+      // Mock conversations.history - NO messages after threadTs
+      mockClient.conversations.history.mockResolvedValue({
+        ok: true,
+        messages: [
+          { ts: threadTs, text: 'Thread parent', thread_ts: undefined },
+          { ts: '0999999999.999999', text: 'Earlier message', thread_ts: undefined },
+        ],
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'forked-session', model: 'claude-opus' };
+          yield { type: 'result', result: 'Response' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          text: '<@BOT123> help',
+          channel: 'C123',
+          ts: '1111111111.111111',
+          thread_ts: threadTs,
+        },
+        client: mockClient,
+      });
+
+      // Should fallback to threadTs itself
+      const forkNotificationCall = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].text?.includes('Forked with conversation state')
+      );
+
+      expect(forkNotificationCall).toBeDefined();
+      const expectedLink = `https://slack.com/archives/C123/p${threadTs.replace('.', '')}`;
+      expect(forkNotificationCall[0].text).toContain(expectedLink);
+    });
+
+    it('should skip thread messages when finding last main message', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      const threadTs = '1000000000.000000';
+      const lastMainMessageTs = '1000000500.000000';
+      const threadMessageTs = '1000000600.000000';  // This is IN a thread, should be skipped
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+      });
+
+      vi.mocked(getOrCreateThreadSession).mockReturnValue({
+        session: {
+          sessionId: null,
+          forkedFrom: 'main-session',
+          workingDir: '/test/dir',
+          mode: 'plan',
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+        },
+        isNewFork: true,
+      });
+
+      // Messages include one that's part of a thread (should be skipped)
+      mockClient.conversations.history.mockResolvedValue({
+        ok: true,
+        messages: [
+          { ts: threadMessageTs, text: 'Thread reply', thread_ts: '1000000400.000000' },  // Part of thread - SKIP
+          { ts: lastMainMessageTs, text: 'Last main message', thread_ts: undefined },  // Last main - USE THIS
+          { ts: threadTs, text: 'Thread parent', thread_ts: undefined },
+        ],
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'forked-session', model: 'claude-opus' };
+          yield { type: 'result', result: 'Response' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          text: '<@BOT123> help',
+          channel: 'C123',
+          ts: '1111111111.111111',
+          thread_ts: threadTs,
+        },
+        client: mockClient,
+      });
+
+      // Should link to lastMainMessageTs, NOT threadMessageTs
+      const forkNotificationCall = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].text?.includes('Forked with conversation state')
+      );
+
+      expect(forkNotificationCall).toBeDefined();
+      const expectedLink = `https://slack.com/archives/C123/p${lastMainMessageTs.replace('.', '')}`;
+      expect(forkNotificationCall[0].text).toContain(expectedLink);
+
+      // Should NOT link to the thread message
+      const wrongLink = `https://slack.com/archives/C123/p${threadMessageTs.replace('.', '')}`;
+      expect(forkNotificationCall[0].text).not.toContain(wrongLink);
+    });
+  });
+
   describe('thread-to-thread forking (/fork-thread)', () => {
     it('should include link to fork command message in new thread message', async () => {
       const handler = registeredHandlers['event_app_mention'];

@@ -91,6 +91,9 @@ export function createMockSlackClient() {
       appendStream: vi.fn().mockResolvedValue({}),
       stopStream: vi.fn().mockResolvedValue({}),
     },
+    conversations: {
+      history: vi.fn().mockResolvedValue({ ok: true, messages: [] }),
+    },
     views: {
       open: vi.fn().mockResolvedValue({}),
     },

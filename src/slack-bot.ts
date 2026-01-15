@@ -73,6 +73,41 @@ function getConversationKey(channelId: string, threadTs?: string): string {
   return threadTs ? `${channelId}_${threadTs}` : channelId;
 }
 
+// Get the last message in main conversation (for fork point clarity)
+async function getLastMainConversationMessage(
+  client: any,
+  channelId: string,
+  threadTs: string
+): Promise<string | null> {
+  try {
+    const history = await withSlackRetry(() =>
+      client.conversations.history({
+        channel: channelId,
+        limit: 100,  // Fetch recent messages
+      })
+    ) as { messages?: Array<{ ts: string; thread_ts?: string }> };
+
+    if (!history.messages) {
+      return null;
+    }
+
+    // Find last message in main conversation (not in a thread, after threadTs)
+    for (const msg of history.messages) {
+      // Skip messages that are part of threads (have thread_ts)
+      // Only include messages after the thread parent (ts > threadTs)
+      if (msg.ts > threadTs && !msg.thread_ts) {
+        return msg.ts;  // This is the last main message after fork point
+      }
+    }
+
+    // If no messages found after threadTs in main, return threadTs itself
+    return threadTs;
+  } catch (error) {
+    console.error('Error fetching last main conversation message:', error);
+    return threadTs;  // Fallback to thread parent message
+  }
+}
+
 // Handle /fork-thread command - creates new thread from existing thread session
 async function handleForkThread(params: {
   channelId: string;
@@ -349,12 +384,22 @@ async function handleMessage(params: {
     forkedFromSessionId = threadResult.session.forkedFrom;
 
     if (isNewFork) {
-      // Notify user about fork
+      // Get the last message in main conversation to clarify fork point
+      const lastMainMessageTs = await getLastMainConversationMessage(client, channelId, threadTs);
+
+      // Build link to the actual fork point (last message in main)
+      let forkMessage = "🔀 _Forking session from main conversation..._";
+      if (lastMainMessageTs) {
+        const forkPointLink = `https://slack.com/archives/${channelId}/p${lastMainMessageTs.replace('.', '')}`;
+        forkMessage = `🔀 _Forked with conversation state through: <${forkPointLink}|this message>_`;
+      }
+
+      // Notify user about fork with link to actual fork point
       await withSlackRetry(() =>
         client.chat.postMessage({
           channel: channelId,
           thread_ts: threadTs,
-          text: "🔀 _Forking session from main conversation..._",
+          text: forkMessage,
         })
       );
     }
