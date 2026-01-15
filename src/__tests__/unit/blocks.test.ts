@@ -121,17 +121,17 @@ describe('blocks', () => {
   });
 
   describe('buildReminderBlocks', () => {
-    it('should build reminder block', () => {
+    it('should build reminder block with expiry time', () => {
       const blocks = buildReminderBlocks({
         originalQuestion: 'What is your preference?',
         questionId: 'q_reminder',
-        waitTime: '24 hours',
+        expiresIn: '6 days 20 hours',
       });
 
       expect(blocks).toHaveLength(2);
       expect(blocks[0].type).toBe('section');
       expect(blocks[0].text?.text).toContain('Reminder');
-      expect(blocks[0].text?.text).toContain('24 hours');
+      expect(blocks[0].text?.text).toContain('Expires in 6 days 20 hours');
       expect(blocks[0].text?.text).toContain('What is your preference?');
       expect(blocks[1].type).toBe('actions');
       expect(blocks[1].elements?.[0].action_id).toBe('abort_q_reminder');

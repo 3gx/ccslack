@@ -4,6 +4,7 @@ import { getSession, saveSession } from './session-manager.js';
 import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
 import { streamToSlack } from './streaming.js';
 import { buildStatusBlocks } from './blocks.js';
+import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
@@ -212,8 +213,8 @@ async function handleMessage(params: {
       claudeQuery
     );
 
-    // Update status to "Done"
-    if (statusMsgTs) {
+    // Update status to "Done" (only if not aborted)
+    if (statusMsgTs && !isAborted(conversationKey)) {
       try {
         await client.chat.update({
           channel: channelId,
@@ -247,8 +248,8 @@ async function handleMessage(params: {
   } catch (error: any) {
     console.error('Error streaming Claude response:', error);
 
-    // Update status to error
-    if (statusMsgTs) {
+    // Update status to error (only if not aborted)
+    if (statusMsgTs && !isAborted(conversationKey)) {
       try {
         await client.chat.update({
           channel: channelId,
@@ -283,6 +284,7 @@ async function handleMessage(params: {
     // Always clean up busy state and active queries
     busyConversations.delete(conversationKey);
     activeQueries.delete(conversationKey);
+    clearAborted(conversationKey);
   }
 }
 
@@ -434,26 +436,33 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
 
   const active = activeQueries.get(conversationKey);
   if (active) {
+    // Mark as aborted FIRST to prevent race condition with "Done" update
+    markAborted(conversationKey);
+
     try {
       // Call interrupt() on the query - same as ESC in CLI
       await active.query.interrupt();
       console.log(`Interrupted query for: ${conversationKey}`);
+    } catch (error) {
+      console.error('Error interrupting query:', error);
+    }
 
-      // Update status message to "Aborted"
-      const bodyWithChannel = body as any;
-      if (bodyWithChannel.channel?.id) {
+    // Update status message to "Aborted"
+    const bodyWithChannel = body as any;
+    if (bodyWithChannel.channel?.id) {
+      try {
         await client.chat.update({
           channel: bodyWithChannel.channel.id,
           ts: active.statusMsgTs,
           blocks: buildStatusBlocks({ status: 'aborted' }),
           text: 'Aborted',
         });
+      } catch (error) {
+        console.error('Error updating status to aborted:', error);
       }
-    } catch (error) {
-      console.error('Error interrupting query:', error);
     }
 
-    // Clean up
+    // Clean up active query (abortedQueries cleaned up in finally block of main flow)
     activeQueries.delete(conversationKey);
     busyConversations.delete(conversationKey);
   } else {

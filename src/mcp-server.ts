@@ -15,17 +15,20 @@ import {
   buildApprovalResultBlocks,
   buildReminderBlocks,
 } from './blocks.js';
+import { formatTimeRemaining } from './utils.js';
 
 // Answer directory for file-based communication with Slack bot
 const ANSWER_DIR = '/tmp/ccslack-answers';
 
 // Reminder configuration (in-memory only, lost on restart)
-const REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const MAX_REMINDERS = 7; // Stop after a week
+const REMINDER_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_REMINDERS = Math.floor(EXPIRY_MS / REMINDER_INTERVAL_MS); // 42 reminders over 7 days
 
 // Track active reminders (in-memory)
 const reminderIntervals = new Map<string, NodeJS.Timeout>();
 const reminderCounts = new Map<string, number>();
+const reminderStartTimes = new Map<string, number>(); // Track when reminder started for expiry calc
 
 interface SlackContext {
   channel: string;
@@ -291,7 +294,7 @@ class AskUserMCPServer {
 
   /**
    * Start a reminder for an unanswered question.
-   * Sends reminders every 24 hours, up to MAX_REMINDERS times.
+   * Sends reminders every 4 hours, expires after 7 days.
    * In-memory only - lost if bot restarts.
    */
   private startReminder(
@@ -300,11 +303,14 @@ class AskUserMCPServer {
     channel: string,
     threadTs?: string
   ) {
+    const startTime = Date.now();
+    reminderStartTimes.set(questionId, startTime);
+
     const interval = setInterval(async () => {
       const count = reminderCounts.get(questionId) || 0;
 
       if (count >= MAX_REMINDERS) {
-        // Auto-expire after max reminders
+        // Auto-expire after max reminders (7 days)
         console.error(`[MCP] Max reminders reached for ${questionId}, auto-aborting`);
         this.clearReminder(questionId);
 
@@ -314,7 +320,7 @@ class AskUserMCPServer {
           fs.writeFileSync(answerFile, JSON.stringify({
             answer: '__ABORTED__',
             timestamp: Date.now(),
-            reason: 'max_reminders_reached',
+            reason: 'expired_after_7_days',
           }));
         } catch (error) {
           console.error(`[MCP] Error writing abort file:`, error);
@@ -322,11 +328,12 @@ class AskUserMCPServer {
         return;
       }
 
-      // Calculate wait time for display
-      const waitDays = count + 1;
-      const waitTime = waitDays === 1 ? '1 day' : `${waitDays} days`;
+      // Calculate elapsed time and remaining time
+      const elapsedMs = Date.now() - startTime;
+      const remainingMs = EXPIRY_MS - elapsedMs;
+      const expiresIn = formatTimeRemaining(remainingMs);
 
-      console.error(`[MCP] Sending reminder ${count + 1} for ${questionId}`);
+      console.error(`[MCP] Sending reminder ${count + 1} for ${questionId} (expires in ${expiresIn})`);
 
       try {
         await this.slack.chat.postMessage({
@@ -335,9 +342,9 @@ class AskUserMCPServer {
           blocks: buildReminderBlocks({
             originalQuestion: question,
             questionId,
-            waitTime,
+            expiresIn,
           }),
-          text: `Reminder: Still waiting for your answer to "${question}"`,
+          text: `Reminder: Still waiting for your answer to "${question}" (expires in ${expiresIn})`,
         });
       } catch (error) {
         console.error(`[MCP] Error sending reminder:`, error);
@@ -347,7 +354,7 @@ class AskUserMCPServer {
     }, REMINDER_INTERVAL_MS);
 
     reminderIntervals.set(questionId, interval);
-    console.error(`[MCP] Started reminder for ${questionId}`);
+    console.error(`[MCP] Started reminder for ${questionId} (expires in 7 days)`);
   }
 
   /**
@@ -359,6 +366,7 @@ class AskUserMCPServer {
       clearInterval(interval);
       reminderIntervals.delete(questionId);
       reminderCounts.delete(questionId);
+      reminderStartTimes.delete(questionId);
       console.error(`[MCP] Cleared reminder for ${questionId}`);
     }
   }

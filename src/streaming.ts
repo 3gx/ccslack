@@ -1,4 +1,5 @@
 import { WebClient } from '@slack/web-api';
+import { markdownToSlack } from './utils.js';
 
 // Throttle interval for fallback mode (2 seconds = 30 updates/min, well under 50/min limit)
 const UPDATE_INTERVAL_MS = 2000;
@@ -52,11 +53,15 @@ async function startNativeStreaming(
   const streamId = stream.stream_id;
   console.log(`Started native stream: ${streamId}`);
 
+  // Track accumulated text for conversion
+  let accumulatedText = '';
+
   return {
     async appendText(text: string) {
+      accumulatedText += text;
       await (client.chat as any).appendStream({
         stream_id: streamId,
-        markdown_text: text,
+        markdown_text: markdownToSlack(accumulatedText),
       });
     },
 
@@ -110,7 +115,7 @@ async function startFallbackStreaming(
         await client.chat.update({
           channel,
           ts: messageTs,
-          text: accumulatedText,
+          text: markdownToSlack(accumulatedText),
         });
       } catch (err) {
         console.error('Error updating message:', err);
@@ -130,13 +135,13 @@ async function startFallbackStreaming(
     },
 
     async finish() {
-      // Final update with complete text
+      // Final update with complete text (converted to Slack format)
       if (accumulatedText) {
         try {
           await client.chat.update({
             channel,
             ts: messageTs,
-            text: accumulatedText,
+            text: markdownToSlack(accumulatedText),
           });
         } catch (err) {
           console.error('Error in final update:', err);

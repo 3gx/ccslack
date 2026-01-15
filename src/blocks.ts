@@ -32,7 +32,7 @@ export interface ApprovalBlockParams {
 export interface ReminderBlockParams {
   originalQuestion: string;
   questionId: string;
-  waitTime: string;
+  expiresIn: string;
 }
 
 export interface StatusBlockParams {
@@ -237,14 +237,14 @@ export function buildApprovalBlocks(params: ApprovalBlockParams): Block[] {
  * Build blocks for reminder messages.
  */
 export function buildReminderBlocks(params: ReminderBlockParams): Block[] {
-  const { originalQuestion, questionId, waitTime } = params;
+  const { originalQuestion, questionId, expiresIn } = params;
   const blocks: Block[] = [];
 
   blocks.push({
     type: "section",
     text: {
       type: "mrkdwn",
-      text: `*Reminder:* I'm still waiting for your answer (${waitTime})\n\n_"${originalQuestion}"_`,
+      text: `*Reminder:* I'm still waiting for your answer\n\n_"${originalQuestion}"_\n\n:hourglass: Expires in ${expiresIn}`,
     },
   });
 
