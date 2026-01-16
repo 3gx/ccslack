@@ -22,6 +22,10 @@ export interface CommandResult {
   forkThread?: {
     description: string;
   };
+  // For /wait command - rate limit stress test
+  waitTest?: {
+    seconds: number;
+  };
 }
 
 /**
@@ -61,6 +65,8 @@ export function parseCommand(
       return handleForkThread(argString);
     case 'resume':
       return handleResume(argString);
+    case 'wait':
+      return handleWait(argString);
     default:
       // Unknown command - return error
       return {
@@ -84,7 +90,8 @@ function handleHelp(): CommandResult {
 \`/continue\` - Get command to continue session in terminal
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
-\`/resume <id>\` - Resume a terminal session in Slack`;
+\`/resume <id>\` - Resume a terminal session in Slack
+\`/wait <sec>\` - Rate limit test (1-300 seconds)`;
 
   return {
     handled: true,
@@ -391,5 +398,26 @@ function handleForkThread(description: string): CommandResult {
     forkThread: {
       description: cleanDescription || 'Exploring alternative approach',
     },
+  };
+}
+
+/**
+ * /wait <seconds> - Rate limit stress test
+ * Updates spinner for X seconds to test Slack API limits
+ */
+function handleWait(secondsArg: string): CommandResult {
+  const seconds = parseInt(secondsArg, 10);
+
+  if (isNaN(seconds) || seconds < 1 || seconds > 300) {
+    return {
+      handled: true,
+      response:
+        'Usage: `/wait <seconds>` (1-300)\n\nThis command tests Slack rate limits by updating the spinner every second for X seconds.',
+    };
+  }
+
+  return {
+    handled: true,
+    waitTest: { seconds },
   };
 }

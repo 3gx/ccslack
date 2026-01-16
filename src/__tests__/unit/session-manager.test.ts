@@ -11,8 +11,10 @@ import {
   getMessageMapping,
   findForkPointMessageId,
   getOrCreateThreadSession,
+  saveActivityLog,
+  getActivityLog,
 } from '../../session-manager.js';
-import type { Session, ThreadSession, SlackMessageMapping } from '../../session-manager.js';
+import type { Session, ThreadSession, SlackMessageMapping, ActivityEntry } from '../../session-manager.js';
 
 // Mock the fs module
 vi.mock('fs', () => ({
@@ -170,6 +172,40 @@ describe('session-manager', () => {
 
       expect(lastActiveAt).toBeGreaterThanOrEqual(before);
       expect(lastActiveAt).toBeLessThanOrEqual(after);
+    });
+
+    it('should preserve activityLogs when updating session', () => {
+      const existingEntries = [
+        { timestamp: Date.now(), type: 'tool_start' as const, tool: 'Read' },
+        { timestamp: Date.now(), type: 'tool_complete' as const, tool: 'Read', durationMs: 100 },
+      ];
+      const existingSession = {
+        sessionId: 'old-sess',
+        workingDir: '/old/path',
+        mode: 'plan' as const,
+        createdAt: 1000,
+        lastActiveAt: 1500,
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        activityLogs: {
+          'C123': existingEntries,
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        channels: { 'C123': existingSession },
+      }));
+
+      // Update session with new sessionId - activityLogs should be preserved
+      saveSession('C123', { sessionId: 'new-sess' });
+
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+
+      expect(writtenData.channels['C123'].sessionId).toBe('new-sess'); // updated
+      expect(writtenData.channels['C123'].activityLogs).toEqual({ 'C123': existingEntries }); // preserved
     });
   });
 
@@ -921,6 +957,270 @@ describe('session-manager', () => {
       expect(result.isNewFork).toBe(false);
       expect(result.session.sessionId).toBe('thread-session-456');
       expect(result.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
+    });
+  });
+
+  // ============================================================================
+  // Activity Log Storage Tests
+  // ============================================================================
+
+  describe('saveActivityLog', () => {
+    it('should save activity log for channel conversation', async () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const entries = [
+        { timestamp: Date.now(), type: 'tool_start' as const, tool: 'Read' },
+        { timestamp: Date.now(), type: 'tool_complete' as const, tool: 'Read', durationMs: 500 },
+      ];
+
+      await saveActivityLog('C123', entries);
+
+      expect(fs.writeFileSync).toHaveBeenCalled();
+      const writtenData = JSON.parse(
+        vi.mocked(fs.writeFileSync).mock.calls[0][1] as string
+      );
+      expect(writtenData.channels.C123.activityLogs).toBeDefined();
+      expect(writtenData.channels.C123.activityLogs['C123']).toEqual(entries);
+    });
+
+    it('should save activity log for thread conversation', async () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const entries = [
+        { timestamp: Date.now(), type: 'thinking' as const, thinkingContent: 'test' },
+      ];
+      const conversationKey = 'C123_thread456';
+
+      await saveActivityLog(conversationKey, entries);
+
+      expect(fs.writeFileSync).toHaveBeenCalled();
+      const writtenData = JSON.parse(
+        vi.mocked(fs.writeFileSync).mock.calls[0][1] as string
+      );
+      expect(writtenData.channels.C123.activityLogs[conversationKey]).toEqual(entries);
+    });
+
+    it('should not save if channel does not exist', async () => {
+      const mockStore = { channels: {} };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await saveActivityLog('C999', []);
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot save activity log')
+      );
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+
+    it('should preserve existing activity logs when adding new ones', async () => {
+      const existingEntries = [
+        { timestamp: Date.now() - 1000, type: 'tool_start' as const, tool: 'Glob' },
+      ];
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            activityLogs: {
+              'C123': existingEntries,
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const newEntries = [
+        { timestamp: Date.now(), type: 'tool_start' as const, tool: 'Read' },
+      ];
+
+      await saveActivityLog('C123_newthread', newEntries);
+
+      const writtenData = JSON.parse(
+        vi.mocked(fs.writeFileSync).mock.calls[0][1] as string
+      );
+      // Old entry should still exist
+      expect(writtenData.channels.C123.activityLogs['C123']).toEqual(existingEntries);
+      // New entry should be added
+      expect(writtenData.channels.C123.activityLogs['C123_newthread']).toEqual(newEntries);
+    });
+  });
+
+  describe('getActivityLog', () => {
+    it('should return activity log for channel conversation', async () => {
+      const entries = [
+        { timestamp: Date.now(), type: 'tool_start' as const, tool: 'Read' },
+        { timestamp: Date.now(), type: 'tool_complete' as const, tool: 'Read', durationMs: 500 },
+      ];
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            activityLogs: {
+              'C123': entries,
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = await getActivityLog('C123');
+
+      expect(result).toEqual(entries);
+    });
+
+    it('should return activity log for thread conversation', async () => {
+      const entries = [
+        { timestamp: Date.now(), type: 'thinking' as const, thinkingContent: 'analysis' },
+      ];
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            activityLogs: {
+              'C123_thread789': entries,
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = await getActivityLog('C123_thread789');
+
+      expect(result).toEqual(entries);
+    });
+
+    it('should return null if channel does not exist', async () => {
+      const mockStore = { channels: {} };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = await getActivityLog('C999');
+
+      expect(result).toBeNull();
+    });
+
+    it('should return null if activityLogs not initialized', async () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            // No activityLogs property
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = await getActivityLog('C123');
+
+      expect(result).toBeNull();
+    });
+
+    it('should return null if specific conversation key not found', async () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            activityLogs: {
+              'C123_other': [],
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = await getActivityLog('C123_missing');
+
+      expect(result).toBeNull();
     });
   });
 });

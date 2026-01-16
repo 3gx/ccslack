@@ -87,6 +87,7 @@ export function createMockSlackClient() {
       postMessage: vi.fn().mockResolvedValue({ ts: 'msg123', channel: 'C123' }),
       update: vi.fn().mockResolvedValue({}),
       delete: vi.fn().mockResolvedValue({}),
+      postEphemeral: vi.fn().mockResolvedValue({}),
       startStream: vi.fn().mockRejectedValue(new Error('Native streaming not available')),
       appendStream: vi.fn().mockResolvedValue({}),
       stopStream: vi.fn().mockResolvedValue({}),
@@ -96,6 +97,10 @@ export function createMockSlackClient() {
     },
     views: {
       open: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
+    },
+    files: {
+      uploadV2: vi.fn().mockResolvedValue({ ok: true }),
     },
   };
 }

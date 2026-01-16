@@ -1,4 +1,5 @@
 import { App } from '@slack/bolt';
+import { Mutex } from 'async-mutex';
 import { startClaudeQuery, ClaudeQuery, PermissionResult } from './claude-client.js';
 import {
   getSession,
@@ -9,11 +10,28 @@ import {
   deleteSession,
   saveMessageMapping,
   findForkPointMessageId,
+  saveActivityLog,
+  getActivityLog,
   ThreadSession,
   PermissionMode,
+  ActivityEntry,
 } from './session-manager.js';
 import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
-import { buildStatusBlocks, buildHeaderBlocks, buildPlanApprovalBlocks, isPlanApprovalPrompt, buildToolApprovalBlocks, buildForkAnchorBlocks, buildPathSetupBlocks } from './blocks.js';
+import {
+  buildStatusBlocks,
+  buildHeaderBlocks,
+  buildPlanApprovalBlocks,
+  isPlanApprovalPrompt,
+  buildToolApprovalBlocks,
+  buildForkAnchorBlocks,
+  buildPathSetupBlocks,
+  buildStatusPanelBlocks,
+  buildActivityLogText,
+  buildCollapsedActivityBlocks,
+  formatToolName,
+  getToolEmoji,
+  buildActivityLogModalView,
+} from './blocks.js';
 import { postSplitResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining } from './utils.js';
@@ -24,6 +42,45 @@ import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
 const ANSWER_DIR = '/tmp/ccslack-answers';
+
+// Processing state constants for activity tracking
+const THINKING_TRUNCATE_LENGTH = 500;
+const MAX_LIVE_ENTRIES = 300;  // Switch to rolling window if exceeded
+const ROLLING_WINDOW_SIZE = 20; // Show last N entries when in rolling mode
+const STATUS_UPDATE_INTERVAL = 1000; // TEMP: 1s for testing spinner updates
+
+// Processing state for real-time activity tracking
+interface ProcessingState {
+  status: 'starting' | 'thinking' | 'tool' | 'complete' | 'error' | 'aborted';
+  model?: string;
+  currentTool?: string;
+  toolsCompleted: number;
+  thinkingBlockCount: number;
+  startTime: number;
+  lastUpdateTime: number;
+  // Activity log entries (preserved for modal)
+  activityLog: ActivityEntry[];
+  // Temporary state for accumulating thinking content
+  currentThinkingIndex: number | null;
+  currentThinkingContent: string;
+  // Track current tool_use block index for detecting tool completion
+  currentToolUseIndex: number | null;
+  // Spinner state (cycles with each update to show bot is alive)
+  spinnerIndex: number;
+  // Only populated at completion (from result message)
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;  // For accurate context % calculation
+  contextWindow?: number;
+  costUsd?: number;
+  durationMs?: number;
+  // Rate limit tracking
+  rateLimitHits: number;
+  rateLimitNotified: boolean;
+}
+
+// Spinner frames for visual "alive" indicator during processing
+const SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
 
 // Tool approval reminder configuration (matches MCP ask_user behavior)
 const TOOL_APPROVAL_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -49,11 +106,27 @@ const busyConversations = new Set<string>();
 // Track active queries for abort capability
 interface ActiveQuery {
   query: ClaudeQuery;
-  statusMsgTs: string;
+  statusMsgTs: string;           // Message 1: Status panel
+  activityLogMsgTs: string;      // Message 2: Activity log
   mode: PermissionMode;
   model?: string;
+  processingState: ProcessingState;
 }
 const activeQueries = new Map<string, ActiveQuery>();
+
+// Mutexes for serializing updates (prevents abort race conditions)
+const updateMutexes = new Map<string, Mutex>();
+
+function getUpdateMutex(conversationKey: string): Mutex {
+  if (!updateMutexes.has(conversationKey)) {
+    updateMutexes.set(conversationKey, new Mutex());
+  }
+  return updateMutexes.get(conversationKey)!;
+}
+
+function cleanupMutex(conversationKey: string): void {
+  updateMutexes.delete(conversationKey);
+}
 
 // Track pending tool approvals (for manual approval mode)
 interface PendingToolApproval {
@@ -74,6 +147,145 @@ const toolApprovalReminderStartTimes = new Map<string, number>();
 // Helper to get unique conversation key (channel + thread)
 function getConversationKey(channelId: string, threadTs?: string): string {
   return threadTs ? `${channelId}_${threadTs}` : channelId;
+}
+
+/**
+ * Rate limit stress test - updates spinner for X seconds
+ * Tests Slack API rate limits by making continuous updates
+ */
+async function runWaitTest(
+  client: any,
+  channelId: string,
+  threadTs: string | undefined,
+  seconds: number,
+  mode: PermissionMode,
+  originalTs: string | undefined
+): Promise<void> {
+  const startTime = Date.now();
+  let spinnerIndex = 0;
+  let rateLimitHits = 0;
+  let updateCount = 0;
+
+  // Remove eyes reaction first
+  if (originalTs) {
+    try {
+      await client.reactions.remove({
+        channel: channelId,
+        timestamp: originalTs,
+        name: 'eyes',
+      });
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Post initial status panel
+  const statusMsg = (await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      blocks: buildStatusPanelBlocks({
+        status: 'thinking',
+        mode,
+        toolsCompleted: 0,
+        elapsedMs: 0,
+        conversationKey: `wait_test_${channelId}`,
+        spinner: SPINNER_FRAMES[0],
+      }),
+      text: `Rate limit test: ${seconds}s`,
+    })
+  )) as { ts?: string };
+
+  const statusMsgTs = statusMsg.ts!;
+  console.log(`[WaitTest] Started ${seconds}s test, status msg: ${statusMsgTs}`);
+
+  // Create a promise that resolves when the test is complete
+  await new Promise<void>((resolve) => {
+    const updateInterval = setInterval(async () => {
+      const elapsed = Date.now() - startTime;
+      const elapsedSec = elapsed / 1000;
+
+      // Check if done
+      if (elapsedSec >= seconds) {
+        clearInterval(updateInterval);
+
+        // Final update - completion
+        try {
+          await withSlackRetry(() =>
+            client.chat.update({
+              channel: channelId,
+              ts: statusMsgTs,
+              blocks: buildStatusPanelBlocks({
+                status: 'complete',
+                mode,
+                toolsCompleted: updateCount,
+                elapsedMs: elapsed,
+                conversationKey: `wait_test_${channelId}`,
+              }),
+              text: `Rate limit test complete`,
+            })
+          );
+
+          // Post summary
+          await client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text:
+              `:white_check_mark: *Wait test complete*\n` +
+              `Duration: ${seconds}s\n` +
+              `Updates attempted: ${updateCount}\n` +
+              `Rate limit hits: ${rateLimitHits}`,
+          });
+        } catch (err) {
+          console.error('[WaitTest] Final update error:', err);
+        }
+
+        console.log(
+          `[WaitTest] Complete - ${updateCount} updates, ${rateLimitHits} rate limits`
+        );
+        resolve();
+        return;
+      }
+
+      // Update spinner
+      spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
+      const spinner = SPINNER_FRAMES[spinnerIndex];
+      updateCount++;
+
+      try {
+        await withSlackRetry(() =>
+          client.chat.update({
+            channel: channelId,
+            ts: statusMsgTs,
+            blocks: buildStatusPanelBlocks({
+              status: 'thinking',
+              mode,
+              toolsCompleted: updateCount,
+              elapsedMs: elapsed,
+              conversationKey: `wait_test_${channelId}`,
+              spinner,
+            }),
+            text: `Rate limit test: ${elapsedSec.toFixed(1)}s / ${seconds}s`,
+          })
+        );
+      } catch (err: unknown) {
+        // Log rate limit specifically
+        if (
+          err &&
+          typeof err === 'object' &&
+          'code' in err &&
+          err.code === 'slack_webapi_platform_error'
+        ) {
+          rateLimitHits++;
+          console.log(
+            `[WaitTest] Rate limit hit #${rateLimitHits} at ${elapsedSec.toFixed(1)}s`
+          );
+        } else {
+          console.error('[WaitTest] Update error:', err);
+        }
+      }
+    }, STATUS_UPDATE_INTERVAL);
+  });
 }
 
 // Handle /fork-thread command - creates new thread from existing thread session
@@ -354,6 +566,9 @@ async function handleMessage(params: {
 }) {
   const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck } = params;
   const conversationKey = getConversationKey(channelId, threadTs);
+  // Activity log key must be unique per message (not per conversation)
+  // For threads: threadTs is unique; for main channel: use originalTs
+  const activityLogKey = threadTs ? `${channelId}_${threadTs}` : `${channelId}_${originalTs}`;
 
   // Check if conversation is busy
   if (busyConversations.has(conversationKey)) {
@@ -521,6 +736,19 @@ async function handleMessage(params: {
     return;
   }
 
+  // Handle /wait command (rate limit stress test)
+  if (commandResult.waitTest) {
+    await runWaitTest(
+      client,
+      channelId,
+      threadTs,
+      commandResult.waitTest.seconds,
+      session.mode,
+      originalTs
+    );
+    return;
+  }
+
   if (commandResult.handled) {
     // Apply any session updates from the command
     // Use updated mode if command changed it, otherwise use current mode
@@ -643,24 +871,63 @@ async function handleMessage(params: {
   // Mark conversation as busy
   busyConversations.add(conversationKey);
 
-  // Post header message (initially just mode, will update with model when init message arrives)
-  let headerMsgTs: string | undefined;
+  // Initialize processing state for real-time activity tracking
+  const startTime = Date.now();
+  const processingState: ProcessingState = {
+    status: 'starting',
+    toolsCompleted: 0,
+    thinkingBlockCount: 0,
+    startTime,
+    lastUpdateTime: 0,
+    activityLog: [
+      // Add starting entry so it persists in the log (not a fallback that disappears)
+      { timestamp: startTime, type: 'starting' },
+    ],
+    currentThinkingIndex: null,
+    currentThinkingContent: '',
+    currentToolUseIndex: null,
+    spinnerIndex: 0,
+    rateLimitHits: 0,
+    rateLimitNotified: false,
+  };
+
+  // Post Message 1: Status panel (Block Kit with Abort)
+  let statusMsgTs: string | undefined;
   try {
-    const headerResult = await withSlackRetry(async () =>
+    const statusResult = await withSlackRetry(async () =>
       client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
-        blocks: buildHeaderBlocks({
+        blocks: buildStatusPanelBlocks({
           status: 'starting',
           mode: session.mode,
+          toolsCompleted: 0,
+          elapsedMs: 0,
           conversationKey,
+          spinner: SPINNER_FRAMES[0],  // Show spinner immediately
         }),
-        text: session.mode,
+        text: 'Claude is starting...',
       })
     );
-    headerMsgTs = (headerResult as { ts?: string }).ts;
+    statusMsgTs = (statusResult as { ts?: string }).ts;
   } catch (error) {
-    console.error('Error posting header message:', error);
+    console.error('Error posting status panel message:', error);
+  }
+
+  // Post Message 2: Activity log (text)
+  let activityLogMsgTs: string | undefined;
+  try {
+    const activityResult = await withSlackRetry(async () =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        // Use buildActivityLogText to render starting entry (not static placeholder)
+        text: buildActivityLogText(processingState.activityLog, true),
+      })
+    );
+    activityLogMsgTs = (activityResult as { ts?: string }).ts;
+  } catch (error) {
+    console.error('Error posting activity log message:', error);
   }
 
   // Stream Claude response to Slack with real-time updates
@@ -727,12 +994,14 @@ async function handleMessage(params: {
       },
     });
 
-    // Track active query for abort capability
-    if (headerMsgTs) {
+    // Track active query for abort capability (with both message timestamps)
+    if (statusMsgTs && activityLogMsgTs) {
       activeQueries.set(conversationKey, {
         query: claudeQuery,
-        statusMsgTs: headerMsgTs,
+        statusMsgTs,
+        activityLogMsgTs,
         mode: session.mode,
+        processingState,
       });
     }
 
@@ -740,10 +1009,149 @@ async function handleMessage(params: {
     let fullResponse = '';
     let newSessionId: string | null = null;
     let modelName: string | undefined;
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let durationMs: number | undefined;
     let currentAssistantMessageId: string | null = null;  // For message mapping
+    let costUsd: number | undefined;
+
+    // Helper to add thinking to activity log
+    const logThinking = (content: string) => {
+      const truncated = content.length > THINKING_TRUNCATE_LENGTH
+        ? content.substring(0, THINKING_TRUNCATE_LENGTH) + '...'
+        : content;
+      const elapsedMs = Date.now() - processingState.startTime;
+
+      processingState.activityLog.push({
+        timestamp: Date.now(),
+        type: 'thinking',
+        thinkingContent: content,
+        thinkingTruncated: truncated,
+        durationMs: elapsedMs,  // Time since processing started
+      });
+      processingState.thinkingBlockCount++;
+      processingState.status = 'thinking';
+      console.log(`[Activity] Thinking block added (${content.length} chars), total: ${processingState.activityLog.length} entries`);
+    };
+
+    // Helper to add tool start to activity log
+    const logToolStart = (toolName: string) => {
+      const formattedName = formatToolName(toolName);
+      const elapsedMs = Date.now() - processingState.startTime;
+      processingState.activityLog.push({
+        timestamp: Date.now(),
+        type: 'tool_start',
+        tool: formattedName,
+        durationMs: elapsedMs,  // Time since processing started
+      });
+      processingState.currentTool = formattedName;
+      processingState.status = 'tool';
+      console.log(`[Activity] Tool start: ${formattedName}, total: ${processingState.activityLog.length} entries`);
+    };
+
+    // Helper to add tool complete to activity log
+    const logToolComplete = () => {
+      const lastToolStart = [...processingState.activityLog].reverse().find(e => e.type === 'tool_start');
+      if (lastToolStart) {
+        // Calculate duration from tool start to now
+        const durationMs = Date.now() - lastToolStart.timestamp;
+        processingState.activityLog.push({
+          timestamp: Date.now(),
+          type: 'tool_complete',
+          tool: lastToolStart.tool,
+          durationMs,
+        });
+        console.log(`[Activity] Tool complete: ${lastToolStart.tool} (${durationMs}ms), total: ${processingState.activityLog.length} entries`);
+      }
+      processingState.toolsCompleted++;
+      processingState.currentTool = undefined;
+      processingState.status = 'thinking';
+    };
+
+    // Rate limit callback - posts notification on first hit, increments counter
+    const handleRateLimit = async () => {
+      processingState.rateLimitHits++;
+      console.log(`[RateLimit] Hit #${processingState.rateLimitHits}`);
+
+      // Post notification message only on first hit
+      if (!processingState.rateLimitNotified) {
+        processingState.rateLimitNotified = true;
+        try {
+          await client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: ':warning: Rate limited by Slack, retrying...',
+          });
+        } catch (err) {
+          console.error('Error posting rate limit notification:', err);
+        }
+      }
+    };
+
+    // Update function for both messages (called by timer and events)
+    const updateStatusMessages = async () => {
+      const now = Date.now();
+
+      // Cycle spinner on each update (proves bot is alive)
+      processingState.spinnerIndex = (processingState.spinnerIndex + 1) % SPINNER_FRAMES.length;
+      const spinner = SPINNER_FRAMES[processingState.spinnerIndex];
+
+      const mutex = getUpdateMutex(conversationKey);
+      await mutex.runExclusive(async () => {
+        if (isAborted(conversationKey)) return;
+
+        const elapsedMs = now - processingState.startTime;
+
+        // Update Message 1: Status panel
+        if (statusMsgTs) {
+          try {
+            await withSlackRetry(
+              () =>
+                client.chat.update({
+                  channel: channelId,
+                  ts: statusMsgTs,
+                  blocks: buildStatusPanelBlocks({
+                    status: processingState.status,
+                    mode: session.mode,
+                    model: processingState.model,
+                    currentTool: processingState.currentTool,
+                    toolsCompleted: processingState.toolsCompleted,
+                    elapsedMs,
+                    conversationKey,
+                    spinner,
+                    rateLimitHits: processingState.rateLimitHits,
+                  }),
+                  text: 'Claude is working...',
+                }),
+              { onRateLimit: handleRateLimit }
+            );
+          } catch (error) {
+            console.error('Error updating status panel:', error);
+          }
+        }
+
+        // Update Message 2: Activity log
+        if (activityLogMsgTs) {
+          try {
+            await withSlackRetry(
+              () =>
+                client.chat.update({
+                  channel: channelId,
+                  ts: activityLogMsgTs,
+                  text: buildActivityLogText(processingState.activityLog, true),
+                }),
+              { onRateLimit: handleRateLimit }
+            );
+          } catch (error) {
+            console.error('Error updating activity log:', error);
+          }
+        }
+      });
+
+      processingState.lastUpdateTime = now;
+    };
+
+    // Periodic timer to update spinner even when no events are firing
+    const spinnerTimer = setInterval(() => {
+      updateStatusMessages();
+    }, STATUS_UPDATE_INTERVAL);
 
     for await (const msg of claudeQuery) {
       // Capture assistant message ID for message mapping (point-in-time forking)
@@ -756,6 +1164,7 @@ async function handleMessage(params: {
       if (msg.type === 'system' && (msg as any).subtype === 'init') {
         newSessionId = (msg as any).session_id;
         modelName = (msg as any).model;
+        processingState.model = modelName;
         console.log(`Session initialized: ${newSessionId}, model: ${modelName}`);
 
         // Update model in active query for abort handler
@@ -764,24 +1173,58 @@ async function handleMessage(params: {
           activeQuery.model = modelName;
         }
 
-        // Update header with model name
-        if (headerMsgTs && !isAborted(conversationKey)) {
-          try {
-            await withSlackRetry(() =>
-              client.chat.update({
-                channel: channelId,
-                ts: headerMsgTs,
-                blocks: buildHeaderBlocks({
-                  status: 'processing',
-                  mode: session.mode,
-                  conversationKey,
-                  model: modelName,
-                }),
-                text: `${modelName} | ${session.mode}`,
-              })
-            );
-          } catch (error) {
-            console.error('Error updating header with model:', error);
+        // Trigger immediate update with model name
+        processingState.lastUpdateTime = 0; // Force update
+        await updateStatusMessages();
+      }
+
+      // Handle stream_event for real-time activity tracking
+      if ((msg as any).type === 'stream_event') {
+        const event = (msg as any).event;
+
+        // Thinking block started
+        if (event?.type === 'content_block_start' && event.content_block?.type === 'thinking') {
+          processingState.currentThinkingIndex = event.index;
+          processingState.currentThinkingContent = '';
+          processingState.status = 'thinking';
+        }
+
+        // Thinking content streaming
+        if (event?.type === 'content_block_delta' && event.delta?.type === 'thinking_delta') {
+          processingState.currentThinkingContent += event.delta.thinking || '';
+        }
+
+        // Thinking block completed - add to activity log
+        if (event?.type === 'content_block_stop' &&
+            processingState.currentThinkingIndex === event.index &&
+            processingState.currentThinkingContent) {
+          logThinking(processingState.currentThinkingContent);
+          processingState.currentThinkingContent = '';
+          processingState.currentThinkingIndex = null;
+          await updateStatusMessages();
+        }
+
+        // Tool use started
+        if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+          processingState.currentToolUseIndex = event.index;
+          logToolStart(event.content_block.name);
+          await updateStatusMessages();
+        }
+
+        // Tool use completed (content_block_stop for tool_use block)
+        if (event?.type === 'content_block_stop' &&
+            processingState.currentToolUseIndex === event.index &&
+            processingState.currentTool) {
+          logToolComplete();
+          processingState.currentToolUseIndex = null;
+          await updateStatusMessages();
+        }
+
+        // Text block started - model is responding (no thinking/tools needed)
+        if (event?.type === 'content_block_start' && event.content_block?.type === 'text') {
+          if (processingState.status === 'starting') {
+            processingState.status = 'thinking'; // Show as "thinking" even for direct text response
+            await updateStatusMessages();
           }
         }
       }
@@ -803,16 +1246,105 @@ async function handleMessage(params: {
       // Handle result messages (final response with stats)
       if (msg.type === 'result') {
         const resultMsg = msg as any;
+
         if (resultMsg.result) {
           fullResponse = resultMsg.result;
         }
         // Extract stats from result message
-        durationMs = resultMsg.duration_ms;
+        processingState.durationMs = resultMsg.duration_ms;
         if (resultMsg.usage) {
-          inputTokens = resultMsg.usage.input_tokens || 0;
-          outputTokens = resultMsg.usage.output_tokens || 0;
+          processingState.inputTokens = resultMsg.usage.input_tokens || 0;
+          processingState.outputTokens = resultMsg.usage.output_tokens || 0;
+          // Cache tokens are needed for accurate context % calculation
+          processingState.cacheReadInputTokens = resultMsg.usage.cache_read_input_tokens || 0;
+        }
+        // Extract cost and context window from SDK result
+        if (resultMsg.total_cost_usd !== undefined) {
+          costUsd = resultMsg.total_cost_usd;
+          processingState.costUsd = costUsd;
+        }
+        // Model usage is a dictionary keyed by model name
+        if (resultMsg.modelUsage && processingState.model) {
+          const modelData = resultMsg.modelUsage[processingState.model];
+          if (modelData?.contextWindow) {
+            processingState.contextWindow = modelData.contextWindow;
+          }
         }
       }
+    }
+
+    // Stop the spinner timer now that processing is complete
+    clearInterval(spinnerTimer);
+
+    // Calculate context percentage using input tokens + cache read tokens
+    // This gives accurate context utilization since cached tokens are in the context window
+    const totalContextTokens = (processingState.inputTokens || 0) + (processingState.cacheReadInputTokens || 0);
+    const contextPercent = processingState.contextWindow && totalContextTokens > 0
+      ? Math.round((totalContextTokens / processingState.contextWindow) * 100)
+      : undefined;
+
+    // Final elapsed time
+    const finalDurationMs = processingState.durationMs ?? (Date.now() - processingState.startTime);
+
+    // Update both messages to completion state (only if not aborted)
+    if (!isAborted(conversationKey)) {
+      const mutex = getUpdateMutex(conversationKey);
+      await mutex.runExclusive(async () => {
+        if (isAborted(conversationKey)) return;
+
+        // Update Message 1: Final status panel with stats
+        if (statusMsgTs) {
+          try {
+            await withSlackRetry(() =>
+              client.chat.update({
+                channel: channelId,
+                ts: statusMsgTs,
+                blocks: buildStatusPanelBlocks({
+                  status: 'complete',
+                  mode: session.mode,
+                  model: processingState.model,
+                  toolsCompleted: processingState.toolsCompleted,
+                  elapsedMs: finalDurationMs,
+                  inputTokens: processingState.inputTokens,
+                  outputTokens: processingState.outputTokens,
+                  contextPercent,
+                  costUsd: processingState.costUsd,
+                  conversationKey,
+                  rateLimitHits: processingState.rateLimitHits,
+                }),
+                text: 'Complete',
+              })
+            );
+          } catch (error) {
+            console.error('Error updating status panel to complete:', error);
+          }
+        }
+
+        // Update Message 2: Collapse activity log to summary with buttons
+        if (activityLogMsgTs) {
+          try {
+            await withSlackRetry(() =>
+              client.chat.update({
+                channel: channelId,
+                ts: activityLogMsgTs,
+                blocks: buildCollapsedActivityBlocks(
+                  processingState.thinkingBlockCount,
+                  processingState.toolsCompleted,
+                  finalDurationMs,
+                  activityLogKey
+                ),
+                text: `Activity: ${processingState.thinkingBlockCount} thinking + ${processingState.toolsCompleted} tools`,
+              })
+            );
+          } catch (error) {
+            console.error('Error updating activity log to complete:', error);
+          }
+        }
+      });
+
+      // Save activity log for modal/download (keyed by message, not conversation)
+      console.log(`[Activity] Saving activity log for ${activityLogKey}: ${processingState.activityLog.length} entries`);
+      await saveActivityLog(activityLogKey, processingState.activityLog);
     }
 
     // Post complete response (only if not aborted and we have content)
@@ -863,29 +1395,6 @@ async function handleMessage(params: {
       }
     }
 
-    // Update header with stats when done (only if not aborted)
-    if (headerMsgTs && !isAborted(conversationKey)) {
-      try {
-        await withSlackRetry(() =>
-          client.chat.update({
-            channel: channelId,
-            ts: headerMsgTs,
-            blocks: buildHeaderBlocks({
-              status: 'complete',
-              mode: session.mode,
-              model: modelName,
-              inputTokens,
-              outputTokens,
-              durationMs,
-            }),
-            text: `${modelName} | ${session.mode} | complete`,
-          })
-        );
-      } catch (error) {
-        console.error('Error updating header with stats:', error);
-      }
-    }
-
     // Remove eyes reaction
     if (originalTs) {
       try {
@@ -913,22 +1422,51 @@ async function handleMessage(params: {
   } catch (error: any) {
     console.error('Error streaming Claude response:', error);
 
-    // Update header to error (only if not aborted)
-    if (headerMsgTs && !isAborted(conversationKey)) {
-      try {
-        await client.chat.update({
-          channel: channelId,
-          ts: headerMsgTs,
-          blocks: buildHeaderBlocks({
-            status: 'error',
-            mode: session.mode,
-            errorMessage: error.message,
-          }),
-          text: `Error: ${error.message}`,
-        });
-      } catch (e) {
-        console.error('Error updating header to error:', e);
-      }
+    // Update both messages to error state (only if not aborted)
+    if (!isAborted(conversationKey)) {
+      const mutex = getUpdateMutex(conversationKey);
+      await mutex.runExclusive(async () => {
+        if (isAborted(conversationKey)) return;
+
+        // Update status panel to error
+        if (statusMsgTs) {
+          try {
+            await client.chat.update({
+              channel: channelId,
+              ts: statusMsgTs,
+              blocks: buildStatusPanelBlocks({
+                status: 'error',
+                mode: session.mode,
+                toolsCompleted: processingState.toolsCompleted,
+                elapsedMs: Date.now() - processingState.startTime,
+                conversationKey,
+                errorMessage: error.message,
+              }),
+              text: `Error: ${error.message}`,
+            });
+          } catch (e) {
+            console.error('Error updating status panel to error:', e);
+          }
+        }
+
+        // Update activity log to show error
+        if (activityLogMsgTs) {
+          try {
+            processingState.activityLog.push({
+              timestamp: Date.now(),
+              type: 'error',
+              message: error.message,
+            });
+            await client.chat.update({
+              channel: channelId,
+              ts: activityLogMsgTs,
+              text: buildActivityLogText(processingState.activityLog, false),
+            });
+          } catch (e) {
+            console.error('Error updating activity log to error:', e);
+          }
+        }
+      });
     }
 
     // Remove eyes reaction on error
@@ -950,10 +1488,11 @@ async function handleMessage(params: {
       text: `Error: ${error.message}`,
     });
   } finally {
-    // Always clean up busy state and active queries
+    // Always clean up busy state, active queries, and mutex
     busyConversations.delete(conversationKey);
     activeQueries.delete(conversationKey);
     clearAborted(conversationKey);
+    cleanupMutex(conversationKey);
   }
 }
 
@@ -1120,21 +1659,41 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
     const channelId = bodyWithChannel.channel?.id;
 
     if (channelId) {
-      // Update header to show model | mode | aborted
-      try {
-        await client.chat.update({
-          channel: channelId,
-          ts: active.statusMsgTs,
-          blocks: buildHeaderBlocks({
-            status: 'aborted',
-            mode: active.mode,
-            model: active.model,
-          }),
-          text: `${active.model || 'Claude'} | ${active.mode} | aborted`,
-        });
-      } catch (error) {
-        console.error('Error updating header to aborted:', error);
-      }
+      // Use mutex to ensure abort update comes after any in-flight status update
+      const mutex = getUpdateMutex(conversationKey);
+      await mutex.runExclusive(async () => {
+        const elapsedMs = Date.now() - active.processingState.startTime;
+
+        // Update Message 1: Status panel to aborted
+        try {
+          await client.chat.update({
+            channel: channelId,
+            ts: active.statusMsgTs,
+            blocks: buildStatusPanelBlocks({
+              status: 'aborted',
+              mode: active.mode,
+              model: active.model,
+              toolsCompleted: active.processingState.toolsCompleted,
+              elapsedMs,
+              conversationKey,
+            }),
+            text: `${active.model || 'Claude'} | ${active.mode} | aborted`,
+          });
+        } catch (error) {
+          console.error('Error updating status panel to aborted:', error);
+        }
+
+        // Update Message 2: Activity log to aborted
+        try {
+          await client.chat.update({
+            channel: channelId,
+            ts: active.activityLogMsgTs,
+            text: buildActivityLogText(active.processingState.activityLog, false) + '\n:octagonal_sign: *Aborted by user*',
+          });
+        } catch (error) {
+          console.error('Error updating activity log to aborted:', error);
+        }
+      });
     }
 
     // Clean up active query (abortedQueries cleaned up in finally block of main flow)
@@ -1539,6 +2098,245 @@ app.action(/^concurrent_proceed_(.+)$/, async ({ action, ack, body, client }) =>
       client,
       skipConcurrentCheck: true, // Skip the check on retry
     });
+  }
+});
+
+// ============================================================================
+// Activity Log Modal and Download Handlers
+// ============================================================================
+
+const MODAL_PAGE_SIZE = 15;  // Entries per page for modal
+
+// Handle "View Log" button click - opens modal with activity log
+app.action(/^view_activity_log_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^view_activity_log_(.+)$/);
+  const conversationKey = match ? match[1] : '';
+
+  console.log(`View activity log clicked for: ${conversationKey}`);
+
+  const bodyWithTrigger = body as any;
+  const triggerId = bodyWithTrigger.trigger_id;
+
+  if (!triggerId) {
+    console.error('No trigger_id found for activity log modal');
+    return;
+  }
+
+  // Get activity log from storage
+  console.log(`[DEBUG] Fetching activity log for key: "${conversationKey}"`);
+  const activityLog = await getActivityLog(conversationKey);
+  console.log(`[DEBUG] Activity log result: ${activityLog ? activityLog.length + ' entries' : 'null'}`);
+
+  if (!activityLog) {
+    // Log not found - session was cleared or bot restarted
+    try {
+      await client.views.open({
+        trigger_id: triggerId,
+        view: {
+          type: 'modal',
+          title: { type: 'plain_text', text: 'Activity Log' },
+          blocks: [{
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: ':warning: Activity log is no longer available.\n\nThis can happen if the session was cleared or the bot was restarted.',
+            },
+          }],
+        },
+      });
+    } catch (error) {
+      console.error('Error opening activity log error modal:', error);
+    }
+    return;
+  }
+
+  if (activityLog.length === 0) {
+    // Log exists but is empty - no tools or thinking blocks were used
+    try {
+      await client.views.open({
+        trigger_id: triggerId,
+        view: {
+          type: 'modal',
+          title: { type: 'plain_text', text: 'Activity Log' },
+          blocks: [{
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: ':information_source: No activity to display.\n\nClaude responded directly without using any tools or extended thinking.',
+            },
+          }],
+        },
+      });
+    } catch (error) {
+      console.error('Error opening activity log empty modal:', error);
+    }
+    return;
+  }
+
+  // Open modal with first page
+  const totalPages = Math.ceil(activityLog.length / MODAL_PAGE_SIZE);
+  try {
+    await client.views.open({
+      trigger_id: triggerId,
+      view: buildActivityLogModalView(activityLog, 1, totalPages, conversationKey),
+    });
+  } catch (error) {
+    console.error('Error opening activity log modal:', error);
+  }
+});
+
+// Handle pagination buttons in modal
+app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^activity_log_page_(\d+)$/);
+  const page = match ? parseInt(match[1], 10) : 1;
+
+  const bodyWithView = body as any;
+  const viewId = bodyWithView.view?.id;
+  const privateMetadata = bodyWithView.view?.private_metadata;
+
+  if (!viewId || !privateMetadata) {
+    console.error('Missing view info for pagination');
+    return;
+  }
+
+  let metadata: { conversationKey: string };
+  try {
+    metadata = JSON.parse(privateMetadata);
+  } catch (e) {
+    console.error('Error parsing private_metadata:', e);
+    return;
+  }
+
+  const { conversationKey } = metadata;
+
+  // Get activity log from storage
+  const activityLog = await getActivityLog(conversationKey);
+  if (!activityLog) {
+    console.error('Activity log not found for pagination');
+    return;
+  }
+
+  const totalPages = Math.ceil(activityLog.length / MODAL_PAGE_SIZE);
+
+  // Update modal with new page (in-place pagination)
+  try {
+    await client.views.update({
+      view_id: viewId,
+      view: buildActivityLogModalView(activityLog, page, totalPages, conversationKey),
+    });
+  } catch (error) {
+    console.error('Error updating activity log modal page:', error);
+  }
+});
+
+// Handle "Download .txt" button click - uploads activity log as file
+app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^download_activity_log_(.+)$/);
+  const conversationKey = match ? match[1] : '';
+
+  console.log(`Download activity log clicked for: ${conversationKey}`);
+
+  const bodyWithChannel = body as any;
+  const channelId = bodyWithChannel.channel?.id;
+  const threadTs = bodyWithChannel.message?.thread_ts;
+
+  if (!channelId) {
+    console.error('No channel_id found for activity log download');
+    return;
+  }
+
+  // Get activity log from storage
+  const activityLog = await getActivityLog(conversationKey);
+
+  if (!activityLog) {
+    // Log not found - session was cleared or bot restarted
+    try {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithChannel.user?.id || 'unknown',
+        text: ':warning: Activity log is no longer available.\n\nThis can happen if the session was cleared or the bot was restarted.',
+      });
+    } catch (error) {
+      console.error('Error posting activity log unavailable message:', error);
+    }
+    return;
+  }
+
+  if (activityLog.length === 0) {
+    // Log exists but is empty - no tools or thinking blocks were used
+    try {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithChannel.user?.id || 'unknown',
+        text: ':information_source: No activity to download.\n\nClaude responded directly without using any tools or extended thinking.',
+      });
+    } catch (error) {
+      console.error('Error posting activity log empty message:', error);
+    }
+    return;
+  }
+
+  // Format as plain text with FULL thinking content
+  const lines: string[] = [];
+  lines.push('='.repeat(60));
+  lines.push(`Activity Log for ${conversationKey}`);
+  lines.push(`Generated: ${new Date().toISOString()}`);
+  lines.push('='.repeat(60));
+  lines.push('');
+
+  for (const entry of activityLog) {
+    const timestamp = new Date(entry.timestamp).toISOString();
+    const duration = entry.durationMs ? ` (${entry.durationMs}ms)` : '';
+
+    if (entry.type === 'thinking') {
+      // Include FULL thinking content in download
+      lines.push(`[${timestamp}] THINKING:`);
+      lines.push('-'.repeat(40));
+      lines.push(entry.thinkingContent || entry.thinkingTruncated || '');
+      lines.push('-'.repeat(40));
+      lines.push('');
+    } else if (entry.type === 'tool_start') {
+      lines.push(`[${timestamp}] TOOL START: ${entry.tool || 'unknown'}`);
+    } else if (entry.type === 'tool_complete') {
+      lines.push(`[${timestamp}] TOOL COMPLETE: ${entry.tool || 'unknown'}${duration}`);
+    } else if (entry.type === 'error') {
+      lines.push(`[${timestamp}] ERROR: ${entry.message || 'unknown'}`);
+    }
+  }
+
+  const content = lines.join('\n');
+  const filename = `activity-log-${conversationKey.replace(/[^a-zA-Z0-9_-]/g, '-')}.txt`;
+
+  // Upload as file snippet (requires files:write scope)
+  try {
+    await client.files.uploadV2({
+      channel_id: channelId,
+      thread_ts: threadTs,
+      content,
+      filename,
+      title: 'Activity Log',
+    });
+  } catch (error) {
+    console.error('Error uploading activity log file:', error);
+    // Post error message
+    try {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithChannel.user?.id || 'unknown',
+        text: ':warning: Failed to upload activity log. The bot may need `files:write` permission.',
+      });
+    } catch (e) {
+      console.error('Error posting upload error message:', e);
+    }
   }
 });
 

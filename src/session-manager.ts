@@ -50,6 +50,20 @@ export interface ThreadSession {
 }
 
 /**
+ * Activity log entry for real-time processing feedback.
+ */
+export interface ActivityEntry {
+  timestamp: number;
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error';
+  tool?: string;
+  durationMs?: number;
+  message?: string;
+  // For thinking blocks
+  thinkingContent?: string;     // Full content (stored for modal/download)
+  thinkingTruncated?: string;   // First 500 chars (for live display)
+}
+
+/**
  * Maps Slack message timestamps to SDK message IDs for point-in-time thread forking.
  */
 export interface SlackMessageMapping {
@@ -72,6 +86,8 @@ interface ChannelSession extends Session {
   };
   /** Map of Slack ts → SDK message ID for point-in-time thread forking */
   messageMap?: Record<string, SlackMessageMapping>;
+  /** Activity logs by conversationKey (for View Log modal) */
+  activityLogs?: Record<string, ActivityEntry[]>;
 }
 
 interface SessionStore {
@@ -151,6 +167,7 @@ export function saveSession(channelId: string, session: Partial<Session>): void 
     configuredAt: existing?.configuredAt ?? null,
     threads: existing?.threads,  // Preserve existing threads
     messageMap: existing?.messageMap,  // Preserve message mappings for point-in-time forking
+    activityLogs: existing?.activityLogs,  // Preserve activity logs for View Log modal
     ...session,
   };
   saveSessions(store);
@@ -472,4 +489,60 @@ export function deleteSession(channelId: string): void {
   console.log(`  ✓ Removed channel ${channelId} from sessions.json`);
 
   console.log(`✅ Cleanup complete for channel ${channelId}`);
+}
+
+// ============================================================================
+// Activity Log Storage (for View Log modal)
+// ============================================================================
+
+/**
+ * Save activity log for a conversation.
+ * Activity logs are stored by conversationKey (channelId or channelId_threadTs).
+ */
+export async function saveActivityLog(
+  conversationKey: string,
+  entries: ActivityEntry[]
+): Promise<void> {
+  const store = loadSessions();
+
+  // Extract channelId from conversationKey
+  const channelId = conversationKey.includes('_')
+    ? conversationKey.split('_')[0]
+    : conversationKey;
+
+  const channelSession = store.channels[channelId];
+  if (!channelSession) {
+    console.warn(`Cannot save activity log - channel ${channelId} has no session`);
+    return;
+  }
+
+  // Initialize activityLogs if needed
+  if (!channelSession.activityLogs) {
+    channelSession.activityLogs = {};
+  }
+
+  channelSession.activityLogs[conversationKey] = entries;
+  saveSessions(store);
+}
+
+/**
+ * Get activity log for a conversation.
+ */
+export async function getActivityLog(
+  conversationKey: string
+): Promise<ActivityEntry[] | null> {
+  const store = loadSessions();
+
+  // Extract channelId from conversationKey
+  const channelId = conversationKey.includes('_')
+    ? conversationKey.split('_')[0]
+    : conversationKey;
+
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession?.activityLogs) {
+    return null;
+  }
+
+  return channelSession.activityLogs[conversationKey] ?? null;
 }

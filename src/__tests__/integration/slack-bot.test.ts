@@ -56,6 +56,8 @@ vi.mock('../../session-manager.js', () => ({
   saveMessageMapping: vi.fn(),
   findForkPointMessageId: vi.fn().mockReturnValue(null),
   deleteSession: vi.fn(),
+  saveActivityLog: vi.fn().mockResolvedValue(undefined),
+  getActivityLog: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({
@@ -72,7 +74,7 @@ vi.mock('fs', () => ({
   },
 }));
 
-import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId } from '../../session-manager.js';
+import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog } from '../../session-manager.js';
 import { isSessionActiveInTerminal } from '../../concurrent-check.js';
 import { startClaudeQuery } from '../../claude-client.js';
 
@@ -303,30 +305,38 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Verify header message was posted with mode and Abort button
+      // Verify status panel message was posted (Message 1)
       const postMessageCalls = mockClient.chat.postMessage.mock.calls;
-      expect(postMessageCalls.length).toBeGreaterThanOrEqual(1);
+      expect(postMessageCalls.length).toBeGreaterThanOrEqual(2); // Status panel + Activity log
 
-      // First postMessage should be the header message
-      const headerCall = postMessageCalls[0][0];
-      expect(headerCall.channel).toBe('C123');
-      expect(headerCall.text).toBe('plan'); // Initial text is mode
+      // First postMessage should be the status panel
+      const statusPanelCall = postMessageCalls[0][0];
+      expect(statusPanelCall.channel).toBe('C123');
+      expect(statusPanelCall.text).toBe('Claude is starting...');
 
-      // Verify blocks contain mode and Abort button
-      const blocks = headerCall.blocks;
+      // Verify blocks contain mode info and Abort button
+      const blocks = statusPanelCall.blocks;
       expect(blocks).toBeDefined();
-      expect(blocks.length).toBe(2);
+      expect(blocks.length).toBe(3);
 
-      // First block: mode context
-      expect(blocks[0].type).toBe('context');
-      expect(blocks[0].elements[0].text).toBe('_Plan_');
+      // First block: header section
+      expect(blocks[0].type).toBe('section');
+      expect(blocks[0].text.text).toContain('Claude is working');
 
-      // Second block: Abort button
-      expect(blocks[1].type).toBe('actions');
-      expect(blocks[1].elements[0].type).toBe('button');
-      expect(blocks[1].elements[0].text.text).toBe('Abort');
-      expect(blocks[1].elements[0].style).toBe('danger');
-      expect(blocks[1].elements[0].action_id).toMatch(/^abort_query_/);
+      // Second block: status context
+      expect(blocks[1].type).toBe('context');
+      expect(blocks[1].elements[0].text).toContain('Plan');
+
+      // Third block: Abort button
+      expect(blocks[2].type).toBe('actions');
+      expect(blocks[2].elements[0].type).toBe('button');
+      expect(blocks[2].elements[0].text.text).toBe('Abort');
+      expect(blocks[2].elements[0].style).toBe('danger');
+      expect(blocks[2].elements[0].action_id).toMatch(/^abort_query_/);
+
+      // Second postMessage should be the activity log
+      const activityLogCall = postMessageCalls[1][0];
+      expect(activityLogCall.text).toContain('Analyzing request');
     });
 
     it('should update header with stats on success', async () => {
@@ -369,20 +379,28 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Header should be posted then updated (not deleted)
+      // Both messages should be posted then updated (not deleted)
       expect(mockClient.chat.postMessage).toHaveBeenCalled();
       expect(mockClient.chat.update).toHaveBeenCalled();
       expect(mockClient.chat.delete).not.toHaveBeenCalled();
 
       // Verify chat.update was called with complete status and stats
       const updateCalls = mockClient.chat.update.mock.calls;
-      // Last update should be the complete status with stats
-      const completeCall = updateCalls[updateCalls.length - 1][0];
-      expect(completeCall.channel).toBe('C123');
-      expect(completeCall.blocks[0].elements[0].text).toContain('claude-sonnet');
-      expect(completeCall.blocks[0].elements[0].text).toContain('Plan');
-      expect(completeCall.blocks[0].elements[0].text).toContain('300 tokens');
-      expect(completeCall.blocks[0].elements[0].text).toContain('5.0s');
+      // Find the status panel complete update (has 'Complete' in header)
+      const statusPanelComplete = updateCalls.find((call: any) =>
+        call[0].blocks?.some((b: any) => b.text?.text?.includes('Complete'))
+      );
+      expect(statusPanelComplete).toBeDefined();
+
+      // Verify status panel contains model, mode, and stats
+      const completeBlocks = statusPanelComplete![0].blocks;
+      expect(completeBlocks[0].text.text).toContain('Complete');
+      // Context block has stats
+      expect(completeBlocks[1].elements[0].text).toContain('claude-sonnet');
+      expect(completeBlocks[1].elements[0].text).toContain('Plan');
+      expect(completeBlocks[1].elements[0].text).toContain('100');  // input tokens
+      expect(completeBlocks[1].elements[0].text).toContain('200');  // output tokens
+      expect(completeBlocks[1].elements[0].text).toContain('5.0s');
     });
 
     it('should post response after processing', async () => {
@@ -424,12 +442,12 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Should post: 1) status message, 2) response message
+      // Should post: 1) status panel, 2) activity log, 3) response
       const postCalls = mockClient.chat.postMessage.mock.calls;
-      expect(postCalls.length).toBe(2);
+      expect(postCalls.length).toBe(3);
 
-      // Second call should be the response
-      const responseCall = postCalls[1][0];
+      // Third call should be the response
+      const responseCall = postCalls[2][0];
       expect(responseCall.text).toBe('Hello from Claude!');
     });
   });
@@ -1877,6 +1895,341 @@ describe('slack-bot handlers', () => {
       const saveCall = vi.mocked(saveThreadSession).mock.calls[0];
       expect(saveCall[2].forkedFrom).toBe(threadSessionId);
       expect(saveCall[2].forkedFrom).not.toBe(mainSessionId);
+    });
+  });
+
+  describe('view_activity_log handler', () => {
+    it('should register view_activity_log handler', async () => {
+      const handler = registeredHandlers['action_^view_activity_log_(.+)$'];
+      expect(handler).toBeDefined();
+    });
+
+    it('should open modal with activity log entries', async () => {
+      const handler = registeredHandlers['action_^view_activity_log_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock activity log data
+      vi.mocked(getActivityLog).mockResolvedValue([
+        { timestamp: Date.now(), type: 'thinking', thinkingContent: 'Test thinking content' },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
+      ]);
+
+      await handler({
+        action: { action_id: 'view_activity_log_C123_thread456' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+          channel: { id: 'C123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trigger_id: 'trigger123',
+          view: expect.objectContaining({
+            type: 'modal',
+            title: expect.objectContaining({ text: 'Activity Log' }),
+          }),
+        })
+      );
+    });
+
+    it('should show error modal when activity log not found', async () => {
+      const handler = registeredHandlers['action_^view_activity_log_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock no activity log
+      vi.mocked(getActivityLog).mockResolvedValue(null);
+
+      await handler({
+        action: { action_id: 'view_activity_log_C123_thread456' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+          channel: { id: 'C123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          view: expect.objectContaining({
+            type: 'modal',
+            blocks: expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.objectContaining({
+                  text: expect.stringContaining('no longer available'),
+                }),
+              }),
+            ]),
+          }),
+        })
+      );
+    });
+
+    it('should show "no activity" message when log exists but is empty', async () => {
+      const handler = registeredHandlers['action_^view_activity_log_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock empty activity log - log exists but has no entries
+      vi.mocked(getActivityLog).mockResolvedValue([]);
+
+      await handler({
+        action: { action_id: 'view_activity_log_C123_thread456' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+          channel: { id: 'C123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Empty array shows "no activity" message (different from null which shows "no longer available")
+      expect(mockClient.views.open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          view: expect.objectContaining({
+            type: 'modal',
+            blocks: expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.objectContaining({
+                  text: expect.stringContaining('No activity to display'),
+                }),
+              }),
+            ]),
+          }),
+        })
+      );
+    });
+  });
+
+  describe('activity_log_page pagination handler', () => {
+    it('should register activity_log_page handler', async () => {
+      const handler = registeredHandlers['action_^activity_log_page_(\\d+)$'];
+      expect(handler).toBeDefined();
+    });
+
+    it('should update modal with requested page', async () => {
+      const handler = registeredHandlers['action_^activity_log_page_(\\d+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock activity log with enough entries for pagination
+      const entries = Array.from({ length: 30 }, (_, i) => ({
+        timestamp: Date.now() + i,
+        type: 'tool_start' as const,
+        tool: `Tool${i}`,
+      }));
+      vi.mocked(getActivityLog).mockResolvedValue(entries);
+
+      await handler({
+        action: { action_id: 'activity_log_page_2' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+          view: {
+            id: 'view123',
+            private_metadata: JSON.stringify({ conversationKey: 'C123_thread456', currentPage: 1 }),
+          },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          view_id: 'view123',
+          view: expect.objectContaining({
+            type: 'modal',
+            private_metadata: expect.stringContaining('"currentPage":2'),
+          }),
+        })
+      );
+    });
+
+    it('should handle missing activity log during pagination', async () => {
+      const handler = registeredHandlers['action_^activity_log_page_(\\d+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock missing activity log
+      vi.mocked(getActivityLog).mockResolvedValue(null);
+
+      await handler({
+        action: { action_id: 'activity_log_page_2' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+          view: {
+            id: 'view123',
+            private_metadata: JSON.stringify({ conversationKey: 'C123_thread456', currentPage: 1 }),
+          },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Should not crash, just return early
+    });
+  });
+
+  describe('download_activity_log handler', () => {
+    it('should register download_activity_log handler', async () => {
+      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+      expect(handler).toBeDefined();
+    });
+
+    it('should upload file with activity log content', async () => {
+      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock activity log data
+      vi.mocked(getActivityLog).mockResolvedValue([
+        { timestamp: 1700000000000, type: 'thinking', thinkingContent: 'Analyzing the request' },
+        { timestamp: 1700000001000, type: 'tool_start', tool: 'Read' },
+        { timestamp: 1700000002000, type: 'tool_complete', tool: 'Read', durationMs: 1000 },
+      ]);
+
+      await handler({
+        action: { action_id: 'download_activity_log_C123_thread456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123', thread_ts: 'thread456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          filename: expect.stringMatching(/activity-log-.*\.txt/),
+          content: expect.stringContaining('THINKING'),
+        })
+      );
+    });
+
+    it('should include full thinking content in download', async () => {
+      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      const longThinking = 'A'.repeat(1000);
+      vi.mocked(getActivityLog).mockResolvedValue([
+        { timestamp: 1700000000000, type: 'thinking', thinkingContent: longThinking },
+      ]);
+
+      await handler({
+        action: { action_id: 'download_activity_log_C123' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining(longThinking),
+        })
+      );
+    });
+
+    it('should handle missing activity log gracefully', async () => {
+      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      vi.mocked(getActivityLog).mockResolvedValue(null);
+
+      await handler({
+        action: { action_id: 'download_activity_log_C123' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Should not attempt upload
+      expect(mockClient.files.uploadV2).not.toHaveBeenCalled();
+      // Should post ephemeral with "no longer available" message
+      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('no longer available'),
+        })
+      );
+    });
+
+    it('should handle empty activity log with "no activity" message', async () => {
+      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock empty activity log - log exists but has no entries
+      vi.mocked(getActivityLog).mockResolvedValue([]);
+
+      await handler({
+        action: { action_id: 'download_activity_log_C123' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Should not attempt upload
+      expect(mockClient.files.uploadV2).not.toHaveBeenCalled();
+      // Should post ephemeral with "no activity" message (different from null)
+      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('No activity to download'),
+        })
+      );
+    });
+
+    it('should format tool entries with duration', async () => {
+      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      vi.mocked(getActivityLog).mockResolvedValue([
+        { timestamp: 1700000000000, type: 'tool_start', tool: 'Edit' },
+        { timestamp: 1700000001500, type: 'tool_complete', tool: 'Edit', durationMs: 1500 },
+      ]);
+
+      await handler({
+        action: { action_id: 'download_activity_log_C123' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      // Format is: "TOOL COMPLETE: Edit (1500ms)"
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringMatching(/TOOL COMPLETE: Edit \(1500ms\)/),
+        })
+      );
     });
   });
 });

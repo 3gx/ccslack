@@ -880,3 +880,489 @@ export function buildPathSetupBlocks(): Block[] {
     },
   ];
 }
+
+// ============================================================================
+// Real-Time Processing Feedback Blocks
+// ============================================================================
+
+// Activity entry type (mirrors session-manager.ts)
+export interface ActivityEntry {
+  timestamp: number;
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error';
+  tool?: string;
+  durationMs?: number;
+  message?: string;
+  thinkingContent?: string;
+  thinkingTruncated?: string;
+}
+
+// Constants for activity log display
+const THINKING_TRUNCATE_LENGTH = 500;
+const MAX_LIVE_ENTRIES = 300;
+const ROLLING_WINDOW_SIZE = 20;
+const MODAL_PAGE_SIZE = 15;
+
+/**
+ * Parameters for status panel blocks.
+ */
+export interface StatusPanelParams {
+  status: 'starting' | 'thinking' | 'tool' | 'complete' | 'error' | 'aborted';
+  mode: PermissionMode;
+  model?: string;
+  currentTool?: string;
+  toolsCompleted: number;
+  elapsedMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  contextPercent?: number;
+  costUsd?: number;
+  conversationKey: string;
+  errorMessage?: string;
+  spinner?: string;  // Current spinner frame (cycles to show bot is alive)
+  rateLimitHits?: number;  // Number of Slack rate limits encountered
+}
+
+/**
+ * Get emoji for a tool based on its name.
+ */
+export function getToolEmoji(toolName?: string): string {
+  if (!toolName) return ':gear:';
+  const lower = toolName.toLowerCase();
+  if (lower.includes('read') || lower.includes('glob') || lower.includes('grep')) return ':mag:';
+  if (lower.includes('edit') || lower.includes('write')) return ':memo:';
+  if (lower.includes('bash') || lower.includes('shell')) return ':computer:';
+  if (lower.includes('web') || lower.includes('fetch')) return ':globe_with_meridians:';
+  if (lower.includes('task')) return ':robot_face:';
+  if (lower.includes('todo')) return ':clipboard:';
+  return ':gear:';
+}
+
+/**
+ * Format SDK tool name for display.
+ * Handles MCP-style names like "mcp__claude-code__Read" -> "Read"
+ */
+export function formatToolName(sdkToolName: string): string {
+  if (!sdkToolName.includes('__')) return sdkToolName;
+  return sdkToolName.split('__').pop()!;
+}
+
+/**
+ * Build blocks for status panel (Message 1).
+ * Shows mode, model, current activity, and abort button during processing.
+ * Shows final stats (tokens, context %, cost) on completion.
+ */
+export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
+  const {
+    status,
+    mode,
+    model,
+    currentTool,
+    toolsCompleted,
+    elapsedMs,
+    inputTokens,
+    outputTokens,
+    contextPercent,
+    costUsd,
+    conversationKey,
+    errorMessage,
+    spinner,
+    rateLimitHits,
+  } = params;
+
+  const blocks: Block[] = [];
+
+  // SDK mode labels for display
+  const modeLabels: Record<PermissionMode, string> = {
+    plan: 'Plan',
+    default: 'Default',
+    bypassPermissions: 'Bypass',
+    acceptEdits: 'AcceptEdits',
+  };
+  const modeLabel = modeLabels[mode] || mode;
+
+  // Format elapsed time
+  const elapsedSec = (elapsedMs / 1000).toFixed(1);
+
+  switch (status) {
+    case 'starting':
+      // Header with spinner and elapsed time
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:robot_face: *Claude is working...* ${spinner || ''} [${elapsedSec}s]`,
+        },
+      });
+      // Status line
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `_${modeLabel} | Starting..._`,
+        }],
+      });
+      // Abort button
+      blocks.push({
+        type: 'actions',
+        block_id: `status_panel_${conversationKey}`,
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Abort' },
+          style: 'danger',
+          action_id: `abort_query_${conversationKey}`,
+        }],
+      });
+      break;
+
+    case 'thinking':
+    case 'tool':
+      // Header with spinner and elapsed time
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:robot_face: *Claude is working...* ${spinner || ''} [${elapsedSec}s]`,
+        },
+      });
+      // Build status line with current activity
+      const activityParts = [modeLabel];
+      if (model) activityParts.push(model);
+      if (status === 'thinking') {
+        activityParts.push('Thinking...');
+      } else if (currentTool) {
+        activityParts.push(`Running: ${currentTool}`);
+      }
+      if (toolsCompleted > 0) {
+        activityParts.push(`Tools: ${toolsCompleted}`);
+      }
+      activityParts.push(`${elapsedSec}s`);
+      if (rateLimitHits && rateLimitHits > 0) {
+        activityParts.push(`:warning: ${rateLimitHits} rate limit${rateLimitHits > 1 ? 's' : ''}`);
+      }
+
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `_${activityParts.join(' | ')}_`,
+        }],
+      });
+      // Abort button
+      blocks.push({
+        type: 'actions',
+        block_id: `status_panel_${conversationKey}`,
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Abort' },
+          style: 'danger',
+          action_id: `abort_query_${conversationKey}`,
+        }],
+      });
+      break;
+
+    case 'complete':
+      // Header
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: ':white_check_mark: *Complete*',
+        },
+      });
+      // Build final stats line
+      const statsParts = [modeLabel];
+      if (model) statsParts.push(model);
+      if (inputTokens || outputTokens) {
+        const inStr = inputTokens ? inputTokens.toLocaleString() : '0';
+        const outStr = outputTokens ? outputTokens.toLocaleString() : '0';
+        statsParts.push(`${inStr} in / ${outStr} out`);
+      }
+      if (contextPercent !== undefined) {
+        statsParts.push(`${contextPercent}% ctx`);
+      }
+      if (costUsd !== undefined) {
+        statsParts.push(`$${costUsd.toFixed(4)}`);
+      }
+      statsParts.push(`${elapsedSec}s`);
+      if (rateLimitHits && rateLimitHits > 0) {
+        statsParts.push(`:warning: ${rateLimitHits} rate limit${rateLimitHits > 1 ? 's' : ''}`);
+      }
+
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `_${statsParts.join(' | ')}_`,
+        }],
+      });
+      // No abort button when complete
+      break;
+
+    case 'error':
+      // Header
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: ':x: *Error*',
+        },
+      });
+      // Error message
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `_${errorMessage || 'Unknown error'}_`,
+        }],
+      });
+      break;
+
+    case 'aborted':
+      // Header
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: ':octagonal_sign: *Aborted*',
+        },
+      });
+      // Status line
+      const abortedParts = [modeLabel];
+      if (model) abortedParts.push(model);
+      abortedParts.push('aborted');
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `_${abortedParts.join(' | ')}_`,
+        }],
+      });
+      break;
+  }
+
+  return blocks;
+}
+
+/**
+ * Build activity log text for live display (during processing).
+ * Uses rolling window if too many entries.
+ */
+export function buildActivityLogText(entries: ActivityEntry[], inProgress: boolean): string {
+  // Apply rolling window if too many entries
+  const displayEntries = entries.length > MAX_LIVE_ENTRIES
+    ? entries.slice(-ROLLING_WINDOW_SIZE)
+    : entries;
+
+  const lines: string[] = [];
+
+  // Show truncation notice if in rolling window mode
+  if (entries.length > MAX_LIVE_ENTRIES) {
+    const hiddenCount = entries.length - ROLLING_WINDOW_SIZE;
+    lines.push(`_... ${hiddenCount} earlier entries (see full log after completion) ..._\n`);
+  }
+
+  // Build set of completed tools to avoid showing both start and complete
+  const completedTools = new Set<string>();
+  for (const entry of displayEntries) {
+    if (entry.type === 'tool_complete' && entry.tool) {
+      completedTools.add(entry.tool);
+    }
+  }
+
+  for (const entry of displayEntries) {
+    switch (entry.type) {
+      case 'starting':
+        lines.push(':brain: *Analyzing request...*');
+        break;
+      case 'thinking':
+        // Show truncated thinking (500 chars max)
+        const thinkingText = entry.thinkingTruncated || entry.thinkingContent || '';
+        const charCount = entry.thinkingContent?.length || thinkingText.length;
+        const truncatedIndicator = charCount > THINKING_TRUNCATE_LENGTH
+          ? ` _[${charCount} chars]_`
+          : '';
+        const thinkingDuration = entry.durationMs
+          ? ` [${(entry.durationMs / 1000).toFixed(1)}s]`
+          : '';
+        lines.push(`:brain: *Thinking...*${thinkingDuration}${truncatedIndicator}`);
+        if (thinkingText) {
+          // Indent thinking content and wrap in code block for readability
+          const preview = thinkingText.substring(0, 200).replace(/\n/g, ' ').trim();
+          if (preview) {
+            lines.push(`> ${preview}${thinkingText.length > 200 ? '...' : ''}`);
+          }
+        }
+        break;
+      case 'tool_start':
+        // Only show tool_start if tool hasn't completed yet (in progress)
+        if (!completedTools.has(entry.tool || '')) {
+          const startEmoji = getToolEmoji(entry.tool);
+          lines.push(`${startEmoji} *${entry.tool}* [in progress]`);
+        }
+        break;
+      case 'tool_complete':
+        // Show completed tool with checkmark and duration
+        const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+        lines.push(`:white_check_mark: *${entry.tool}*${duration}`);
+        break;
+      case 'error':
+        lines.push(`:x: Error: ${entry.message}`);
+        break;
+    }
+  }
+
+  // Fallback only if no entries at all (shouldn't happen with starting entry)
+  if (lines.length === 0) {
+    lines.push(':brain: Analyzing request...');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Build collapsed activity summary blocks for completion.
+ * Shows summary with View Log and Download buttons.
+ */
+export function buildCollapsedActivityBlocks(
+  thinkingBlockCount: number,
+  toolsCompleted: number,
+  durationMs: number,
+  conversationKey: string
+): Block[] {
+  const durationSec = (durationMs / 1000).toFixed(1);
+
+  // Build summary text based on what happened
+  let summaryText: string;
+  if (toolsCompleted === 0 && thinkingBlockCount === 0) {
+    summaryText = `:clipboard: Completed in ${durationSec}s`;
+  } else if (toolsCompleted === 0) {
+    summaryText = `:clipboard: ${thinkingBlockCount} thinking block${thinkingBlockCount > 1 ? 's' : ''} in ${durationSec}s`;
+  } else if (thinkingBlockCount === 0) {
+    summaryText = `:clipboard: ${toolsCompleted} tool${toolsCompleted > 1 ? 's' : ''} completed in ${durationSec}s`;
+  } else {
+    summaryText = `:clipboard: ${thinkingBlockCount} thinking + ${toolsCompleted} tool${toolsCompleted > 1 ? 's' : ''} in ${durationSec}s`;
+  }
+
+  return [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: summaryText },
+    },
+    {
+      type: 'actions',
+      block_id: `activity_actions_${conversationKey}`,
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'View Log' },
+          action_id: `view_activity_log_${conversationKey}`,
+          value: conversationKey,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Download .txt' },
+          action_id: `download_activity_log_${conversationKey}`,
+          value: conversationKey,
+        },
+      ],
+    },
+  ];
+}
+
+/**
+ * Build modal view for activity log with pagination.
+ */
+export function buildActivityLogModalView(
+  entries: ActivityEntry[],
+  currentPage: number,
+  totalPages: number,
+  conversationKey: string
+): any {
+  const startIdx = (currentPage - 1) * MODAL_PAGE_SIZE;
+  const pageEntries = entries.slice(startIdx, startIdx + MODAL_PAGE_SIZE);
+
+  const blocks: Block[] = [];
+
+  // Page header
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: `Page ${currentPage} of ${totalPages} | ${entries.length} total entries`,
+    }],
+  });
+
+  blocks.push({ type: 'divider' });
+
+  // Build log content for this page
+  for (const entry of pageEntries) {
+    const timestamp = new Date(entry.timestamp).toLocaleTimeString();
+
+    if (entry.type === 'starting') {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `:brain: *Started processing* _${timestamp}_` },
+      });
+    } else if (entry.type === 'thinking') {
+      // Show FULL thinking content in modal (not truncated)
+      const thinkingText = entry.thinkingContent || entry.thinkingTruncated || '';
+      // Truncate to avoid Slack's 3000 char limit per block
+      const displayText = thinkingText.length > 2800
+        ? thinkingText.substring(0, 2800) + '...'
+        : thinkingText;
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:brain: *Thinking* [${thinkingText.length} chars] _${timestamp}_\n\`\`\`${displayText}\`\`\``,
+        },
+      });
+    } else if (entry.type === 'tool_start') {
+      const emoji = getToolEmoji(entry.tool);
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `${emoji} *${entry.tool}* started _${timestamp}_` },
+      });
+    } else if (entry.type === 'tool_complete') {
+      const duration = entry.durationMs ? ` (${(entry.durationMs / 1000).toFixed(1)}s)` : '';
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `:white_check_mark: *${entry.tool}* complete${duration} _${timestamp}_` },
+      });
+    } else if (entry.type === 'error') {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `:x: Error: ${entry.message} _${timestamp}_` },
+      });
+    }
+  }
+
+  // Pagination buttons
+  const paginationElements: any[] = [];
+  if (currentPage > 1) {
+    paginationElements.push({
+      type: 'button',
+      text: { type: 'plain_text', text: '◀ Prev' },
+      action_id: `activity_log_page_${currentPage - 1}`,
+    });
+  }
+  if (currentPage < totalPages) {
+    paginationElements.push({
+      type: 'button',
+      text: { type: 'plain_text', text: 'Next ▶' },
+      action_id: `activity_log_page_${currentPage + 1}`,
+    });
+  }
+
+  if (paginationElements.length > 0) {
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'actions', elements: paginationElements });
+  }
+
+  return {
+    type: 'modal',
+    private_metadata: JSON.stringify({ conversationKey, currentPage }),
+    title: { type: 'plain_text', text: 'Activity Log' },
+    blocks,
+  };
+}

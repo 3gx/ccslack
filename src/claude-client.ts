@@ -53,6 +53,8 @@ export function startClaudeQuery(
     permissionMode,
     // Claude Code preset configuration
     systemPrompt: 'claude_code',
+    // Enable stream_event messages for real-time activity tracking
+    includePartialMessages: true,
   };
 
   if (options.workingDir) {

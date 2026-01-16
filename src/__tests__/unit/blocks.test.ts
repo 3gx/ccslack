@@ -15,6 +15,13 @@ import {
   buildToolApprovalBlocks,
   formatToolInput,
   buildForkAnchorBlocks,
+  buildStatusPanelBlocks,
+  buildActivityLogText,
+  buildCollapsedActivityBlocks,
+  buildActivityLogModalView,
+  getToolEmoji,
+  formatToolName,
+  ActivityEntry,
 } from '../../blocks.js';
 
 describe('blocks', () => {
@@ -767,6 +774,1175 @@ describe('blocks', () => {
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
       expect(sectionBlock?.text?.text).toContain('async/await');
       expect(sectionBlock?.text?.text).toContain('promises');
+    });
+  });
+
+  // ============================================================================
+  // Real-Time Processing Feedback Block Tests
+  // ============================================================================
+
+  describe('getToolEmoji', () => {
+    it('should return magnifying glass for read operations', () => {
+      expect(getToolEmoji('Read')).toBe(':mag:');
+      expect(getToolEmoji('Glob')).toBe(':mag:');
+      expect(getToolEmoji('Grep')).toBe(':mag:');
+    });
+
+    it('should return memo for write operations', () => {
+      expect(getToolEmoji('Edit')).toBe(':memo:');
+      expect(getToolEmoji('Write')).toBe(':memo:');
+    });
+
+    it('should return computer for bash operations', () => {
+      expect(getToolEmoji('Bash')).toBe(':computer:');
+      expect(getToolEmoji('Shell')).toBe(':computer:');
+    });
+
+    it('should return globe for web operations', () => {
+      expect(getToolEmoji('WebFetch')).toBe(':globe_with_meridians:');
+      expect(getToolEmoji('WebSearch')).toBe(':globe_with_meridians:');
+    });
+
+    it('should return robot for task operations', () => {
+      expect(getToolEmoji('Task')).toBe(':robot_face:');
+    });
+
+    it('should return clipboard for todo operations', () => {
+      expect(getToolEmoji('Todo')).toBe(':clipboard:');
+      // Note: TodoWrite matches 'write' first, so it returns :memo:
+      expect(getToolEmoji('TodoWrite')).toBe(':memo:');
+    });
+
+    it('should return gear for unknown tools', () => {
+      expect(getToolEmoji('UnknownTool')).toBe(':gear:');
+      expect(getToolEmoji(undefined)).toBe(':gear:');
+    });
+
+    it('should be case insensitive', () => {
+      expect(getToolEmoji('READ')).toBe(':mag:');
+      expect(getToolEmoji('edit')).toBe(':memo:');
+      expect(getToolEmoji('BASH')).toBe(':computer:');
+    });
+  });
+
+  describe('formatToolName', () => {
+    it('should return simple tool names unchanged', () => {
+      expect(formatToolName('Read')).toBe('Read');
+      expect(formatToolName('Edit')).toBe('Edit');
+      expect(formatToolName('Bash')).toBe('Bash');
+    });
+
+    it('should strip MCP-style prefixes', () => {
+      expect(formatToolName('mcp__claude-code__Read')).toBe('Read');
+      expect(formatToolName('mcp__ask-user__ask_user')).toBe('ask_user');
+      expect(formatToolName('mcp__ask-user__approve_action')).toBe('approve_action');
+    });
+
+    it('should handle double underscore in tool name', () => {
+      expect(formatToolName('prefix__middle__ToolName')).toBe('ToolName');
+    });
+  });
+
+  describe('buildStatusPanelBlocks', () => {
+    const baseParams = {
+      mode: 'plan' as const,
+      toolsCompleted: 0,
+      elapsedMs: 0,
+      conversationKey: 'C123',
+    };
+
+    describe('starting status', () => {
+      it('should show working header and starting text', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'starting',
+        });
+
+        expect(blocks).toHaveLength(3);
+        expect(blocks[0].type).toBe('section');
+        expect((blocks[0] as any).text.text).toContain('Claude is working');
+        expect(blocks[1].type).toBe('context');
+        expect((blocks[1] as any).elements[0].text).toContain('Plan');
+        expect((blocks[1] as any).elements[0].text).toContain('Starting');
+      });
+
+      it('should include Abort button', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'starting',
+        });
+
+        expect(blocks[2].type).toBe('actions');
+        const button = (blocks[2] as any).elements[0];
+        expect(button.text.text).toBe('Abort');
+        expect(button.style).toBe('danger');
+        expect(button.action_id).toContain('abort_query_');
+      });
+    });
+
+    describe('thinking status', () => {
+      it('should show Thinking in status line', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+          model: 'claude-sonnet',
+          elapsedMs: 5000,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Thinking');
+        expect(contextText).toContain('claude-sonnet');
+        expect(contextText).toContain('5.0s');
+      });
+
+      it('should show tools completed count when > 0', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+          toolsCompleted: 3,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Tools: 3');
+      });
+
+      it('should include Abort button', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+        });
+
+        expect(blocks[2].type).toBe('actions');
+      });
+    });
+
+    describe('tool status', () => {
+      it('should show current tool name', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'tool',
+          currentTool: 'Read',
+          model: 'claude-sonnet',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Running: Read');
+      });
+
+      it('should include Abort button', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'tool',
+          currentTool: 'Edit',
+        });
+
+        expect(blocks[2].type).toBe('actions');
+      });
+    });
+
+    describe('complete status', () => {
+      it('should show Complete header', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          model: 'claude-sonnet',
+          elapsedMs: 10000,
+        });
+
+        expect(blocks).toHaveLength(2); // No Abort button
+        expect((blocks[0] as any).text.text).toContain('Complete');
+      });
+
+      it('should show token counts', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          inputTokens: 1234,
+          outputTokens: 567,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('1,234');
+        expect(contextText).toContain('567');
+      });
+
+      it('should show context percentage', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          contextPercent: 45,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('45% ctx');
+      });
+
+      it('should show cost', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          costUsd: 0.0123,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('$0.0123');
+      });
+
+      it('should show duration', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          elapsedMs: 12345,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('12.3s');
+      });
+
+      it('should NOT include Abort button', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+        });
+
+        const actionsBlock = blocks.find((b: any) => b.type === 'actions');
+        expect(actionsBlock).toBeUndefined();
+      });
+    });
+
+    describe('error status', () => {
+      it('should show Error header', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'error',
+          errorMessage: 'Something went wrong',
+        });
+
+        expect(blocks).toHaveLength(2);
+        expect((blocks[0] as any).text.text).toContain('Error');
+      });
+
+      it('should show error message', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'error',
+          errorMessage: 'Connection timeout',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Connection timeout');
+      });
+
+      it('should show Unknown error when no message provided', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'error',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Unknown error');
+      });
+    });
+
+    describe('aborted status', () => {
+      it('should show Aborted header', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'aborted',
+          model: 'claude-sonnet',
+        });
+
+        expect(blocks).toHaveLength(2);
+        expect((blocks[0] as any).text.text).toContain('Aborted');
+      });
+
+      it('should show mode and aborted in status', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'aborted',
+          model: 'claude-opus',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Plan');
+        expect(contextText).toContain('claude-opus');
+        expect(contextText).toContain('aborted');
+      });
+    });
+
+    describe('spinner display', () => {
+      it('should include spinner in starting status header', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'starting',
+          spinner: '◐',
+        });
+
+        const headerText = (blocks[0] as any).text.text;
+        expect(headerText).toContain('Claude is working');
+        expect(headerText).toContain('◐');
+      });
+
+      it('should include spinner in thinking status header', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+          spinner: '◓',
+        });
+
+        const headerText = (blocks[0] as any).text.text;
+        expect(headerText).toContain('Claude is working');
+        expect(headerText).toContain('◓');
+      });
+
+      it('should include spinner in tool status header', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'tool',
+          currentTool: 'Read',
+          spinner: '◑',
+        });
+
+        const headerText = (blocks[0] as any).text.text;
+        expect(headerText).toContain('Claude is working');
+        expect(headerText).toContain('◑');
+      });
+
+      it('should handle missing spinner gracefully', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+        });
+
+        const headerText = (blocks[0] as any).text.text;
+        expect(headerText).toContain('Claude is working');
+        // Should not crash without spinner
+      });
+    });
+
+    describe('mode labels', () => {
+      it('should display Plan for plan mode', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'starting',
+          mode: 'plan',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Plan');
+      });
+
+      it('should display Default for default mode', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'starting',
+          mode: 'default',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Default');
+      });
+
+      it('should display Bypass for bypassPermissions mode', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'starting',
+          mode: 'bypassPermissions',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('Bypass');
+      });
+
+      it('should display AcceptEdits for acceptEdits mode', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'starting',
+          mode: 'acceptEdits',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('AcceptEdits');
+      });
+    });
+
+    describe('rate limit display', () => {
+      it('should show rate limit count in thinking status when > 0', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+          rateLimitHits: 3,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain(':warning:');
+        expect(contextText).toContain('3 rate limits');
+      });
+
+      it('should show singular "rate limit" when count is 1', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+          rateLimitHits: 1,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('1 rate limit');
+        expect(contextText).not.toContain('1 rate limits');
+      });
+
+      it('should NOT show rate limit when count is 0', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+          rateLimitHits: 0,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).not.toContain('rate limit');
+      });
+
+      it('should NOT show rate limit when undefined', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'thinking',
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).not.toContain('rate limit');
+      });
+
+      it('should show rate limit count in tool status', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'tool',
+          currentTool: 'Read',
+          rateLimitHits: 2,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('2 rate limits');
+      });
+
+      it('should show rate limit count in complete status', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          rateLimitHits: 5,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain(':warning:');
+        expect(contextText).toContain('5 rate limits');
+      });
+
+      it('should NOT show rate limit in complete status when count is 0', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          rateLimitHits: 0,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).not.toContain('rate limit');
+      });
+    });
+  });
+
+  describe('buildActivityLogText', () => {
+    it('should show analyzing message when empty (fallback)', () => {
+      const text = buildActivityLogText([], true);
+      expect(text).toContain('Analyzing request');
+    });
+
+    it('should show fallback analyzing message when empty even if not in progress', () => {
+      // With empty array, fallback shows regardless of inProgress
+      const text = buildActivityLogText([], false);
+      expect(text).toContain('Analyzing request');
+    });
+
+    it('should format starting entry with brain emoji', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':brain:');
+      expect(text).toContain('Analyzing request');
+    });
+
+    it('should preserve starting entry when other entries are added', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      // Starting entry should still be present
+      expect(text).toContain(':brain: *Analyzing request...*');
+      // In-progress tool should show with [in progress]
+      expect(text).toContain(':mag: *Read* [in progress]');
+    });
+
+    it('should show simplified format: completed tools with checkmark, in-progress with emoji', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 200 },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Edit' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      // Starting entry
+      expect(text).toContain(':brain: *Analyzing request...*');
+      // Completed tool: checkmark + name + duration (no duplicate tool_start)
+      expect(text).toContain(':white_check_mark: *Read* [0.2s]');
+      expect(text).not.toContain(':mag: *Read*'); // tool_start for Read should NOT show
+      // In-progress tool: emoji + name + [in progress]
+      expect(text).toContain(':memo: *Edit* [in progress]');
+    });
+
+    it('should not show tool_start for completed tools', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Bash' },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Bash', durationMs: 500 },
+      ];
+      const text = buildActivityLogText(entries, true);
+      // Should only show completed entry, not tool_start
+      expect(text).toContain(':white_check_mark: *Bash* [0.5s]');
+      expect(text).not.toContain(':computer: *Bash*');
+    });
+
+    it('should format thinking entries with brain emoji', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: 'Let me analyze this problem...',
+          thinkingTruncated: 'Let me analyze this problem...',
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':brain:');
+      expect(text).toContain('Thinking');
+    });
+
+    it('should show elapsed time for thinking entries', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          durationMs: 500,
+          thinkingTruncated: 'test',
+        },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':brain: *Thinking...* [0.5s]');
+    });
+
+    it('should show [in progress] for in-progress tool_start entries', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Read', durationMs: 1200 },
+      ];
+      const text = buildActivityLogText(entries, true);
+      // In simplified format, tool_start always shows [in progress]
+      expect(text).toContain(':mag: *Read* [in progress]');
+    });
+
+    it('should show [in progress] for tool_start without duration', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Edit' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':memo: *Edit* [in progress]');
+    });
+
+    it('should show character count for long thinking blocks', () => {
+      const longContent = 'A'.repeat(600);
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: longContent,
+          thinkingTruncated: longContent.substring(0, 500) + '...',
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain('[600 chars]');
+    });
+
+    it('should format tool_start entries with appropriate emoji', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Edit' },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Bash' },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':mag:');
+      expect(text).toContain(':memo:');
+      expect(text).toContain(':computer:');
+    });
+
+    it('should format tool_complete entries with checkmark and duration', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 1500 },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':white_check_mark:');
+      expect(text).toContain('*Read*');
+      expect(text).toContain('[1.5s]');
+    });
+
+    it('should format error entries with x emoji', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'error', message: 'Connection failed' },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':x:');
+      expect(text).toContain('Connection failed');
+    });
+
+    it('should apply rolling window when entries exceed MAX_LIVE_ENTRIES', () => {
+      // Create 310 entries (> 300 MAX_LIVE_ENTRIES)
+      const entries: ActivityEntry[] = [];
+      for (let i = 0; i < 310; i++) {
+        entries.push({ timestamp: Date.now(), type: 'tool_start', tool: `Tool${i}` });
+      }
+
+      const text = buildActivityLogText(entries, true);
+      // Should show truncation notice
+      expect(text).toContain('earlier entries');
+      expect(text).toContain('see full log');
+      // Should only show last ROLLING_WINDOW_SIZE (20) entries
+      expect(text).toContain('Tool309');
+      expect(text).toContain('Tool290');
+      expect(text).not.toContain('Tool0');
+    });
+
+    it('should show preview of thinking content', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: 'This is my analysis of the problem at hand.',
+          thinkingTruncated: 'This is my analysis of the problem at hand.',
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain('This is my analysis');
+    });
+  });
+
+  describe('buildCollapsedActivityBlocks', () => {
+    const conversationKey = 'C123_thread456';
+
+    it('should show only duration when no thinking or tools', () => {
+      const blocks = buildCollapsedActivityBlocks(0, 0, 5000, conversationKey);
+
+      const sectionText = (blocks[0] as any).text.text;
+      expect(sectionText).toContain('Completed in 5.0s');
+      expect(sectionText).not.toContain('thinking');
+      expect(sectionText).not.toContain('tool');
+    });
+
+    it('should show only thinking count when no tools', () => {
+      const blocks = buildCollapsedActivityBlocks(3, 0, 5000, conversationKey);
+
+      const sectionText = (blocks[0] as any).text.text;
+      expect(sectionText).toContain('3 thinking blocks');
+      expect(sectionText).not.toContain('tool');
+    });
+
+    it('should use singular for 1 thinking block', () => {
+      const blocks = buildCollapsedActivityBlocks(1, 0, 5000, conversationKey);
+
+      const sectionText = (blocks[0] as any).text.text;
+      expect(sectionText).toContain('1 thinking block');
+      expect(sectionText).not.toContain('blocks');
+    });
+
+    it('should show only tools count when no thinking', () => {
+      const blocks = buildCollapsedActivityBlocks(0, 5, 5000, conversationKey);
+
+      const sectionText = (blocks[0] as any).text.text;
+      expect(sectionText).toContain('5 tools completed');
+      expect(sectionText).not.toContain('thinking');
+    });
+
+    it('should use singular for 1 tool', () => {
+      const blocks = buildCollapsedActivityBlocks(0, 1, 5000, conversationKey);
+
+      const sectionText = (blocks[0] as any).text.text;
+      expect(sectionText).toContain('1 tool completed');
+      expect(sectionText).not.toContain('tools');
+    });
+
+    it('should show both thinking and tools when present', () => {
+      const blocks = buildCollapsedActivityBlocks(2, 4, 8000, conversationKey);
+
+      const sectionText = (blocks[0] as any).text.text;
+      expect(sectionText).toContain('2 thinking');
+      expect(sectionText).toContain('4 tools');
+      expect(sectionText).toContain('8.0s');
+    });
+
+    it('should include View Log button', () => {
+      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey);
+
+      expect(blocks[1].type).toBe('actions');
+      const buttons = (blocks[1] as any).elements;
+      const viewLogButton = buttons.find((b: any) => b.text.text === 'View Log');
+      expect(viewLogButton).toBeDefined();
+      expect(viewLogButton.action_id).toContain('view_activity_log_');
+      expect(viewLogButton.value).toBe(conversationKey);
+    });
+
+    it('should include Download button', () => {
+      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey);
+
+      const buttons = (blocks[1] as any).elements;
+      const downloadButton = buttons.find((b: any) => b.text.text === 'Download .txt');
+      expect(downloadButton).toBeDefined();
+      expect(downloadButton.action_id).toContain('download_activity_log_');
+      expect(downloadButton.value).toBe(conversationKey);
+    });
+
+    it('should include clipboard emoji', () => {
+      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey);
+
+      const sectionText = (blocks[0] as any).text.text;
+      expect(sectionText).toContain(':clipboard:');
+    });
+  });
+
+  describe('buildActivityLogModalView', () => {
+    const conversationKey = 'C123_thread456';
+
+    const createEntries = (count: number): ActivityEntry[] => {
+      const entries: ActivityEntry[] = [];
+      for (let i = 0; i < count; i++) {
+        entries.push({
+          timestamp: Date.now() + i * 1000,
+          type: i % 2 === 0 ? 'tool_start' : 'tool_complete',
+          tool: `Tool${i}`,
+          durationMs: i % 2 === 1 ? 500 : undefined,
+        });
+      }
+      return entries;
+    };
+
+    it('should show page info in header', () => {
+      const entries = createEntries(30);
+      const view = buildActivityLogModalView(entries, 1, 2, conversationKey);
+
+      const contextBlock = view.blocks.find((b: any) => b.type === 'context');
+      expect(contextBlock.elements[0].text).toContain('Page 1 of 2');
+      expect(contextBlock.elements[0].text).toContain('30 total entries');
+    });
+
+    it('should show only entries for current page', () => {
+      const entries = createEntries(30); // 2 pages with MODAL_PAGE_SIZE = 15
+      const view = buildActivityLogModalView(entries, 1, 2, conversationKey);
+
+      // Count section blocks (entries)
+      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
+      expect(sectionBlocks.length).toBe(15);
+    });
+
+    it('should show Next button on first page when multiple pages', () => {
+      const entries = createEntries(30);
+      const view = buildActivityLogModalView(entries, 1, 2, conversationKey);
+
+      const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
+      expect(actionsBlock).toBeDefined();
+      const nextButton = actionsBlock.elements.find((b: any) => b.text.text.includes('Next'));
+      expect(nextButton).toBeDefined();
+      expect(nextButton.action_id).toBe('activity_log_page_2');
+    });
+
+    it('should show Prev button on second page', () => {
+      const entries = createEntries(30);
+      const view = buildActivityLogModalView(entries, 2, 2, conversationKey);
+
+      const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
+      const prevButton = actionsBlock.elements.find((b: any) => b.text.text.includes('Prev'));
+      expect(prevButton).toBeDefined();
+      expect(prevButton.action_id).toBe('activity_log_page_1');
+    });
+
+    it('should show both Prev and Next on middle page', () => {
+      const entries = createEntries(45); // 3 pages
+      const view = buildActivityLogModalView(entries, 2, 3, conversationKey);
+
+      const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
+      expect(actionsBlock.elements).toHaveLength(2);
+    });
+
+    it('should not show pagination buttons for single page', () => {
+      const entries = createEntries(10); // 1 page
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+
+      const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
+      expect(actionsBlock).toBeUndefined();
+    });
+
+    it('should include conversationKey in private_metadata', () => {
+      const entries = createEntries(5);
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+
+      const metadata = JSON.parse(view.private_metadata);
+      expect(metadata.conversationKey).toBe(conversationKey);
+      expect(metadata.currentPage).toBe(1);
+    });
+
+    it('should format thinking entries with full content', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: 'Full thinking content here',
+          thinkingTruncated: 'Full...',
+        },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const sectionBlock = view.blocks.find((b: any) =>
+        b.type === 'section' && b.text?.text?.includes('Thinking')
+      );
+
+      expect(sectionBlock.text.text).toContain('Full thinking content here');
+      expect(sectionBlock.text.text).toContain(':brain:');
+    });
+
+    it('should truncate very long thinking content to avoid Slack limits', () => {
+      const longContent = 'A'.repeat(3000);
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: longContent,
+        },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const sectionBlock = view.blocks.find((b: any) =>
+        b.type === 'section' && b.text?.text?.includes('Thinking')
+      );
+
+      // Should be truncated to ~2800 chars
+      expect(sectionBlock.text.text.length).toBeLessThan(3000);
+      expect(sectionBlock.text.text).toContain('...');
+    });
+
+    it('should format tool entries with timestamps', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 1200 },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
+
+      expect(sectionBlocks[0].text.text).toContain('Read');
+      expect(sectionBlocks[0].text.text).toContain('started');
+      expect(sectionBlocks[1].text.text).toContain('complete');
+      expect(sectionBlocks[1].text.text).toContain('1.2s');
+    });
+
+    it('should show duration on tool_complete entries in modal', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Edit', durationMs: 500 },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Edit', durationMs: 2500 },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
+
+      // tool_complete should show the duration it took
+      expect(sectionBlocks[1].text.text).toContain('Edit');
+      expect(sectionBlocks[1].text.text).toContain('complete');
+      expect(sectionBlocks[1].text.text).toContain('2.5s');
+    });
+
+    it('should handle tool_complete without duration gracefully', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Bash' },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
+
+      // Should not crash, just show complete without duration
+      expect(sectionBlocks[0].text.text).toContain('Bash');
+      expect(sectionBlocks[0].text.text).toContain('complete');
+    });
+
+    it('should format error entries', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'error', message: 'Something failed' },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const sectionBlock = view.blocks.find((b: any) =>
+        b.type === 'section' && b.text?.text?.includes('Error')
+      );
+
+      expect(sectionBlock.text.text).toContain(':x:');
+      expect(sectionBlock.text.text).toContain('Something failed');
+    });
+
+    it('should format starting entry in modal', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
+
+      // Starting entry should be first
+      expect(sectionBlocks[0].text.text).toContain(':brain:');
+      expect(sectionBlocks[0].text.text).toContain('Started processing');
+      // Tool entry should be second
+      expect(sectionBlocks[1].text.text).toContain('Read');
+    });
+
+    it('should have modal type and title', () => {
+      const entries = createEntries(5);
+      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+
+      expect(view.type).toBe('modal');
+      expect(view.title.type).toBe('plain_text');
+      expect(view.title.text).toBe('Activity Log');
+    });
+  });
+
+  describe('activity log accumulation', () => {
+    it('should show completed tools and in-progress tools correctly', () => {
+      const activityLog: ActivityEntry[] = [];
+
+      // Simulate multiple tool starts and completions
+      activityLog.push({ timestamp: 1000, type: 'tool_start', tool: 'Read' });
+      activityLog.push({ timestamp: 2000, type: 'tool_complete', tool: 'Read', durationMs: 700 });
+      activityLog.push({ timestamp: 3000, type: 'tool_start', tool: 'Edit' });
+
+      const text = buildActivityLogText(activityLog, true);
+
+      // Completed tool shows with checkmark and duration
+      expect(text).toContain(':white_check_mark: *Read* [0.7s]');
+      // In-progress tool shows with emoji and [in progress]
+      expect(text).toContain(':memo: *Edit* [in progress]');
+      // tool_start for completed Read should NOT show
+      expect(text).not.toContain(':mag: *Read*');
+      expect(activityLog.length).toBe(3);
+    });
+
+    it('should show all thinking blocks', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'thinking', durationMs: 200, thinkingTruncated: 'First thought' },
+        { timestamp: 2000, type: 'tool_start', tool: 'Read' },
+        { timestamp: 3000, type: 'thinking', durationMs: 800, thinkingTruncated: 'Second thought' },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain('First thought');
+      expect(text).toContain('Second thought');
+      expect(text).toContain('[0.2s]');
+      expect(text).toContain('[0.8s]');
+    });
+  });
+
+  describe('spinner cycling', () => {
+    it('should cycle through spinner frames correctly', () => {
+      const SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
+      let spinnerIndex = 0;
+
+      const results: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        results.push(SPINNER_FRAMES[spinnerIndex]);
+        spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
+      }
+
+      expect(results).toEqual(['◐', '◓', '◑', '◒', '◐', '◓']);
+    });
+
+    it('should show spinner in status panel for starting status', () => {
+      const blocks = buildStatusPanelBlocks({
+        status: 'starting',
+        mode: 'plan',
+        toolsCompleted: 0,
+        elapsedMs: 0,
+        conversationKey: 'test',
+        spinner: '◐',
+      });
+      const text = JSON.stringify(blocks);
+      expect(text).toContain('Claude is working');
+      expect(text).toContain('◐');
+    });
+
+    it('should show spinner in status panel for thinking status', () => {
+      const blocks = buildStatusPanelBlocks({
+        status: 'thinking',
+        mode: 'plan',
+        toolsCompleted: 0,
+        elapsedMs: 5000,
+        conversationKey: 'test',
+        spinner: '◓',
+      });
+      const text = JSON.stringify(blocks);
+      expect(text).toContain('Claude is working');
+      expect(text).toContain('◓');
+    });
+
+    it('should show spinner in status panel for tool status', () => {
+      const blocks = buildStatusPanelBlocks({
+        status: 'tool',
+        mode: 'plan',
+        currentTool: 'Read',
+        toolsCompleted: 1,
+        elapsedMs: 3000,
+        conversationKey: 'test',
+        spinner: '◑',
+      });
+      const text = JSON.stringify(blocks);
+      expect(text).toContain('Claude is working');
+      expect(text).toContain('◑');
+    });
+
+    it('should show spinner immediately on initial status panel (spinner provided)', () => {
+      // This tests that initial status panel gets spinner from SPINNER_FRAMES[0]
+      const blocks = buildStatusPanelBlocks({
+        status: 'starting',
+        mode: 'plan',
+        toolsCompleted: 0,
+        elapsedMs: 0,
+        conversationKey: 'test',
+        spinner: '◐',  // First spinner frame
+      });
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+      expect(sectionBlock?.text?.text).toContain('◐');
+    });
+  });
+
+  describe('modelUsage dictionary access', () => {
+    it('should correctly access contextWindow from modelUsage dictionary', () => {
+      // Simulate SDK result message structure
+      const resultMsg = {
+        type: 'result',
+        modelUsage: {
+          'claude-sonnet-4-20250514': {
+            inputTokens: 1234,
+            outputTokens: 567,
+            contextWindow: 200000,
+            costUSD: 0.0123,
+          },
+        },
+        total_cost_usd: 0.0123,
+      };
+
+      const model = 'claude-sonnet-4-20250514';
+      const modelData = resultMsg.modelUsage[model];
+
+      expect(modelData).toBeDefined();
+      expect(modelData.contextWindow).toBe(200000);
+      expect(modelData.inputTokens).toBe(1234);
+      expect(modelData.outputTokens).toBe(567);
+      expect(modelData.costUSD).toBe(0.0123);
+    });
+
+    it('should return undefined for unknown model', () => {
+      const resultMsg = {
+        modelUsage: {
+          'claude-sonnet-4-20250514': {
+            contextWindow: 200000,
+          },
+        },
+      };
+
+      const unknownModelData = resultMsg.modelUsage['unknown-model'];
+      expect(unknownModelData).toBeUndefined();
+    });
+  });
+
+  describe('context percentage calculation with cache tokens', () => {
+    // Helper function that mirrors the actual calculation in slack-bot.ts
+    const calculateContextPercent = (
+      inputTokens: number,
+      cacheReadInputTokens: number,
+      contextWindow: number
+    ): number | undefined => {
+      const totalContextTokens = inputTokens + cacheReadInputTokens;
+      return contextWindow && totalContextTokens > 0
+        ? Math.round((totalContextTokens / contextWindow) * 100)
+        : undefined;
+    };
+
+    it('should calculate context % including cache read tokens', () => {
+      // Simulates: 8 input tokens + 45726 cache read tokens = 45734 total
+      const inputTokens = 8;
+      const cacheReadInputTokens = 45726;
+      const contextWindow = 200000;
+
+      const contextPercent = calculateContextPercent(inputTokens, cacheReadInputTokens, contextWindow);
+
+      // 45734 / 200000 * 100 = 22.867 -> rounds to 23
+      expect(contextPercent).toBe(23);
+    });
+
+    it('should return 0% for very small token counts without cache', () => {
+      const inputTokens = 8;
+      const cacheReadInputTokens = 0;
+      const contextWindow = 200000;
+
+      const contextPercent = calculateContextPercent(inputTokens, cacheReadInputTokens, contextWindow);
+
+      // 8 / 200000 * 100 = 0.004 -> rounds to 0
+      expect(contextPercent).toBe(0);
+    });
+
+    it('should calculate 50% correctly', () => {
+      const inputTokens = 1000;
+      const cacheReadInputTokens = 99000;
+      const contextWindow = 200000;
+
+      const contextPercent = calculateContextPercent(inputTokens, cacheReadInputTokens, contextWindow);
+
+      // 100000 / 200000 * 100 = 50
+      expect(contextPercent).toBe(50);
+    });
+
+    it('should return undefined when contextWindow is 0', () => {
+      const inputTokens = 1000;
+      const cacheReadInputTokens = 1000;
+      const contextWindow = 0;
+
+      const contextPercent = calculateContextPercent(inputTokens, cacheReadInputTokens, contextWindow);
+
+      expect(contextPercent).toBeUndefined();
+    });
+
+    it('should return undefined when no tokens used', () => {
+      const inputTokens = 0;
+      const cacheReadInputTokens = 0;
+      const contextWindow = 200000;
+
+      const contextPercent = calculateContextPercent(inputTokens, cacheReadInputTokens, contextWindow);
+
+      expect(contextPercent).toBeUndefined();
+    });
+
+    it('should handle high context utilization', () => {
+      const inputTokens = 10000;
+      const cacheReadInputTokens = 170000;
+      const contextWindow = 200000;
+
+      const contextPercent = calculateContextPercent(inputTokens, cacheReadInputTokens, contextWindow);
+
+      // 180000 / 200000 * 100 = 90
+      expect(contextPercent).toBe(90);
     });
   });
 });

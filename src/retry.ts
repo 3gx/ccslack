@@ -114,6 +114,14 @@ export async function withRetry<T>(
 }
 
 /**
+ * Options specific to Slack retry behavior.
+ */
+export interface SlackRetryOptions extends Partial<RetryOptions> {
+  /** Called once on first rate limit hit (not on every retry) */
+  onRateLimit?: (retryAfter?: number) => void;
+}
+
+/**
  * Pre-configured retry function for Slack API calls.
  * Handles rate limits and network errors with appropriate backoff.
  *
@@ -126,8 +134,11 @@ export async function withRetry<T>(
  */
 export async function withSlackRetry<T>(
   fn: () => Promise<T>,
-  options: Partial<RetryOptions> = {}
+  options: SlackRetryOptions = {}
 ): Promise<T> {
+  const { onRateLimit, ...retryOptions } = options;
+  let rateLimitNotified = false;
+
   return withRetry(fn, {
     maxAttempts: 3,
     baseDelayMs: 1000,
@@ -147,14 +158,20 @@ export async function withSlackRetry<T>(
       return isRecoverable(error);
     },
     onRetry: (error, attempt, delayMs) => {
-      const errorType = isSlackRateLimitError(error)
-        ? 'rate limited'
-        : 'network error';
+      const isRateLimit = isSlackRateLimitError(error);
+      const errorType = isRateLimit ? 'rate limited' : 'network error';
       console.log(
         `Slack API ${errorType}, retrying in ${delayMs}ms (attempt ${attempt})`
       );
+
+      // Call onRateLimit callback once on first rate limit hit
+      if (isRateLimit && !rateLimitNotified && onRateLimit) {
+        rateLimitNotified = true;
+        const retryAfter = getRetryAfter(error) ?? undefined;
+        onRateLimit(retryAfter);
+      }
     },
-    ...options,
+    ...retryOptions,
   });
 }
 

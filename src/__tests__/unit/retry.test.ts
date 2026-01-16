@@ -480,4 +480,86 @@ describe('retry module', () => {
       consoleSpy.mockRestore();
     });
   });
+
+  describe('onRateLimit callback', () => {
+    it('should call onRateLimit callback on first rate limit hit', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const onRateLimit = vi.fn();
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 2) {
+          throw { data: { error: 'ratelimited', response_metadata: { retry_after: 5 } } };
+        }
+        return 'success';
+      });
+
+      const promise = withSlackRetry(fn, { onRateLimit });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      expect(onRateLimit).toHaveBeenCalledTimes(1);
+      expect(onRateLimit).toHaveBeenCalledWith(5);
+    });
+
+    it('should call onRateLimit only once even with multiple rate limit hits', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const onRateLimit = vi.fn();
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 3) {
+          throw { data: { error: 'ratelimited' } };
+        }
+        return 'success';
+      });
+
+      const promise = withSlackRetry(fn, { onRateLimit });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      // Should only be called once, not twice
+      expect(onRateLimit).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not call onRateLimit on network errors', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const onRateLimit = vi.fn();
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 2) {
+          const error = new Error('ECONNRESET');
+          (error as NodeJS.ErrnoException).code = 'ECONNRESET';
+          throw error;
+        }
+        return 'success';
+      });
+
+      const promise = withSlackRetry(fn, { onRateLimit });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      expect(onRateLimit).not.toHaveBeenCalled();
+    });
+
+    it('should pass undefined when retry_after is not provided', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const onRateLimit = vi.fn();
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 2) {
+          throw { data: { error: 'ratelimited' } };
+        }
+        return 'success';
+      });
+
+      const promise = withSlackRetry(fn, { onRateLimit });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      expect(onRateLimit).toHaveBeenCalledWith(undefined);
+    });
+  });
 });
