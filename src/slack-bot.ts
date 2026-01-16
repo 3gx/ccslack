@@ -31,7 +31,15 @@ import {
   formatToolName,
   getToolEmoji,
   buildActivityLogModalView,
+  buildModelSelectionBlocks,
+  buildModelDeprecatedBlocks,
 } from './blocks.js';
+import {
+  getAvailableModels,
+  isModelAvailable,
+  refreshModelCache,
+  getModelInfo,
+} from './model-cache.js';
 import { postSplitResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining } from './utils.js';
@@ -585,6 +593,7 @@ async function handleMessage(params: {
     sessionId: string | null;
     workingDir: string;
     mode: PermissionMode;
+    model?: string;
     createdAt: number;
     lastActiveAt: number;
     pathConfigured: boolean;
@@ -614,6 +623,7 @@ async function handleMessage(params: {
       sessionId: threadResult.session.sessionId,
       workingDir: threadResult.session.workingDir,
       mode: threadResult.session.mode,
+      model: threadResult.session.model,
       createdAt: threadResult.session.createdAt,
       lastActiveAt: threadResult.session.lastActiveAt,
       pathConfigured: threadResult.session.pathConfigured,
@@ -651,6 +661,7 @@ async function handleMessage(params: {
         sessionId: null,
         workingDir: process.cwd(),
         mode: 'plan',
+        model: undefined,
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
         pathConfigured: false,
@@ -749,6 +760,33 @@ async function handleMessage(params: {
     return;
   }
 
+  // Handle /model command (async model fetch)
+  if (commandResult.showModelSelection) {
+    const models = await getAvailableModels();
+    await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        blocks: buildModelSelectionBlocks(models, session.model),
+        text: 'Select model',
+      })
+    );
+
+    // Remove eyes reaction
+    if (originalTs) {
+      try {
+        await client.reactions.remove({
+          channel: channelId,
+          timestamp: originalTs,
+          name: 'eyes',
+        });
+      } catch {
+        // Ignore errors
+      }
+    }
+    return;
+  }
+
   if (commandResult.handled) {
     // Apply any session updates from the command
     // Use updated mode if command changed it, otherwise use current mode
@@ -829,6 +867,42 @@ async function handleMessage(params: {
     }
 
     return; // Don't process the message
+  }
+
+  // GUARD: Check if stored model is still available
+  if (session.model) {
+    const modelAvailable = await isModelAvailable(session.model);
+
+    if (!modelAvailable) {
+      // Stored model is deprecated/unavailable
+      console.log(`Model ${session.model} is no longer available, prompting user to select new model`);
+      const models = await getAvailableModels();
+
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        blocks: buildModelDeprecatedBlocks(session.model, models),
+        text: 'Your selected model is no longer available. Please select a new model.',
+      });
+
+      // Clear invalid model from session
+      saveSession(channelId, { model: undefined });
+
+      // Remove eyes reaction
+      if (originalTs) {
+        try {
+          await client.reactions.remove({
+            channel: channelId,
+            timestamp: originalTs,
+            name: 'eyes',
+          });
+        } catch {
+          // Ignore
+        }
+      }
+
+      return; // Don't proceed with query until user selects new model
+    }
   }
 
   // Check for concurrent terminal session
@@ -984,6 +1058,7 @@ async function handleMessage(params: {
       sessionId: needsFork ? forkedFromSessionId ?? undefined : session.sessionId ?? undefined,
       workingDir: session.workingDir,
       mode: session.mode,
+      model: session.model,  // Pass validated model (or undefined for SDK default)
       forkSession: needsFork,  // Fork when first message in thread or uninitialized fork
       resumeSessionAt: needsFork ? resumeSessionAtMessageId : undefined,  // Point-in-time forking
       canUseTool,  // For manual approval in default mode
@@ -1803,6 +1878,49 @@ app.action(/^mode_(plan|default|bypassPermissions|acceptEdits)$/, async ({ actio
   }
 });
 
+// Handle model selection buttons (/model command)
+app.action(/^model_select_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const modelId = actionId.replace('model_select_', '');
+
+  const bodyWithChannel = body as typeof body & { channel?: { id: string }; message?: { ts: string } };
+  const channelId = bodyWithChannel.channel?.id;
+  if (!channelId) return;
+
+  console.log(`Model button clicked: ${modelId} for channel: ${channelId}`);
+
+  // Get model display name for confirmation
+  const modelInfo = await getModelInfo(modelId);
+  const displayName = modelInfo?.displayName || modelId;
+
+  // Save to session
+  saveSession(channelId, { model: modelId });
+
+  // Update message to confirm
+  if (bodyWithChannel.message?.ts) {
+    try {
+      await client.chat.update({
+        channel: channelId,
+        ts: bodyWithChannel.message.ts,
+        text: `Model set to *${displayName}*`,
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `:white_check_mark: Model set to *${displayName}*\n\`${modelId}\``,
+            },
+          },
+        ],
+      });
+    } catch (error) {
+      console.error('Error updating model selection message:', error);
+    }
+  }
+});
+
 // Handle plan approval "Proceed (auto-accept)" button
 app.action(/^plan_approve_auto_(.+)$/, async ({ action, ack, body, client }) => {
   await ack();
@@ -2341,6 +2459,10 @@ app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client })
 });
 
 export async function startBot() {
+  // Refresh model cache on startup
+  console.log('Refreshing model cache...');
+  await refreshModelCache();
+
   await app.start();
   console.log('Bot is running!');
 }

@@ -22,6 +22,7 @@ export interface StreamOptions {
   sessionId?: string;
   workingDir?: string;
   mode?: PermissionMode;
+  model?: string;  // Model ID to use (e.g., "claude-sonnet-4-5-20250929")
   forkSession?: boolean;  // Fork from sessionId instead of resuming
   resumeSessionAt?: string;  // SDK message ID for point-in-time forking
   canUseTool?: CanUseToolCallback;  // For tool approval in default mode
@@ -56,6 +57,12 @@ export function startClaudeQuery(
     // Enable stream_event messages for real-time activity tracking
     includePartialMessages: true,
   };
+
+  // Add model if specified
+  if (options.model) {
+    queryOptions.model = options.model;
+    console.log(`Using model: ${options.model}`);
+  }
 
   if (options.workingDir) {
     queryOptions.cwd = options.workingDir;

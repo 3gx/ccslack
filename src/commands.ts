@@ -26,6 +26,8 @@ export interface CommandResult {
   waitTest?: {
     seconds: number;
   };
+  // For /model command - triggers model selection UI (async fetch in handler)
+  showModelSelection?: boolean;
 }
 
 /**
@@ -67,6 +69,8 @@ export function parseCommand(
       return handleResume(argString);
     case 'wait':
       return handleWait(argString);
+    case 'model':
+      return handleModel(argString);
     default:
       // Unknown command - return error
       return {
@@ -87,6 +91,7 @@ function handleHelp(): CommandResult {
 \`/set-current-path\` - Lock current directory (one-time only)
 \`/status\` - Show session info (ID, mode, directory)
 \`/mode\` - Show mode picker
+\`/model\` - Show model picker
 \`/continue\` - Get command to continue session in terminal
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
@@ -419,5 +424,26 @@ function handleWait(secondsArg: string): CommandResult {
   return {
     handled: true,
     waitTest: { seconds },
+  };
+}
+
+/**
+ * /model - Show model picker
+ * Model list is fetched dynamically from SDK in slack-bot.ts handler.
+ */
+function handleModel(modelArg: string): CommandResult {
+  if (modelArg) {
+    // User tried to type a model directly - redirect to selection UI
+    return {
+      handled: true,
+      response: 'Please use the model picker to select a model.',
+      showModelSelection: true,
+    };
+  }
+
+  // Return flag - actual blocks built async in slack-bot.ts
+  return {
+    handled: true,
+    showModelSelection: true,
   };
 }

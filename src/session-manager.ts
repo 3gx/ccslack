@@ -20,6 +20,7 @@ export interface Session {
   sessionId: string | null;
   workingDir: string;
   mode: PermissionMode;
+  model?: string;  // Selected model ID (e.g., "claude-sonnet-4-5-20250929")
   createdAt: number;
   lastActiveAt: number;
   // Path configuration fields (immutable once set)
@@ -38,6 +39,7 @@ export interface ThreadSession {
   forkedFromThreadTs?: string;  // Source thread's timestamp (for thread-to-thread forks)
   workingDir: string;
   mode: PermissionMode;
+  model?: string;  // Selected model ID (inherited from channel)
   createdAt: number;
   lastActiveAt: number;
   // Path configuration fields (inherited from channel)
@@ -159,6 +161,7 @@ export function saveSession(channelId: string, session: Partial<Session>): void 
     sessionId: existing?.sessionId ?? null,
     workingDir: existing?.workingDir ?? process.cwd(),
     mode: existing?.mode ?? 'default',
+    model: existing?.model,  // Preserve selected model
     createdAt: existing?.createdAt ?? Date.now(),
     lastActiveAt: Date.now(),
     pathConfigured: existing?.pathConfigured ?? false,
@@ -230,6 +233,7 @@ export function saveThreadSession(
     forkedFrom: existingThread?.forkedFrom ?? null,
     workingDir: existingThread?.workingDir ?? store.channels[channelId].workingDir,
     mode: existingThread?.mode ?? store.channels[channelId].mode,
+    model: existingThread?.model ?? store.channels[channelId].model,  // Inherit model from channel
     createdAt: existingThread?.createdAt ?? Date.now(),
     lastActiveAt: Date.now(),
     // INHERIT path configuration from channel
@@ -282,6 +286,7 @@ export function getOrCreateThreadSession(
     forkedFrom: mainSession?.sessionId ?? null,
     workingDir: mainSession?.workingDir ?? process.cwd(),
     mode: mainSession?.mode ?? 'default',
+    model: mainSession?.model,  // Inherit model from main session
     createdAt: Date.now(),
     lastActiveAt: Date.now(),
     // Inherit path configuration from main session

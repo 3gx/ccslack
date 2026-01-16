@@ -10,6 +10,8 @@ import {
   buildStatusDisplayBlocks,
   buildTerminalCommandBlocks,
   buildModeSelectionBlocks,
+  buildModelSelectionBlocks,
+  buildModelDeprecatedBlocks,
   buildPlanApprovalBlocks,
   isPlanApprovalPrompt,
   buildToolApprovalBlocks,
@@ -23,6 +25,7 @@ import {
   formatToolName,
   ActivityEntry,
 } from '../../blocks.js';
+import type { ModelInfo } from '../../model-cache.js';
 
 describe('blocks', () => {
   describe('buildQuestionBlocks', () => {
@@ -362,6 +365,109 @@ describe('blocks', () => {
 
       const section = blocks.find((b: any) => b.type === 'section');
       expect(section.text.text).toContain('plan');
+    });
+  });
+
+  describe('buildModelSelectionBlocks', () => {
+    const mockModels: ModelInfo[] = [
+      { value: 'claude-sonnet-4-5-20250929', displayName: 'Claude Sonnet 4.5', description: 'Best balance' },
+      { value: 'claude-haiku-4-5-20251001', displayName: 'Claude Haiku 4.5', description: 'Fastest' },
+      { value: 'claude-opus-4-5-20251101', displayName: 'Claude Opus 4.5', description: 'Most capable' },
+    ];
+
+    it('should create buttons for each model', () => {
+      const blocks = buildModelSelectionBlocks(mockModels);
+      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
+      expect(actionsBlock).toBeDefined();
+      expect(actionsBlock.elements).toHaveLength(3);
+    });
+
+    it('should highlight current model as primary', () => {
+      const blocks = buildModelSelectionBlocks(mockModels, 'claude-sonnet-4-5-20250929');
+      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
+      const sonnetBtn = actionsBlock.elements.find((e: any) => e.value === 'claude-sonnet-4-5-20250929');
+      const haikuBtn = actionsBlock.elements.find((e: any) => e.value === 'claude-haiku-4-5-20251001');
+
+      expect(sonnetBtn.style).toBe('primary');
+      expect(haikuBtn.style).toBeUndefined();
+    });
+
+    it('should show current model in header', () => {
+      const blocks = buildModelSelectionBlocks(mockModels, 'claude-opus-4-5-20251101');
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+      expect(sectionBlock.text.text).toContain('claude-opus-4-5-20251101');
+    });
+
+    it('should show "default (SDK chooses)" when no current model', () => {
+      const blocks = buildModelSelectionBlocks(mockModels, undefined);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+      expect(sectionBlock.text.text).toContain('default (SDK chooses)');
+    });
+
+    it('should include model descriptions in context block', () => {
+      const blocks = buildModelSelectionBlocks(mockModels);
+      const contextBlock = blocks.find((b: any) => b.type === 'context');
+      expect(contextBlock).toBeDefined();
+      expect(contextBlock.elements[0].text).toContain('Claude Sonnet 4.5');
+      expect(contextBlock.elements[0].text).toContain('Best balance');
+      expect(contextBlock.elements[0].text).toContain('Claude Haiku 4.5');
+      expect(contextBlock.elements[0].text).toContain('Fastest');
+    });
+
+    it('should have correct action_id format for model buttons', () => {
+      const blocks = buildModelSelectionBlocks(mockModels);
+      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
+      const actionIds = actionsBlock.elements.map((e: any) => e.action_id);
+
+      expect(actionIds).toContain('model_select_claude-sonnet-4-5-20250929');
+      expect(actionIds).toContain('model_select_claude-haiku-4-5-20251001');
+      expect(actionIds).toContain('model_select_claude-opus-4-5-20251101');
+    });
+
+    it('should limit to 5 models for Slack actions block', () => {
+      const manyModels: ModelInfo[] = Array.from({ length: 10 }, (_, i) => ({
+        value: `model-${i}`,
+        displayName: `Model ${i}`,
+        description: `Description ${i}`,
+      }));
+
+      const blocks = buildModelSelectionBlocks(manyModels);
+      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
+      expect(actionsBlock.elements).toHaveLength(5);
+    });
+  });
+
+  describe('buildModelDeprecatedBlocks', () => {
+    const mockModels: ModelInfo[] = [
+      { value: 'claude-sonnet-4-5-20250929', displayName: 'Claude Sonnet 4.5', description: 'Best balance' },
+    ];
+
+    it('should show warning for deprecated model', () => {
+      const blocks = buildModelDeprecatedBlocks('old-deprecated-model', mockModels);
+      const text = JSON.stringify(blocks);
+      expect(text).toContain('No Longer Available');
+      expect(text).toContain('old-deprecated-model');
+    });
+
+    it('should include warning emoji', () => {
+      const blocks = buildModelDeprecatedBlocks('old-model', mockModels);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section' && b.text?.text?.includes('warning'));
+      expect(sectionBlock).toBeDefined();
+      expect(sectionBlock.text.text).toContain(':warning:');
+    });
+
+    it('should include model selection blocks after divider', () => {
+      const blocks = buildModelDeprecatedBlocks('old-model', mockModels);
+      const dividerIndex = blocks.findIndex((b: any) => b.type === 'divider');
+      expect(dividerIndex).toBeGreaterThan(0);
+      // After divider should be the model selection blocks
+      expect(blocks.length).toBeGreaterThan(dividerIndex + 1);
+    });
+
+    it('should show the deprecated model name in warning', () => {
+      const blocks = buildModelDeprecatedBlocks('claude-old-version', mockModels);
+      const warningBlock = blocks.find((b: any) => b.text?.text?.includes('No Longer Available'));
+      expect(warningBlock.text.text).toContain('claude-old-version');
     });
   });
 

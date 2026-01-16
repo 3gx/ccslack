@@ -4,6 +4,7 @@
  */
 
 import { PermissionMode } from './session-manager.js';
+import type { ModelInfo } from './model-cache.js';
 
 // Slack Block Kit types (simplified for our use case)
 export interface Block {
@@ -742,6 +743,77 @@ export function buildModeSelectionBlocks(currentMode: PermissionMode): Block[] {
         text: "• *plan* - Read-only, writes to plan file\n• *default* - Prompts for approval\n• *bypassPermissions* - Runs without approval\n• *acceptEdits* - Accept code edits without prompting",
       }],
     },
+  ];
+}
+
+/**
+ * Build model selection UI from dynamic model list.
+ */
+export function buildModelSelectionBlocks(
+  models: ModelInfo[],
+  currentModel?: string
+): Block[] {
+  // Create buttons for each model (max 5 for Slack actions block)
+  const buttons = models.slice(0, 5).map(model => ({
+    type: 'button' as const,
+    text: {
+      type: 'plain_text' as const,
+      text: model.displayName,
+      emoji: true,
+    },
+    action_id: `model_select_${model.value}`,
+    value: model.value,
+    ...(currentModel === model.value ? { style: 'primary' as const } : {}),
+  }));
+
+  // Build description context
+  const descriptions = models.slice(0, 5).map(m =>
+    `• *${m.displayName}*: ${m.description}`
+  ).join('\n');
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Select Model*\nCurrent: \`${currentModel || 'default (SDK chooses)'}\``,
+      },
+    },
+    {
+      type: 'actions',
+      block_id: 'model_selection',
+      elements: buttons,
+    },
+    {
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: descriptions,
+      }],
+    },
+  ];
+}
+
+/**
+ * Build UI for when stored model is no longer available.
+ * Shows warning and model selection.
+ */
+export function buildModelDeprecatedBlocks(
+  deprecatedModel: string,
+  models: ModelInfo[]
+): Block[] {
+  const selectionBlocks = buildModelSelectionBlocks(models, undefined);
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:warning: *Model No Longer Available*\n\nYour selected model \`${deprecatedModel}\` is no longer supported. Please select a new model to continue.`,
+      },
+    },
+    { type: 'divider' },
+    ...selectionBlocks,
   ];
 }
 
