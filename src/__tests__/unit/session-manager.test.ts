@@ -36,7 +36,11 @@ describe('session-manager', () => {
             mode: 'plan',
             createdAt: 1000,
             lastActiveAt: 2000,
-          },
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              },
         },
       };
 
@@ -66,7 +70,11 @@ describe('session-manager', () => {
         mode: 'bypassPermissions' as const,
         createdAt: 1000,
         lastActiveAt: 2000,
-      };
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          };
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
@@ -100,7 +108,11 @@ describe('session-manager', () => {
         mode: 'plan' as const,
         createdAt: 1000,
         lastActiveAt: 1500,
-      };
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          };
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
@@ -141,6 +153,10 @@ describe('session-manager', () => {
             mode: 'plan' as const,
             createdAt: 1000,
             lastActiveAt: 2000,
+            pathConfigured: false,
+            configuredPath: null,
+            configuredBy: null,
+            configuredAt: null,
           },
         },
       };

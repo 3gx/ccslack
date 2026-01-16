@@ -46,7 +46,11 @@ describe('thread forking', () => {
             mode: 'plan',
             createdAt: Date.now(),
             lastActiveAt: Date.now(),
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -73,7 +77,11 @@ describe('thread forking', () => {
                 mode: 'plan',
                 createdAt: Date.now(),
                 lastActiveAt: Date.now(),
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -93,7 +101,11 @@ describe('thread forking', () => {
         mode: 'bypassPermissions',
         createdAt: 1000000,
         lastActiveAt: 2000000,
-      };
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          };
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
@@ -155,7 +167,11 @@ describe('thread forking', () => {
             mode: 'plan',
             createdAt: Date.now(),
             lastActiveAt: Date.now(),
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -193,7 +209,11 @@ describe('thread forking', () => {
                 mode: 'plan',
                 createdAt: Date.now(),
                 lastActiveAt: Date.now(),
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -231,7 +251,11 @@ describe('thread forking', () => {
                 mode: 'plan',
                 createdAt: 3000,
                 lastActiveAt: 4000,
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -288,7 +312,11 @@ describe('thread forking', () => {
                 mode: 'plan',
                 createdAt: 2000,
                 lastActiveAt: 2000,
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -315,7 +343,11 @@ describe('thread forking', () => {
         mode: 'bypassPermissions',
         createdAt: 1000,
         lastActiveAt: 2000,
-      };
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          };
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
@@ -351,7 +383,11 @@ describe('thread forking', () => {
             mode: 'bypassPermissions',
             createdAt: 500,
             lastActiveAt: 600,
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -376,7 +412,11 @@ describe('thread forking', () => {
             mode: 'plan',
             createdAt: 500,
             lastActiveAt: 600,
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -397,7 +437,11 @@ describe('thread forking', () => {
             mode: 'default',
             createdAt: 500,
             lastActiveAt: 600,
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -435,7 +479,11 @@ describe('thread forking', () => {
             mode: 'plan',
             createdAt: 500,
             lastActiveAt: 600,
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -461,7 +509,11 @@ describe('thread forking', () => {
             mode: 'plan',
             createdAt: 500,
             lastActiveAt: 600,
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -497,7 +549,11 @@ describe('thread forking', () => {
                 mode: 'plan',
                 createdAt: 1000,
                 lastActiveAt: 1100,
-              },
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  },
               [thread2Ts]: {
                 sessionId: 'thread2-session',
                 forkedFrom: 'main-session',
@@ -505,7 +561,11 @@ describe('thread forking', () => {
                 mode: 'bypassPermissions',
                 createdAt: 2000,
                 lastActiveAt: 2100,
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -542,7 +602,11 @@ describe('thread forking', () => {
                 mode: 'plan',
                 createdAt: 1000,
                 lastActiveAt: 1100,
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -587,7 +651,11 @@ describe('thread forking', () => {
                 mode: 'bypassPermissions',
                 createdAt: 1000,
                 lastActiveAt: 1100,
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -596,7 +664,7 @@ describe('thread forking', () => {
       // Update main session
       saveSession('C123', {
         workingDir: '/updated/main/path',
-        mode: 'ask',
+        mode: 'default',
       });
 
       const savedData = JSON.parse(
@@ -605,7 +673,7 @@ describe('thread forking', () => {
 
       // Main session should be updated
       expect(savedData.channels.C123.workingDir).toBe('/updated/main/path');
-      expect(savedData.channels.C123.mode).toBe('ask');
+      expect(savedData.channels.C123.mode).toBe('default');
 
       // Thread session should be unchanged
       expect(savedData.channels.C123.threads[threadTs].workingDir).toBe('/thread/path');
@@ -626,7 +694,11 @@ describe('thread forking', () => {
             mode: 'plan',
             createdAt: 500,
             lastActiveAt: 600,
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -647,7 +719,11 @@ describe('thread forking', () => {
             mode: 'plan',
             createdAt: 500,
             lastActiveAt: 600,
-          }
+                pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+              }
         }
       }));
 
@@ -679,7 +755,11 @@ describe('thread forking', () => {
                 mode: 'bypassPermissions',
                 createdAt: 1000,
                 lastActiveAt: 1100,
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -694,7 +774,11 @@ describe('thread forking', () => {
         mode: 'bypassPermissions',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       const savedData = JSON.parse(
         vi.mocked(fs.writeFileSync).mock.calls[0][1] as string
@@ -729,7 +813,11 @@ describe('thread forking', () => {
                 mode: 'bypassPermissions',
                 createdAt: 1000,
                 lastActiveAt: 1100,
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -744,7 +832,11 @@ describe('thread forking', () => {
         mode: 'bypassPermissions',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       const savedData = JSON.parse(
         vi.mocked(fs.writeFileSync).mock.calls[0][1] as string
@@ -778,7 +870,11 @@ describe('thread forking', () => {
                 mode: 'plan',
                 createdAt: 1000,
                 lastActiveAt: 1100,
-              }
+                    pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+                  }
             }
           }
         }
@@ -793,7 +889,11 @@ describe('thread forking', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       const savedData = JSON.parse(
         vi.mocked(fs.writeFileSync).mock.calls[0][1] as string

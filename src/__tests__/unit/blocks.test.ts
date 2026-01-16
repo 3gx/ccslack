@@ -217,6 +217,9 @@ describe('blocks', () => {
         mode: 'plan',
         workingDir: '/test/path',
         lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
       });
 
       expect(blocks.length).toBeGreaterThanOrEqual(2);
@@ -230,6 +233,9 @@ describe('blocks', () => {
         mode: 'plan',
         workingDir: '/test/path',
         lastActiveAt: Date.now(),
+        pathConfigured: false,
+        configuredBy: null,
+        configuredAt: null,
       });
 
       expect(blocks[1].text?.text).toContain('None');
@@ -241,6 +247,9 @@ describe('blocks', () => {
         mode: 'bypassPermissions',
         workingDir: '/test/path',
         lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
       });
 
       expect(blocks[1].text?.text).toContain('bypassPermissions');
@@ -252,6 +261,9 @@ describe('blocks', () => {
         mode: 'plan',
         workingDir: '/my/project/dir',
         lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
       });
 
       expect(blocks[1].text?.text).toContain('/my/project/dir');

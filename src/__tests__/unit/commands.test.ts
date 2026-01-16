@@ -10,6 +10,10 @@ describe('commands', () => {
     mode: 'plan',
     createdAt: Date.now() - 3600000, // 1 hour ago
     lastActiveAt: Date.now(),
+    pathConfigured: true,
+    configuredPath: '/Users/testuser/projects/myapp',
+    configuredBy: 'U123456',
+    configuredAt: Date.now() - 7200000,
   };
 
   beforeEach(() => {
@@ -43,9 +47,11 @@ describe('commands', () => {
       expect(result.handled).toBe(true);
       expect(result.response).toContain('Available Commands');
       expect(result.response).toContain('/help');
+      expect(result.response).toContain('/ls');
+      expect(result.response).toContain('/cd');
+      expect(result.response).toContain('/set-current-path');
       expect(result.response).toContain('/status');
       expect(result.response).toContain('/mode');
-      expect(result.response).toContain('/cwd');
       expect(result.response).toContain('/continue');
       expect(result.response).toContain('/fork');
       expect(result.response).toContain('/resume');
@@ -150,21 +156,168 @@ describe('commands', () => {
     });
   });
 
-  describe('/cwd', () => {
-    it('should show current directory when no arg', () => {
-      const result = parseCommand('/cwd', mockSession);
+  describe('/ls', () => {
+    it('should list current directory when no arg provided', () => {
+      const unconfiguredSession: Session = {
+        ...mockSession,
+        workingDir: '/Users/egx/ai/ccslack',
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
+      };
+      const result = parseCommand('/ls', unconfiguredSession);
 
       expect(result.handled).toBe(true);
-      expect(result.response).toContain('Current working directory');
-      expect(result.response).toContain(mockSession.workingDir);
+      expect(result.response).toContain('Files in');
+      expect(result.response).toContain('/Users/egx/ai/ccslack');
+      expect(result.response).toContain('/cd');
+      expect(result.response).toContain('/set-current-path');
     });
 
-    it('should reject attempts to change directory', () => {
-      const result = parseCommand('/cwd /some/path', mockSession);
+    it('should list specific absolute directory', () => {
+      const unconfiguredSession: Session = {
+        ...mockSession,
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
+      };
+      const result = parseCommand('/ls /tmp', unconfiguredSession);
 
       expect(result.handled).toBe(true);
-      expect(result.response).toContain('not supported');
-      expect(result.response).toContain(mockSession.workingDir);
+      expect(result.response).toContain('Files in');
+      expect(result.response).toContain('/tmp');
+    });
+
+    it('should work after path configured', () => {
+      const result = parseCommand('/ls /tmp', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Files in');
+      expect(result.response).toContain('/tmp');
+      expect(result.response).toContain('locked directory');
+    });
+
+    it('should return error when directory does not exist', () => {
+      const result = parseCommand('/ls /nonexistent/path', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('does not exist');
+      expect(result.response).toContain('/nonexistent/path');
+    });
+
+    it('should return error when path is a file, not a directory', () => {
+      const result = parseCommand('/ls /etc/hosts', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Not a directory');
+      expect(result.response).toContain('/etc/hosts');
+    });
+  });
+
+  describe('/cd', () => {
+    it('should show current directory when no arg provided', () => {
+      const unconfiguredSession: Session = {
+        ...mockSession,
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
+      };
+      const result = parseCommand('/cd', unconfiguredSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Current directory');
+      expect(result.response).toContain(unconfiguredSession.workingDir);
+      expect(result.response).toContain('/set-current-path');
+    });
+
+    it('should change to absolute path', () => {
+      const unconfiguredSession: Session = {
+        ...mockSession,
+        workingDir: '/Users/testuser',
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
+      };
+      const result = parseCommand('/cd /tmp', unconfiguredSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Changed to');
+      expect(result.sessionUpdate).toBeDefined();
+      // On macOS, /tmp resolves to /private/tmp
+      expect(result.sessionUpdate?.workingDir).toMatch(/^\/(?:private\/)?tmp$/);
+    });
+
+    it('should be disabled after path locked', () => {
+      const result = parseCommand('/cd /tmp', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('disabled');
+      expect(result.response).toContain('locked');
+      expect(result.response).toContain(mockSession.configuredPath);
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should return error when directory does not exist', () => {
+      const unconfiguredSession: Session = {
+        ...mockSession,
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
+      };
+      const result = parseCommand('/cd /nonexistent/path', unconfiguredSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('does not exist');
+    });
+
+    it('should return error when path is a file', () => {
+      const unconfiguredSession: Session = {
+        ...mockSession,
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
+      };
+      const result = parseCommand('/cd /etc/hosts', unconfiguredSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Not a directory');
+    });
+  });
+
+  describe('/set-current-path', () => {
+    it('should lock current working directory', () => {
+      const unconfiguredSession: Session = {
+        ...mockSession,
+        workingDir: '/tmp',
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
+      };
+      const result = parseCommand('/set-current-path', unconfiguredSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('locked to');
+      expect(result.sessionUpdate).toBeDefined();
+      expect(result.sessionUpdate?.pathConfigured).toBe(true);
+      // On macOS, /tmp resolves to /private/tmp
+      expect(result.sessionUpdate?.configuredPath).toMatch(/^\/(?:private\/)?tmp$/);
+      expect(result.sessionUpdate?.workingDir).toMatch(/^\/(?:private\/)?tmp$/);
+      expect(result.sessionUpdate?.configuredAt).toBeDefined();
+    });
+
+    it('should reject when already locked', () => {
+      const result = parseCommand('/set-current-path', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('already locked');
+      expect(result.response).toContain(mockSession.configuredPath);
       expect(result.sessionUpdate).toBeUndefined();
     });
   });

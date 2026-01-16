@@ -3,6 +3,8 @@
  * Commands are prefixed with `/` (e.g., /status, /mode, /continue)
  */
 
+import fs from 'fs';
+import path from 'path';
 import { Session, PermissionMode } from './session-manager.js';
 import {
   Block,
@@ -45,8 +47,12 @@ export function parseCommand(
       return handleStatus(session);
     case 'mode':
       return handleMode(argString, session);
-    case 'cwd':
-      return handleCwd(argString, session);
+    case 'set-current-path':
+      return handleSetCurrentPath(session);
+    case 'cd':
+      return handleCd(argString, session);
+    case 'ls':
+      return handleLs(argString, session);
     case 'continue':
       return handleContinue(session);
     case 'fork':
@@ -70,9 +76,11 @@ export function parseCommand(
 function handleHelp(): CommandResult {
   const helpText = `*Available Commands*
 \`/help\` - Show this help message
+\`/ls [path]\` - List files in directory (relative or absolute)
+\`/cd [path]\` - Change directory (only before path locked)
+\`/set-current-path\` - Lock current directory (one-time only)
 \`/status\` - Show session info (ID, mode, directory)
 \`/mode\` - Show mode picker
-\`/cwd\` - Show current working directory
 \`/continue\` - Get command to continue session in terminal
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
@@ -82,6 +90,175 @@ function handleHelp(): CommandResult {
     handled: true,
     response: helpText,
   };
+}
+
+/**
+ * /set-current-path - Lock current working directory (one-time only)
+ */
+function handleSetCurrentPath(session: Session): CommandResult {
+  // Check if path already configured
+  if (session.pathConfigured) {
+    return {
+      handled: true,
+      response: `❌ Working directory already locked: \`${session.configuredPath}\`\n\nThis cannot be changed. If you need a different directory, use a different channel.`,
+    };
+  }
+
+  // Use current working directory
+  const currentPath = session.workingDir;
+
+  // Normalize path (resolve symlinks, remove trailing slash)
+  const normalizedPath = fs.realpathSync(currentPath);
+
+  return {
+    handled: true,
+    response: `✅ Working directory locked to \`${normalizedPath}\`\n\n⚠️ This cannot be changed. \`/cd\` is now disabled. All Claude Code operations will use this directory.`,
+    sessionUpdate: {
+      pathConfigured: true,
+      configuredPath: normalizedPath,
+      workingDir: normalizedPath,
+      configuredAt: Date.now(),
+    },
+  };
+}
+
+/**
+ * /cd [path] - Change working directory (only before path locked)
+ * Accepts relative or absolute paths
+ */
+function handleCd(pathArg: string, session: Session): CommandResult {
+  // Check if path already configured
+  if (session.pathConfigured) {
+    return {
+      handled: true,
+      response: `❌ \`/cd\` is disabled after path locked.\n\nWorking directory is locked to: \`${session.configuredPath}\`\n\nUse \`/ls [path]\` to explore other directories.`,
+    };
+  }
+
+  // If no path provided, show current directory
+  if (!pathArg) {
+    return {
+      handled: true,
+      response: `Current directory: \`${session.workingDir}\`\n\nUsage: \`/cd <path>\` (relative or absolute)\n\nTo lock this directory: \`/set-current-path\``,
+    };
+  }
+
+  // Resolve path (handle both relative and absolute)
+  let targetPath: string;
+
+  if (pathArg.startsWith('/')) {
+    // Absolute path
+    targetPath = pathArg;
+  } else {
+    // Relative path
+    targetPath = path.resolve(session.workingDir, pathArg);
+  }
+
+  // Validate: path exists
+  if (!fs.existsSync(targetPath)) {
+    return {
+      handled: true,
+      response: `❌ Directory does not exist: \`${targetPath}\``,
+    };
+  }
+
+  // Check if it's a directory (not a file)
+  const stats = fs.statSync(targetPath);
+  if (!stats.isDirectory()) {
+    return {
+      handled: true,
+      response: `❌ Not a directory: \`${targetPath}\``,
+    };
+  }
+
+  // Check read/execute permissions
+  try {
+    fs.accessSync(targetPath, fs.constants.R_OK | fs.constants.X_OK);
+  } catch (error) {
+    return {
+      handled: true,
+      response: `❌ Cannot access directory: \`${targetPath}\`\n\nPermission denied or directory not readable.`,
+    };
+  }
+
+  // Normalize path (resolve symlinks)
+  const normalizedPath = fs.realpathSync(targetPath);
+
+  return {
+    handled: true,
+    response: `📂 Changed to \`${normalizedPath}\`\n\nUse \`/ls\` to see files, or \`/set-current-path\` to lock this directory.`,
+    sessionUpdate: {
+      workingDir: normalizedPath,
+    },
+  };
+}
+
+/**
+ * /ls [path] - List files in directory
+ * Accepts relative or absolute paths. Always available.
+ */
+function handleLs(pathArg: string, session: Session): CommandResult {
+  // Determine which directory to list
+  let targetDir: string;
+  if (!pathArg) {
+    targetDir = session.workingDir;
+  } else if (pathArg.startsWith('/')) {
+    // Absolute path
+    targetDir = pathArg;
+  } else {
+    // Relative path
+    targetDir = path.resolve(session.workingDir, pathArg);
+  }
+
+  // Validate path exists
+  if (!fs.existsSync(targetDir)) {
+    return {
+      handled: true,
+      response: `❌ Directory does not exist: \`${targetDir}\``,
+    };
+  }
+
+  // Check if it's a directory
+  try {
+    const stats = fs.statSync(targetDir);
+    if (!stats.isDirectory()) {
+      return {
+        handled: true,
+        response: `❌ Not a directory: \`${targetDir}\``,
+      };
+    }
+  } catch (error) {
+    return {
+      handled: true,
+      response: `❌ Cannot access: \`${targetDir}\`\n\n${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  try {
+    const files = fs.readdirSync(targetDir);
+    const totalFiles = files.length;
+
+    // Show all files
+    const fileList = files.join('\n');
+
+    // Generate hint based on whether path is locked
+    let hint: string;
+    if (session.pathConfigured) {
+      hint = `Current locked directory: \`${session.configuredPath}\``;
+    } else {
+      hint = `To navigate: \`/cd ${targetDir}\`\nTo lock directory: \`/set-current-path\``;
+    }
+
+    return {
+      handled: true,
+      response: `Files in \`${targetDir}\` (${totalFiles} total):\n\`\`\`\n${fileList}\n\`\`\`\n\n${hint}`,
+    };
+  } catch (error) {
+    return {
+      handled: true,
+      response: `❌ Cannot read directory: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 /**
@@ -95,6 +272,9 @@ function handleStatus(session: Session): CommandResult {
       mode: session.mode,
       workingDir: session.workingDir,
       lastActiveAt: session.lastActiveAt,
+      pathConfigured: session.pathConfigured,
+      configuredBy: session.configuredBy,
+      configuredAt: session.configuredAt,
     }),
   };
 }
@@ -116,25 +296,6 @@ function handleMode(modeArg: string, session: Session): CommandResult {
   return {
     handled: true,
     blocks: buildModeSelectionBlocks(session.mode),
-  };
-}
-
-/**
- * /cwd - Show current working directory
- * Note: Changing directory is disabled because Claude Code SDK
- * stores sessions per-directory and cannot resume across directories.
- */
-function handleCwd(pathArg: string, session: Session): CommandResult {
-  if (pathArg) {
-    return {
-      handled: true,
-      response: `Changing working directory is not supported.\nCurrent directory: \`${session.workingDir}\``,
-    };
-  }
-
-  return {
-    handled: true,
-    response: `Current working directory: \`${session.workingDir}\``,
   };
 }
 

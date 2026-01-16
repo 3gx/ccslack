@@ -44,6 +44,10 @@ vi.mock('../../session-manager.js', () => ({
       mode: 'default',
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
     },
     isNewFork: false,
   }),
@@ -105,7 +109,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       await handler({
         event: {
@@ -148,7 +156,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       await handler({
         event: {
@@ -183,7 +195,11 @@ describe('slack-bot handlers', () => {
         mode: 'bypassPermissions',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       await handler({
         event: {
@@ -211,7 +227,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // startClaudeQuery mock is already set up in beforeEach
 
@@ -250,7 +270,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Mock startClaudeQuery to return an async generator
       const mockMessages = [
@@ -312,7 +336,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Mock startClaudeQuery to return successful response with stats
       const mockMessages = [
@@ -364,7 +392,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       const mockMessages = [
         { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
@@ -920,7 +952,11 @@ describe('slack-bot handlers', () => {
         mode: 'default',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Capture the canUseTool callback passed to startClaudeQuery
       let capturedCanUseTool: any = null;
@@ -971,7 +1007,11 @@ describe('slack-bot handlers', () => {
         mode: 'default',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Capture the canUseTool callback
       let capturedCanUseTool: any = null;
@@ -1082,7 +1122,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Mock thread session - new fork (isNewFork: true)
       vi.mocked(getOrCreateThreadSession).mockReturnValue({
@@ -1093,7 +1137,11 @@ describe('slack-bot handlers', () => {
           mode: 'plan',
           createdAt: Date.now(),
           lastActiveAt: Date.now(),
-        },
+              pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+            },
         isNewFork: true,  // This is a new fork
       });
 
@@ -1158,7 +1206,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       vi.mocked(getOrCreateThreadSession).mockReturnValue({
         session: {
@@ -1168,7 +1220,11 @@ describe('slack-bot handlers', () => {
           mode: 'plan',
           createdAt: Date.now(),
           lastActiveAt: Date.now(),
-        },
+              pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+            },
         isNewFork: true,
       });
 
@@ -1224,7 +1280,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       vi.mocked(getOrCreateThreadSession).mockReturnValue({
         session: {
@@ -1234,7 +1294,11 @@ describe('slack-bot handlers', () => {
           mode: 'plan',
           createdAt: Date.now(),
           lastActiveAt: Date.now(),
-        },
+              pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+            },
         isNewFork: true,
       });
 
@@ -1297,7 +1361,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Mock thread session with active session
       vi.mocked(getThreadSession).mockReturnValue({
@@ -1307,7 +1375,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Mock postMessage to return ts for new thread
       mockClient.chat.postMessage.mockResolvedValue({ ok: true, ts: '9999999999.999999' });
@@ -1348,7 +1420,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       vi.mocked(getThreadSession).mockReturnValue({
         sessionId: 'source-thread-session',
@@ -1357,7 +1433,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       mockClient.chat.postMessage.mockResolvedValue({ ok: true, ts: newThreadTs });
 
@@ -1395,7 +1475,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       await handler({
         event: {
@@ -1428,7 +1512,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // No session for the thread
       vi.mocked(getThreadSession).mockReturnValue(null);
@@ -1466,7 +1554,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       vi.mocked(getThreadSession).mockReturnValue({
         sessionId: 'source-thread-session',
@@ -1475,7 +1567,11 @@ describe('slack-bot handlers', () => {
         mode: 'bypassPermissions',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       mockClient.chat.postMessage.mockResolvedValue({ ok: true, ts: newThreadTs });
 
@@ -1518,7 +1614,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Mock forked thread session: sessionId null but forkedFrom set (uninitialized fork)
       vi.mocked(getOrCreateThreadSession).mockReturnValue({
@@ -1530,7 +1630,11 @@ describe('slack-bot handlers', () => {
           mode: 'plan',
           createdAt: Date.now(),
           lastActiveAt: Date.now(),
-        },
+              pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+            },
         isNewFork: false, // Thread exists in sessions.json
       });
 
@@ -1595,7 +1699,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       // Source thread has its own session (different from main)
       vi.mocked(getThreadSession).mockReturnValue({
@@ -1605,7 +1713,11 @@ describe('slack-bot handlers', () => {
         mode: 'bypassPermissions',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-      });
+            pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+          });
 
       mockClient.chat.postMessage.mockResolvedValue({ ok: true, ts: '9999999999.999999' });
 

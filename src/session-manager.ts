@@ -20,6 +20,11 @@ export interface Session {
   mode: PermissionMode;
   createdAt: number;
   lastActiveAt: number;
+  // Path configuration fields (immutable once set)
+  pathConfigured: boolean;      // Whether /path has been run
+  configuredPath: string | null; // The immutable path
+  configuredBy: string | null;   // User ID who set it
+  configuredAt: number | null;   // When it was set
 }
 
 /**
@@ -33,6 +38,11 @@ export interface ThreadSession {
   mode: PermissionMode;
   createdAt: number;
   lastActiveAt: number;
+  // Path configuration fields (inherited from channel)
+  pathConfigured: boolean;
+  configuredPath: string | null;
+  configuredBy: string | null;
+  configuredAt: number | null;
 }
 
 /**
@@ -62,6 +72,28 @@ export function loadSessions(): SessionStore {
       const parsed = JSON.parse(content);
       // Validate basic structure
       if (parsed && typeof parsed === 'object' && parsed.channels) {
+        // Migration: Add default path config fields to existing sessions
+        for (const channelId in parsed.channels) {
+          const channel = parsed.channels[channelId];
+          if (channel.pathConfigured === undefined) {
+            channel.pathConfigured = false;
+            channel.configuredPath = null;
+            channel.configuredBy = null;
+            channel.configuredAt = null;
+          }
+          // Migrate threads too
+          if (channel.threads) {
+            for (const threadTs in channel.threads) {
+              const thread = channel.threads[threadTs];
+              if (thread.pathConfigured === undefined) {
+                thread.pathConfigured = channel.pathConfigured;
+                thread.configuredPath = channel.configuredPath;
+                thread.configuredBy = channel.configuredBy;
+                thread.configuredAt = channel.configuredAt;
+              }
+            }
+          }
+        }
         return parsed;
       }
       console.error('sessions.json has invalid structure, resetting');
@@ -93,6 +125,10 @@ export function saveSession(channelId: string, session: Partial<Session>): void 
     mode: existing?.mode ?? 'default',
     createdAt: existing?.createdAt ?? Date.now(),
     lastActiveAt: Date.now(),
+    pathConfigured: existing?.pathConfigured ?? false,
+    configuredPath: existing?.configuredPath ?? null,
+    configuredBy: existing?.configuredBy ?? null,
+    configuredAt: existing?.configuredAt ?? null,
     threads: existing?.threads,  // Preserve existing threads
     ...session,
   };
@@ -137,6 +173,10 @@ export function saveThreadSession(
       mode: 'default',
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
+      pathConfigured: false,
+      configuredPath: null,
+      configuredBy: null,
+      configuredAt: null,
       threads: {},
     };
   }
@@ -154,6 +194,11 @@ export function saveThreadSession(
     mode: existingThread?.mode ?? store.channels[channelId].mode,
     createdAt: existingThread?.createdAt ?? Date.now(),
     lastActiveAt: Date.now(),
+    // INHERIT path configuration from channel
+    pathConfigured: existingThread?.pathConfigured ?? store.channels[channelId].pathConfigured,
+    configuredPath: existingThread?.configuredPath ?? store.channels[channelId].configuredPath,
+    configuredBy: existingThread?.configuredBy ?? store.channels[channelId].configuredBy,
+    configuredAt: existingThread?.configuredAt ?? store.channels[channelId].configuredAt,
     ...session,
   };
 
@@ -196,6 +241,11 @@ export function getOrCreateThreadSession(
     mode: mainSession?.mode ?? 'default',
     createdAt: Date.now(),
     lastActiveAt: Date.now(),
+    // Inherit path configuration from main session
+    pathConfigured: mainSession?.pathConfigured ?? false,
+    configuredPath: mainSession?.configuredPath ?? null,
+    configuredBy: mainSession?.configuredBy ?? null,
+    configuredAt: mainSession?.configuredAt ?? null,
   };
 
   // Save the new thread session

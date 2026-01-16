@@ -484,13 +484,16 @@ export interface StatusDisplayParams {
   mode: PermissionMode;
   workingDir: string;
   lastActiveAt: number;
+  pathConfigured: boolean;
+  configuredBy: string | null;
+  configuredAt: number | null;
 }
 
 /**
  * Build blocks for /status command response.
  */
 export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
-  const { sessionId, mode, workingDir, lastActiveAt } = params;
+  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt } = params;
 
   // SDK mode emojis for display
   const modeEmoji: Record<PermissionMode, string> = {
@@ -501,6 +504,21 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
   };
   const lastActive = new Date(lastActiveAt).toLocaleString();
 
+  const statusLines = [
+    `*Session ID:* \`${sessionId || 'None'}\``,
+    `*Mode:* ${modeEmoji[mode] || ''} ${mode}`,
+    `*Working Directory:* \`${workingDir}\``,
+    `*Last Active:* ${lastActive}`,
+  ];
+
+  if (pathConfigured) {
+    const configuredDate = new Date(configuredAt!).toLocaleString();
+    statusLines.push(`*Path Configured:* ✅ Yes (by <@${configuredBy}> on ${configuredDate})`);
+    statusLines.push(`*Path Locked:* Yes (cannot be changed)`);
+  } else {
+    statusLines.push(`*Path Configured:* ❌ No - use \`/path <directory>\` to set`);
+  }
+
   return [
     {
       type: "header",
@@ -510,12 +528,7 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: [
-          `*Session ID:* \`${sessionId || 'None'}\``,
-          `*Mode:* ${modeEmoji[mode] || ''} ${mode}`,
-          `*Working Directory:* \`${workingDir}\``,
-          `*Last Active:* ${lastActive}`,
-        ].join('\n'),
+        text: statusLines.join('\n'),
       },
     },
     {
@@ -823,6 +836,46 @@ export function buildForkAnchorBlocks(params: ForkAnchorBlockParams): Block[] {
       elements: [{
         type: 'mrkdwn',
         text: '_Forked from thread_',
+      }],
+    },
+  ];
+}
+
+// ============================================================================
+// Path Configuration Blocks
+// ============================================================================
+
+/**
+ * Build blocks for path setup prompt when working directory not configured.
+ */
+export function buildPathSetupBlocks(): Block[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: ':warning: *Working directory not configured*',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: 'Before I can help, you need to set the working directory for this channel.\n\nThis is a *one-time setup* and cannot be changed later.',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*Usage:*\n```/path /absolute/path/to/your/project```',
+      },
+    },
+    {
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: ':bulb: Tip: Use `/ls` to explore the current directory first.',
       }],
     },
   ];

@@ -10,7 +10,7 @@ import {
   PermissionMode,
 } from './session-manager.js';
 import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
-import { buildStatusBlocks, buildHeaderBlocks, buildPlanApprovalBlocks, isPlanApprovalPrompt, buildToolApprovalBlocks, buildForkAnchorBlocks } from './blocks.js';
+import { buildStatusBlocks, buildHeaderBlocks, buildPlanApprovalBlocks, isPlanApprovalPrompt, buildToolApprovalBlocks, buildForkAnchorBlocks, buildPathSetupBlocks } from './blocks.js';
 import { postSplitResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining } from './utils.js';
@@ -265,6 +265,17 @@ const app = new App({
 // Handle @mentions in channels
 app.event('app_mention', async ({ event, client }) => {
   try {
+    // ONLY respond in channels (IDs start with 'C')
+    // Reject DMs ('D'), group DMs ('G')
+    if (!event.channel.startsWith('C')) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: event.thread_ts,
+        text: '❌ This bot only works in channels, not in direct messages.',
+      });
+      return;
+    }
+
     console.log(`Received mention from ${event.user}: ${event.text}`);
 
     // Remove the @mention from the text
@@ -366,6 +377,10 @@ async function handleMessage(params: {
     mode: PermissionMode;
     createdAt: number;
     lastActiveAt: number;
+    pathConfigured: boolean;
+    configuredPath: string | null;
+    configuredBy: string | null;
+    configuredAt: number | null;
   };
   let isNewFork = false;
   let forkedFromSessionId: string | null = null;
@@ -379,6 +394,10 @@ async function handleMessage(params: {
       mode: threadResult.session.mode,
       createdAt: threadResult.session.createdAt,
       lastActiveAt: threadResult.session.lastActiveAt,
+      pathConfigured: threadResult.session.pathConfigured,
+      configuredPath: threadResult.session.configuredPath,
+      configuredBy: threadResult.session.configuredBy,
+      configuredAt: threadResult.session.configuredAt,
     };
     isNewFork = threadResult.isNewFork;
     forkedFromSessionId = threadResult.session.forkedFrom;
@@ -413,6 +432,10 @@ async function handleMessage(params: {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
       };
       saveSession(channelId, mainSession);
     }
@@ -497,6 +520,10 @@ async function handleMessage(params: {
     // Use updated mode if command changed it, otherwise use current mode
     const displayMode = commandResult.sessionUpdate?.mode || session.mode;
     if (commandResult.sessionUpdate) {
+      // Add userId for /path command
+      if (commandResult.sessionUpdate.pathConfigured) {
+        commandResult.sessionUpdate.configuredBy = userId ?? null;
+      }
       saveSession(channelId, commandResult.sessionUpdate);
     }
 
@@ -543,6 +570,31 @@ async function handleMessage(params: {
     }
 
     return; // Command handled, don't send to Claude
+  }
+
+  // GUARD: Path must be configured before processing messages
+  if (!session.pathConfigured) {
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      blocks: buildPathSetupBlocks(),
+      text: 'Please set working directory first: /path /your/project/path',
+    });
+
+    // Remove eyes reaction
+    if (originalTs) {
+      try {
+        await client.reactions.remove({
+          channel: channelId,
+          timestamp: originalTs,
+          name: 'eyes',
+        });
+      } catch (error) {
+        // Ignore
+      }
+    }
+
+    return; // Don't process the message
   }
 
   // Check for concurrent terminal session
