@@ -1,6 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getSession, saveSession, loadSessions, saveSessions, deleteSession, saveThreadSession, getThreadSession } from '../../session-manager.js';
-import type { Session, ThreadSession } from '../../session-manager.js';
+import {
+  getSession,
+  saveSession,
+  loadSessions,
+  saveSessions,
+  deleteSession,
+  saveThreadSession,
+  getThreadSession,
+  saveMessageMapping,
+  getMessageMapping,
+  findForkPointMessageId,
+  getOrCreateThreadSession,
+} from '../../session-manager.js';
+import type { Session, ThreadSession, SlackMessageMapping } from '../../session-manager.js';
 
 // Mock the fs module
 vi.mock('fs', () => ({
@@ -390,6 +402,525 @@ describe('session-manager', () => {
       const finalWrite = vi.mocked(fs.writeFileSync).mock.calls[vi.mocked(fs.writeFileSync).mock.calls.length - 1];
       const writtenData = JSON.parse(finalWrite[1] as string);
       expect(writtenData.channels['C123']).toBeUndefined();
+    });
+  });
+
+  // ============================================================================
+  // Message Mapping Tests (for point-in-time thread forking)
+  // ============================================================================
+
+  describe('saveMessageMapping', () => {
+    it('should save message mapping to channel session', () => {
+      // Setup: Create channel session
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      saveMessageMapping('C123', '1234.001', {
+        sdkMessageId: 'msg_017pagAKz',
+        type: 'assistant',
+      });
+
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['C123'].messageMap).toBeDefined();
+      expect(writtenData.channels['C123'].messageMap['1234.001'].sdkMessageId).toBe('msg_017pagAKz');
+      expect(writtenData.channels['C123'].messageMap['1234.001'].type).toBe('assistant');
+    });
+
+    it('should handle multiple mappings', () => {
+      // Setup: Channel with existing mapping
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.001': {
+                sdkMessageId: 'msg_001',
+                type: 'user' as const,
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      saveMessageMapping('C123', '1234.002', {
+        sdkMessageId: 'msg_002',
+        type: 'assistant',
+        parentSlackTs: '1234.001',
+      });
+
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['C123'].messageMap['1234.001']).toBeDefined();
+      expect(writtenData.channels['C123'].messageMap['1234.002'].sdkMessageId).toBe('msg_002');
+      expect(writtenData.channels['C123'].messageMap['1234.002'].parentSlackTs).toBe('1234.001');
+    });
+
+    it('should not save if channel does not exist', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
+
+      // Should not throw
+      expect(() => saveMessageMapping('C999', '1234.001', {
+        sdkMessageId: 'msg_001',
+        type: 'user',
+      })).not.toThrow();
+
+      // Should not write anything
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getMessageMapping', () => {
+    it('should return mapping if exists', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.001': {
+                sdkMessageId: 'msg_017pagAKz',
+                type: 'assistant' as const,
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const mapping = getMessageMapping('C123', '1234.001');
+      expect(mapping).toEqual({
+        sdkMessageId: 'msg_017pagAKz',
+        type: 'assistant',
+      });
+    });
+
+    it('should return null if mapping does not exist', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {},
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const mapping = getMessageMapping('C123', '1234.999');
+      expect(mapping).toBeNull();
+    });
+
+    it('should return null if channel has no messageMap', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const mapping = getMessageMapping('C123', '1234.001');
+      expect(mapping).toBeNull();
+    });
+  });
+
+  describe('findForkPointMessageId', () => {
+    it('should return assistant message ID directly when clicking on bot message', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.002': {
+                sdkMessageId: 'msg_017pagAKz',
+                type: 'assistant' as const,
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const messageId = findForkPointMessageId('C123', '1234.002');
+      expect(messageId).toBe('msg_017pagAKz');
+    });
+
+    it('should find LAST assistant message BEFORE user message (not response to it)', () => {
+      // Timeline: user → bot → user (clicking here) → bot
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_001', type: 'assistant' as const },
+              '1234.003': { sdkMessageId: 'user_002', type: 'user' as const },  // User clicks HERE
+              '1234.004': { sdkMessageId: 'msg_002', type: 'assistant' as const },  // Response AFTER
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Should return msg_001 (before .003), NOT msg_002 (after .003)
+      const messageId = findForkPointMessageId('C123', '1234.003');
+      expect(messageId).toBe('msg_001');
+    });
+
+    it('should return null if no assistant message before the timestamp', () => {
+      // User's first message - no bot response yet
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const messageId = findForkPointMessageId('C123', '1234.001');
+      expect(messageId).toBeNull();
+    });
+
+    it('should work with split messages (continuation)', () => {
+      // Long response split into multiple Slack messages
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_001', type: 'assistant' as const },
+              '1234.003': { sdkMessageId: 'msg_001', type: 'assistant' as const, isContinuation: true },
+              '1234.004': { sdkMessageId: 'msg_001', type: 'assistant' as const, isContinuation: true },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // All should return the same SDK message ID
+      expect(findForkPointMessageId('C123', '1234.002')).toBe('msg_001');
+      expect(findForkPointMessageId('C123', '1234.003')).toBe('msg_001');
+      expect(findForkPointMessageId('C123', '1234.004')).toBe('msg_001');
+    });
+
+    it('should return null if channel has no messageMap', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const messageId = findForkPointMessageId('C123', '1234.001');
+      expect(messageId).toBeNull();
+    });
+  });
+
+  describe('messageMap preservation', () => {
+    it('should preserve messageMap when saveSession is called', () => {
+      // Setup: Start with empty store
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      // Step 1: Create initial session
+      saveSession('C123', {
+        sessionId: 'sess-1',
+        workingDir: '/test',
+        mode: 'plan',
+        pathConfigured: true,
+        configuredPath: '/test',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Capture the written data and use it for next read
+      let currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
+
+      // Step 2: Save a message mapping
+      saveMessageMapping('C123', '1234.001', {
+        sdkMessageId: 'msg_001',
+        type: 'assistant',
+      });
+
+      // Update current store from the write
+      currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[1][1] as string);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
+
+      // Verify mapping was saved
+      expect(currentStore.channels['C123'].messageMap['1234.001'].sdkMessageId).toBe('msg_001');
+
+      // Step 3: Save session again (simulating what happens after SDK returns new session ID)
+      saveSession('C123', { sessionId: 'sess-2' });
+
+      // Get final written data
+      const finalStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[2][1] as string);
+
+      // CRITICAL: Verify messageMap was preserved after saveSession
+      expect(finalStore.channels['C123'].messageMap).toBeDefined();
+      expect(finalStore.channels['C123'].messageMap['1234.001'].sdkMessageId).toBe('msg_001');
+      expect(finalStore.channels['C123'].sessionId).toBe('sess-2');
+    });
+
+    it('should preserve messageMap when saving multiple mappings interleaved with saveSession', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      // Create session
+      saveSession('C123', {
+        sessionId: 'sess-1',
+        workingDir: '/test',
+        mode: 'plan',
+        pathConfigured: true,
+        configuredPath: '/test',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      let currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
+
+      // Save user message mapping
+      saveMessageMapping('C123', '1234.001', { sdkMessageId: 'user_001', type: 'user' });
+      currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[1][1] as string);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
+
+      // Save assistant message mapping
+      saveMessageMapping('C123', '1234.002', { sdkMessageId: 'msg_001', type: 'assistant' });
+      currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[2][1] as string);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
+
+      // Save session (this was wiping messageMap before the fix)
+      saveSession('C123', { sessionId: 'sess-1' });
+      currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[3][1] as string);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
+
+      // Add another user message
+      saveMessageMapping('C123', '1234.003', { sdkMessageId: 'user_002', type: 'user' });
+      currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[4][1] as string);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
+
+      // Save session again
+      saveSession('C123', { sessionId: 'sess-1' });
+      const finalStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[5][1] as string);
+
+      // All mappings should be preserved
+      expect(Object.keys(finalStore.channels['C123'].messageMap)).toHaveLength(3);
+      expect(finalStore.channels['C123'].messageMap['1234.001'].type).toBe('user');
+      expect(finalStore.channels['C123'].messageMap['1234.002'].type).toBe('assistant');
+      expect(finalStore.channels['C123'].messageMap['1234.003'].type).toBe('user');
+    });
+  });
+
+  describe('getOrCreateThreadSession with resumeSessionAtMessageId', () => {
+    it('should create thread session with resumeSessionAtMessageId', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getOrCreateThreadSession('C123', '1234.002', 'msg_017pagAKz');
+
+      expect(result.isNewFork).toBe(true);
+      expect(result.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
+      expect(result.session.forkedFrom).toBe('main-session-123');
+    });
+
+    it('should handle thread creation without message mapping', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Create thread without fork point
+      const result = getOrCreateThreadSession('C123', '1234.999', null);
+
+      expect(result.isNewFork).toBe(true);
+      expect(result.session.resumeSessionAtMessageId).toBeUndefined();
+      expect(result.session.forkedFrom).toBe('main-session-123');
+    });
+
+    it('should return existing thread session with stored resumeSessionAtMessageId', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {
+              '1234.002': {
+                sessionId: 'thread-session-456',
+                forkedFrom: 'main-session-123',
+                workingDir: '/test',
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: '/test',
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+                resumeSessionAtMessageId: 'msg_017pagAKz',
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getOrCreateThreadSession('C123', '1234.002');
+
+      expect(result.isNewFork).toBe(false);
+      expect(result.session.sessionId).toBe('thread-session-456');
+      expect(result.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
     });
   });
 });

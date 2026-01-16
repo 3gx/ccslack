@@ -6,7 +6,7 @@ The Slack bot enables interaction with Claude Code through Slack DMs, providing:
 - Streaming responses to Slack
 - Interactive questions via Block Kit
 - Session management with terminal handoff
-- Thread-based session forking
+- Thread-based session forking with point-in-time history
 - Robust error handling with no crashes
 
 ## Architecture Diagram
@@ -82,6 +82,7 @@ The Slack bot enables interaction with Claude Code through Slack DMs, providing:
 - Maps users to sessions
 - Supports thread-based session forking
 - Handles corrupted session files gracefully
+- **Message mapping**: Maps Slack timestamps to SDK message IDs for point-in-time forking
 
 ### Streaming (`src/streaming.ts`)
 - Implements Slack native streaming API
@@ -165,10 +166,15 @@ Sessions are stored in `sessions.json`:
       "mode": "plan",
       "createdAt": 1705123456789,
       "lastActiveAt": 1705234567890,
+      "messageMap": {
+        "1234567890.001": { "sdkMessageId": "user_001", "type": "user" },
+        "1234567890.002": { "sdkMessageId": "msg_017pagAKz", "type": "assistant", "parentSlackTs": "1234567890.001" }
+      },
       "threads": {
-        "1234567890.123456": {
+        "1234567890.002": {
           "sessionId": "ghi-456-jkl",
           "forkedFrom": "abc-123-def",
+          "resumeSessionAtMessageId": "msg_017pagAKz",
           "workingDir": "/Users/you/project",
           "mode": "plan",
           "createdAt": 1705345678901,
@@ -179,6 +185,8 @@ Sessions are stored in `sessions.json`:
   }
 }
 ```
+
+The `messageMap` links Slack message timestamps to SDK message IDs, enabling point-in-time forking. When a thread is created, `resumeSessionAtMessageId` stores the fork point.
 
 ## Error Handling Philosophy
 
@@ -208,17 +216,40 @@ Sessions are stored in `sessions.json`:
 | SDK error | Show user-friendly message |
 | Rate limited | Retry with backoff |
 
-## Thread Forking
+## Thread Forking (Point-in-Time)
 
-When a user replies in a thread:
+Thread forking uses **point-in-time history** - the thread only knows about messages up to where it forked:
+
+```
+Main channel: A → B → C → D
+User replies to B in thread
+Thread context: A, B only (not C, D)
+```
+
+### How It Works
+
+1. **Message Mapping**: As messages flow, bot captures Slack timestamps → SDK message IDs
+2. **Fork Detection**: When user replies in thread, bot detects `thread_ts`
+3. **Fork Point Lookup**: `findForkPointMessageId()` finds the SDK message ID for the parent message
+4. **Point-in-Time Fork**: SDK `resumeSessionAt` parameter creates fork with history only up to that point
+5. **Notification**: Posts link to the exact message being forked from
+
+### Fork Flow
+
 1. Bot detects `thread_ts` in message event
 2. Checks if thread already has a session
-3. If new thread → Fork from main session
-4. Posts "Forking session..." notification
-5. Creates new SDK session with `forkSession: true`
-6. Saves thread session to `sessions.json`
+3. If new thread:
+   - Looks up `thread_ts` in `messageMap` to find SDK message ID
+   - Forks from parent session using `forkSession: true` and `resumeSessionAt`
+   - Posts "Forked with conversation state through: [this message]" notification
+4. Creates new SDK session with limited history
+5. Saves thread session with `resumeSessionAtMessageId` to `sessions.json`
 
-Each thread maintains independent conversation history.
+### Graceful Degradation
+
+For older channels without message mappings:
+- Falls back to forking from latest state (current behavior)
+- New messages after deployment will have proper mappings
 
 ## Testing
 

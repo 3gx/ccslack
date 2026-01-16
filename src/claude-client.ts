@@ -23,6 +23,7 @@ export interface StreamOptions {
   workingDir?: string;
   mode?: PermissionMode;
   forkSession?: boolean;  // Fork from sessionId instead of resuming
+  resumeSessionAt?: string;  // SDK message ID for point-in-time forking
   canUseTool?: CanUseToolCallback;  // For tool approval in default mode
   slackContext?: {
     channel: string;
@@ -63,7 +64,14 @@ export function startClaudeQuery(
       // Fork from the parent session - creates a new session with shared history
       queryOptions.resume = options.sessionId;
       queryOptions.forkSession = true;
-      console.log(`Forking from session: ${options.sessionId}`);
+
+      // Point-in-time forking: add resumeSessionAt for forking from specific message
+      if (options.resumeSessionAt) {
+        queryOptions.resumeSessionAt = options.resumeSessionAt;
+        console.log(`Forking from session ${options.sessionId} at message ${options.resumeSessionAt}`);
+      } else {
+        console.log(`Forking from session ${options.sessionId} (latest state)`);
+      }
     } else {
       // Resume existing session
       queryOptions.resume = options.sessionId;

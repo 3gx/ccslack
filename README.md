@@ -66,8 +66,10 @@ See [CLAUDE.md](./CLAUDE.md) for detailed development instructions and [ARCHITEC
 - Session stored in `./sessions.json` (bot records)
 - Session stored in `~/.claude/projects/` (SDK files)
 
-### Forking
-- Thread replies create new forked sessions
+### Forking (Point-in-Time)
+- Thread replies create new forked sessions with **point-in-time history**
+- When you reply to message B in a conversation A→B→C→D, the thread only knows about A and B
+- This enables "what if" scenarios from any point in the conversation
 - `/fork-thread` creates explicit thread forks
 - All forks tracked in `sessions.json` under parent channel
 

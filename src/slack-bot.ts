@@ -7,6 +7,8 @@ import {
   getThreadSession,
   saveThreadSession,
   deleteSession,
+  saveMessageMapping,
+  findForkPointMessageId,
   ThreadSession,
   PermissionMode,
 } from './session-manager.js';
@@ -72,41 +74,6 @@ const toolApprovalReminderStartTimes = new Map<string, number>();
 // Helper to get unique conversation key (channel + thread)
 function getConversationKey(channelId: string, threadTs?: string): string {
   return threadTs ? `${channelId}_${threadTs}` : channelId;
-}
-
-// Get the last message in main conversation (for fork point clarity)
-async function getLastMainConversationMessage(
-  client: any,
-  channelId: string,
-  threadTs: string
-): Promise<string | null> {
-  try {
-    const history = await withSlackRetry(() =>
-      client.conversations.history({
-        channel: channelId,
-        limit: 100,  // Fetch recent messages
-      })
-    ) as { messages?: Array<{ ts: string; thread_ts?: string }> };
-
-    if (!history.messages) {
-      return null;
-    }
-
-    // Find last message in main conversation (not in a thread, after threadTs)
-    for (const msg of history.messages) {
-      // Skip messages that are part of threads (have thread_ts)
-      // Only include messages after the thread parent (ts > threadTs)
-      if (msg.ts > threadTs && !msg.thread_ts) {
-        return msg.ts;  // This is the last main message after fork point
-      }
-    }
-
-    // If no messages found after threadTs in main, return threadTs itself
-    return threadTs;
-  } catch (error) {
-    console.error('Error fetching last main conversation message:', error);
-    return threadTs;  // Fallback to thread parent message
-  }
 }
 
 // Handle /fork-thread command - creates new thread from existing thread session
@@ -413,9 +380,21 @@ async function handleMessage(params: {
   let isNewFork = false;
   let forkedFromSessionId: string | null = null;
 
+  // Track resumeSessionAt for point-in-time forking
+  let resumeSessionAtMessageId: string | undefined;
+
   if (threadTs) {
+    // Thread message - find fork point for point-in-time forking
+    const forkPointMessageId = findForkPointMessageId(channelId, threadTs);
+    if (forkPointMessageId) {
+      console.log(`[Fork] Thread will fork from message ${forkPointMessageId}`);
+      resumeSessionAtMessageId = forkPointMessageId;
+    } else {
+      console.warn(`[Fork] No message mapping found for ${threadTs} - will fork from latest state`);
+    }
+
     // Thread message - use or create forked session
-    const threadResult = getOrCreateThreadSession(channelId, threadTs);
+    const threadResult = getOrCreateThreadSession(channelId, threadTs, forkPointMessageId);
     session = {
       sessionId: threadResult.session.sessionId,
       workingDir: threadResult.session.workingDir,
@@ -429,17 +408,16 @@ async function handleMessage(params: {
     };
     isNewFork = threadResult.isNewFork;
     forkedFromSessionId = threadResult.session.forkedFrom;
+    // Use stored resumeSessionAtMessageId if this is an existing session
+    if (!isNewFork && threadResult.session.resumeSessionAtMessageId) {
+      resumeSessionAtMessageId = threadResult.session.resumeSessionAtMessageId;
+    }
 
     if (isNewFork) {
-      // Get the last message in main conversation to clarify fork point
-      const lastMainMessageTs = await getLastMainConversationMessage(client, channelId, threadTs);
-
-      // Build link to the actual fork point (last message in main)
-      let forkMessage = "🔀 _Forking session from main conversation..._";
-      if (lastMainMessageTs) {
-        const forkPointLink = `https://slack.com/archives/${channelId}/p${lastMainMessageTs.replace('.', '')}`;
-        forkMessage = `🔀 _Forked with conversation state through: <${forkPointLink}|this message>_`;
-      }
+      // Build link to the fork point - the message user replied to (threadTs)
+      // With point-in-time forking, we fork from this specific message, not the last one
+      const forkPointLink = `https://slack.com/archives/${channelId}/p${threadTs.replace('.', '')}`;
+      const forkMessage = `🔀 _Forked with conversation state through: <${forkPointLink}|this message>_`;
 
       // Notify user about fork with link to actual fork point
       await withSlackRetry(() =>
@@ -651,6 +629,17 @@ async function handleMessage(params: {
     }
   }
 
+  // Capture user message timestamp for message mapping (main channel only)
+  // This enables point-in-time thread forking by tracking which SDK messages
+  // correspond to which Slack timestamps
+  if (!threadTs && originalTs) {
+    saveMessageMapping(channelId, originalTs, {
+      sdkMessageId: `user_${originalTs}`,  // Placeholder - user messages don't have SDK IDs
+      type: 'user',
+    });
+    console.log(`[Mapping] Saved user message mapping for ${originalTs}`);
+  }
+
   // Mark conversation as busy
   busyConversations.add(conversationKey);
 
@@ -729,6 +718,7 @@ async function handleMessage(params: {
       workingDir: session.workingDir,
       mode: session.mode,
       forkSession: needsFork,  // Fork when first message in thread or uninitialized fork
+      resumeSessionAt: needsFork ? resumeSessionAtMessageId : undefined,  // Point-in-time forking
       canUseTool,  // For manual approval in default mode
       slackContext: {
         channel: channelId,
@@ -753,8 +743,15 @@ async function handleMessage(params: {
     let inputTokens = 0;
     let outputTokens = 0;
     let durationMs: number | undefined;
+    let currentAssistantMessageId: string | null = null;  // For message mapping
 
     for await (const msg of claudeQuery) {
+      // Capture assistant message ID for message mapping (point-in-time forking)
+      if (msg.type === 'assistant' && (msg as any).message?.id) {
+        currentAssistantMessageId = (msg as any).message.id;
+        console.log(`[Mapping] Captured assistant message ID: ${currentAssistantMessageId}`);
+      }
+
       // Capture session ID and model from init message
       if (msg.type === 'system' && (msg as any).subtype === 'init') {
         newSessionId = (msg as any).session_id;
@@ -821,12 +818,32 @@ async function handleMessage(params: {
     // Post complete response (only if not aborted and we have content)
     // Use postSplitResponse to handle long messages that exceed Slack's limits
     if (!isAborted(conversationKey) && fullResponse) {
-      await postSplitResponse(
+      const postedMessages = await postSplitResponse(
         client,
         channelId,
         markdownToSlack(fullResponse),
         threadTs
       );
+
+      // Link assistant message ID to Slack timestamps for message mapping (main channel only)
+      // This enables point-in-time thread forking for future threads
+      if (currentAssistantMessageId && postedMessages.length > 0 && !threadTs && originalTs) {
+        const userMessageTs = originalTs;  // Original user message timestamp
+
+        // Map ALL split message timestamps to the same SDK message ID
+        postedMessages.forEach((slackMsg, index) => {
+          const isFirst = index === 0;
+
+          saveMessageMapping(channelId, slackMsg.ts, {
+            sdkMessageId: currentAssistantMessageId!,
+            type: 'assistant',
+            parentSlackTs: isFirst ? userMessageTs : undefined,  // Only first links to user message
+            isContinuation: !isFirst,  // Mark continuations
+          });
+
+          console.log(`[Mapping] Linked Slack ts ${slackMsg.ts} → SDK ${currentAssistantMessageId}${!isFirst ? ' (continuation)' : ''}`);
+        });
+      }
 
       // Check if in plan mode and Claude is asking to proceed
       // If so, add plan approval buttons

@@ -281,16 +281,26 @@ export function splitMessage(text: string, maxLength: number = SLACK_MAX_LENGTH)
 }
 
 /**
+ * Posted message info returned by postSplitResponse.
+ */
+export interface PostedMessage {
+  ts: string;
+}
+
+/**
  * Post a potentially long response, splitting into multiple messages if needed.
  * Each part is posted with retry logic.
+ *
+ * @returns Array of posted message timestamps (for message mapping)
  */
 export async function postSplitResponse(
   client: WebClient,
   channelId: string,
   text: string,
   threadTs?: string
-): Promise<void> {
+): Promise<PostedMessage[]> {
   const parts = splitMessage(text);
+  const postedMessages: PostedMessage[] = [];
 
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
@@ -301,7 +311,7 @@ export async function postSplitResponse(
       ? `${part}\n\n_... continued ..._`
       : part;
 
-    await withSlackRetry(() =>
+    const result = await withSlackRetry(() =>
       client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
@@ -309,9 +319,16 @@ export async function postSplitResponse(
       })
     );
 
+    // Capture the timestamp of the posted message
+    if (result && typeof result === 'object' && 'ts' in result) {
+      postedMessages.push({ ts: result.ts as string });
+    }
+
     // Small delay between parts to maintain order
     if (!isLast) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
+
+  return postedMessages;
 }

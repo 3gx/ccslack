@@ -53,6 +53,9 @@ vi.mock('../../session-manager.js', () => ({
   }),
   getThreadSession: vi.fn(),
   saveThreadSession: vi.fn(),
+  saveMessageMapping: vi.fn(),
+  findForkPointMessageId: vi.fn().mockReturnValue(null),
+  deleteSession: vi.fn(),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({
@@ -69,7 +72,7 @@ vi.mock('fs', () => ({
   },
 }));
 
-import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession } from '../../session-manager.js';
+import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId } from '../../session-manager.js';
 import { isSessionActiveInTerminal } from '../../concurrent-check.js';
 import { startClaudeQuery } from '../../claude-client.js';
 
@@ -1176,12 +1179,6 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Should call conversations.history to get last message
-      expect(mockClient.conversations.history).toHaveBeenCalledWith({
-        channel: 'C123',
-        limit: 100,
-      });
-
       // Find the fork notification message
       const forkNotificationCall = mockClient.chat.postMessage.mock.calls.find(
         (call: any) => call[0].text?.includes('Forked with conversation state')
@@ -1189,8 +1186,9 @@ describe('slack-bot handlers', () => {
 
       expect(forkNotificationCall).toBeDefined();
 
-      // Should include link to LAST main message (not thread parent)
-      const expectedLink = `https://slack.com/archives/C123/p${lastMainMessageTs.replace('.', '')}`;
+      // With point-in-time forking, link should point to threadTs (the message being replied to)
+      // NOT to the last message in main conversation
+      const expectedLink = `https://slack.com/archives/C123/p${threadTs.replace('.', '')}`;
       expect(forkNotificationCall[0].text).toContain(expectedLink);
       expect(forkNotificationCall[0].text).toContain('this message');
     });
@@ -1267,12 +1265,10 @@ describe('slack-bot handlers', () => {
       expect(forkNotificationCall[0].text).toContain(expectedLink);
     });
 
-    it('should skip thread messages when finding last main message', async () => {
+    it('should always link to threadTs (the message being replied to) with point-in-time forking', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
-      const threadTs = '1000000000.000000';
-      const lastMainMessageTs = '1000000500.000000';
-      const threadMessageTs = '1000000600.000000';  // This is IN a thread, should be skipped
+      const threadTs = '1000000000.000000';  // The message user clicked "Reply in thread" on
 
       vi.mocked(getSession).mockReturnValue({
         sessionId: 'main-session',
@@ -1280,11 +1276,11 @@ describe('slack-bot handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-            pathConfigured: true,
-      configuredPath: '/test/dir',
-      configuredBy: 'U123',
-      configuredAt: Date.now(),
-          });
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
 
       vi.mocked(getOrCreateThreadSession).mockReturnValue({
         session: {
@@ -1294,22 +1290,12 @@ describe('slack-bot handlers', () => {
           mode: 'plan',
           createdAt: Date.now(),
           lastActiveAt: Date.now(),
-              pathConfigured: true,
-      configuredPath: '/test/dir',
-      configuredBy: 'U123',
-      configuredAt: Date.now(),
-            },
+          pathConfigured: true,
+          configuredPath: '/test/dir',
+          configuredBy: 'U123',
+          configuredAt: Date.now(),
+        },
         isNewFork: true,
-      });
-
-      // Messages include one that's part of a thread (should be skipped)
-      mockClient.conversations.history.mockResolvedValue({
-        ok: true,
-        messages: [
-          { ts: threadMessageTs, text: 'Thread reply', thread_ts: '1000000400.000000' },  // Part of thread - SKIP
-          { ts: lastMainMessageTs, text: 'Last main message', thread_ts: undefined },  // Last main - USE THIS
-          { ts: threadTs, text: 'Thread parent', thread_ts: undefined },
-        ],
       });
 
       vi.mocked(startClaudeQuery).mockReturnValue({
@@ -1332,18 +1318,162 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Should link to lastMainMessageTs, NOT threadMessageTs
+      // With point-in-time forking, link should ALWAYS point to threadTs
+      // (the message user clicked "Reply in thread" on)
       const forkNotificationCall = mockClient.chat.postMessage.mock.calls.find(
         (call: any) => call[0].text?.includes('Forked with conversation state')
       );
 
       expect(forkNotificationCall).toBeDefined();
-      const expectedLink = `https://slack.com/archives/C123/p${lastMainMessageTs.replace('.', '')}`;
+      const expectedLink = `https://slack.com/archives/C123/p${threadTs.replace('.', '')}`;
       expect(forkNotificationCall[0].text).toContain(expectedLink);
+    });
 
-      // Should NOT link to the thread message
-      const wrongLink = `https://slack.com/archives/C123/p${threadMessageTs.replace('.', '')}`;
-      expect(forkNotificationCall[0].text).not.toContain(wrongLink);
+    it('should pass resumeSessionAt to SDK when forking from message with mapping', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      const threadTs = '1000000000.000000';  // This is the message user is replying to
+      const forkPointMessageId = 'msg_017pagAKz_test';
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session-abc',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // CRITICAL: Mock findForkPointMessageId to return a specific SDK message ID
+      vi.mocked(findForkPointMessageId).mockReturnValue(forkPointMessageId);
+
+      vi.mocked(getOrCreateThreadSession).mockReturnValue({
+        session: {
+          sessionId: null,
+          forkedFrom: 'main-session-abc',
+          workingDir: '/test/dir',
+          mode: 'plan',
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+          pathConfigured: true,
+          configuredPath: '/test/dir',
+          configuredBy: 'U123',
+          configuredAt: Date.now(),
+          resumeSessionAtMessageId: forkPointMessageId,
+        },
+        isNewFork: true,
+      });
+
+      mockClient.conversations.history.mockResolvedValue({
+        ok: true,
+        messages: [{ ts: threadTs, text: 'Thread parent' }],
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'forked-session-xyz', model: 'claude-opus' };
+          yield { type: 'result', result: 'Response from forked session' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          text: '<@BOT123> what do you remember?',
+          channel: 'C123',
+          ts: '1111111111.111111',
+          thread_ts: threadTs,
+        },
+        client: mockClient,
+      });
+
+      // CRITICAL ASSERTION: Verify resumeSessionAt is passed to SDK
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'what do you remember?',
+        expect.objectContaining({
+          sessionId: 'main-session-abc',
+          forkSession: true,
+          resumeSessionAt: forkPointMessageId,  // THIS IS THE KEY CHECK
+        })
+      );
+    });
+
+    it('should NOT pass resumeSessionAt when no message mapping exists (graceful degradation)', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      const threadTs = '1000000000.000000';
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session-abc',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // No message mapping found - returns null
+      vi.mocked(findForkPointMessageId).mockReturnValue(null);
+
+      vi.mocked(getOrCreateThreadSession).mockReturnValue({
+        session: {
+          sessionId: null,
+          forkedFrom: 'main-session-abc',
+          workingDir: '/test/dir',
+          mode: 'plan',
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+          pathConfigured: true,
+          configuredPath: '/test/dir',
+          configuredBy: 'U123',
+          configuredAt: Date.now(),
+          // No resumeSessionAtMessageId
+        },
+        isNewFork: true,
+      });
+
+      mockClient.conversations.history.mockResolvedValue({
+        ok: true,
+        messages: [{ ts: threadTs, text: 'Thread parent' }],
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'forked-session', model: 'claude-opus' };
+          yield { type: 'result', result: 'Response' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          text: '<@BOT123> help',
+          channel: 'C123',
+          ts: '1111111111.111111',
+          thread_ts: threadTs,
+        },
+        client: mockClient,
+      });
+
+      // Should fork but WITHOUT resumeSessionAt (graceful degradation)
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'help',
+        expect.objectContaining({
+          sessionId: 'main-session-abc',
+          forkSession: true,
+          resumeSessionAt: undefined,  // No fork point available
+        })
+      );
     });
   });
 

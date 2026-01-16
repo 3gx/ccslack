@@ -4,13 +4,19 @@
 
 ```bash
 # Build
-npm run build
+make build
 
 # Test (all)
-npm test
+make test
 
 # Test (specific file)
 npm test -- src/__tests__/unit/blocks.test.ts
+
+# Test (watch mode)
+make test-watch
+
+# Test (coverage)
+make test-coverage
 
 # Type check
 npx tsc --noEmit
@@ -19,7 +25,10 @@ npx tsc --noEmit
 npm run lint
 
 # Run dev mode
-npm run dev
+make dev
+
+# Clean build artifacts
+make clean
 ```
 
 ## Project Structure
@@ -51,8 +60,9 @@ src/
 
 ### Session Management
 - Sessions stored in `sessions.json`
-- Thread replies get forked sessions automatically
+- Thread replies get forked sessions automatically (point-in-time)
 - Session includes: `sessionId`, `workingDir`, `mode`, timestamps
+- Channel sessions include `messageMap` for Slack ts → SDK message ID mapping
 
 ### Session Cleanup
 
@@ -99,13 +109,13 @@ Sessions are automatically cleaned up when:
 ### Running Tests
 ```bash
 # All tests
-npm test
+make test
 
 # Watch mode
-npm test -- --watch
+make test-watch
 
 # Coverage
-npm test -- --coverage
+make test-coverage
 
 # Single file
 npm test -- src/__tests__/unit/blocks.test.ts
@@ -131,10 +141,14 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 - Uses file-based IPC via `/tmp/ccslack-answers/`
 - Main process writes answer files, MCP server polls for them
 
-### Thread Forking
+### Thread Forking (Point-in-Time)
 - Detect thread via `thread_ts` in message event
 - Check `sessions.json` for existing thread session
-- If new, fork from parent session using `forkSession: true`
+- If new:
+  - Look up `thread_ts` in `messageMap` to find SDK message ID
+  - Fork from parent using `forkSession: true` and `resumeSessionAt`
+  - Thread gets history only up to the fork point (not future messages)
+- Older channels without `messageMap` fall back to latest-state forking
 
 ## Common Issues
 
