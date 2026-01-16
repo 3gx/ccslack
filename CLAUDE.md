@@ -54,6 +54,25 @@ src/
 - Thread replies get forked sessions automatically
 - Session includes: `sessionId`, `workingDir`, `mode`, timestamps
 
+### Session Cleanup
+
+Sessions are automatically cleaned up when:
+- A Slack channel is deleted (via `channel_deleted` event)
+- The bot receives the deletion event and removes:
+  1. Bot's session records from `sessions.json`
+  2. Main session SDK file from `~/.claude/projects/`
+  3. All thread session SDK files
+
+**What gets deleted:**
+- ✅ Main channel session
+- ✅ Thread sessions (auto-forks and `/fork-thread` forks)
+- ❌ Terminal forks (created via `claude --resume <id> --fork-session`)
+
+**Why terminal forks are NOT deleted:**
+- They may be user's personal sessions
+- Bot cannot distinguish bot-created vs. user-created forks
+- User has full control over terminal session lifecycle
+
 ### Slack API Calls
 - Always wrap in `withSlackRetry()` for rate limit handling
 - Use streaming API with fallback to `chat.update`

@@ -8,6 +8,7 @@ A Slack bot that integrates Claude Code SDK for AI-powered assistance in Slack c
 - Session persistence across conversations
 - Interactive approval and question handling via MCP tools
 - Slash commands for session management
+- Automatic cleanup when channels are deleted (removes both bot records and SDK files)
 
 ## Slash Commands
 
@@ -57,6 +58,24 @@ npx tsc --noEmit
 ```
 
 See [CLAUDE.md](./CLAUDE.md) for detailed development instructions and [ARCHITECTURE.md](./ARCHITECTURE.md) for system design.
+
+## Session Lifecycle
+
+### Creation
+- Bot creates session when user first messages in a channel
+- Session stored in `./sessions.json` (bot records)
+- Session stored in `~/.claude/projects/` (SDK files)
+
+### Forking
+- Thread replies create new forked sessions
+- `/fork-thread` creates explicit thread forks
+- All forks tracked in `sessions.json` under parent channel
+
+### Cleanup
+- Channel deletion triggers automatic cleanup
+- Deletes bot records from `sessions.json`
+- Deletes SDK files from `~/.claude/projects/`
+- Terminal forks (manual `--fork-session`) are preserved
 
 ## Known Limitations
 

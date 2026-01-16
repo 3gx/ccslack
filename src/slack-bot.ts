@@ -6,6 +6,7 @@ import {
   getOrCreateThreadSession,
   getThreadSession,
   saveThreadSession,
+  deleteSession,
   ThreadSession,
   PermissionMode,
 } from './session-manager.js';
@@ -344,6 +345,33 @@ app.message(async ({ message, client }) => {
     } catch (e) {
       console.error('Failed to post error message:', e);
     }
+  }
+});
+
+/**
+ * Handle channel deletion - clean up all sessions and SDK files
+ *
+ * When a channel is deleted:
+ * 1. Delete main session + all thread sessions from sessions.json
+ * 2. Delete all corresponding SDK .jsonl files
+ *
+ * Terminal forks (created via --fork-session) are NOT deleted
+ * as they may be user's personal sessions.
+ */
+app.event('channel_deleted', async ({ event }) => {
+  try {
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`Channel deleted: ${event.channel}`);
+    console.log(`${'='.repeat(60)}`);
+
+    // Delete session (handles both bot records and SDK files)
+    deleteSession(event.channel);
+
+    console.log(`${'='.repeat(60)}\n`);
+  } catch (error) {
+    console.error('Error handling channel deletion:', error);
+    // Don't throw - cleanup failure shouldn't crash the bot
+    // Log the error and continue running
   }
 });
 

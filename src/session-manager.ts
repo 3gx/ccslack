@@ -1,4 +1,6 @@
 import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 /**
  * SDK Permission Mode type - matches @anthropic-ai/claude-code SDK.
@@ -255,4 +257,98 @@ export function getOrCreateThreadSession(
     session: newThreadSession,
     isNewFork: true,
   };
+}
+
+// ============================================================================
+// Session Cleanup
+// ============================================================================
+
+/**
+ * Delete a single SDK session file from ~/.claude/projects/
+ */
+function deleteSdkSessionFile(sessionId: string, workingDir: string): void {
+  try {
+    // Convert working directory to project path format
+    // Example: /Users/egx/ai/ccslack -> -Users-egx-ai-ccslack
+    const projectPath = workingDir.replace(/\//g, '-').replace(/^-/, '-');
+
+    // Build session file path
+    const sessionFile = path.join(
+      os.homedir(),
+      '.claude/projects',
+      projectPath,
+      `${sessionId}.jsonl`
+    );
+
+    // Delete if exists
+    if (fs.existsSync(sessionFile)) {
+      fs.unlinkSync(sessionFile);
+      console.log(`  ✓ Deleted SDK session file: ${sessionId}.jsonl`);
+    } else {
+      console.log(`  ℹ SDK session file not found (may have been deleted): ${sessionId}.jsonl`);
+    }
+  } catch (error) {
+    console.error(`  ✗ Error deleting SDK session file ${sessionId}:`, error);
+    // Don't throw - continue with other cleanups
+  }
+}
+
+/**
+ * Delete session for a channel (including all SDK files)
+ *
+ * Deletes:
+ * 1. Main channel session from sessions.json
+ * 2. All thread sessions from sessions.json
+ * 3. All corresponding SDK .jsonl files
+ *
+ * @param channelId - Slack channel ID (e.g., "C0123456789")
+ */
+export function deleteSession(channelId: string): void {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession) {
+    console.log(`No session found for channel ${channelId}`);
+    return;
+  }
+
+  console.log(`Deleting sessions for channel ${channelId}...`);
+
+  // Count sessions for logging
+  const threadCount = channelSession.threads
+    ? Object.keys(channelSession.threads).length
+    : 0;
+  const totalSessions = 1 + threadCount; // main + threads
+
+  console.log(`  Found ${totalSessions} session(s) to delete:`);
+  console.log(`    - 1 main session`);
+  if (threadCount > 0) {
+    console.log(`    - ${threadCount} thread session(s)`);
+  }
+
+  // Delete main session SDK file
+  if (channelSession.sessionId) {
+    console.log(`  Deleting main session: ${channelSession.sessionId}`);
+    deleteSdkSessionFile(channelSession.sessionId, channelSession.workingDir);
+  }
+
+  // Delete all thread session SDK files
+  if (channelSession.threads) {
+    const threadEntries = Object.entries(channelSession.threads);
+    console.log(`  Deleting ${threadEntries.length} thread session(s)...`);
+
+    threadEntries.forEach(([threadTs, threadSession]) => {
+      if (threadSession.sessionId) {
+        console.log(`    Thread ${threadTs}: ${threadSession.sessionId}`);
+        deleteSdkSessionFile(threadSession.sessionId, channelSession.workingDir);
+      }
+    });
+  }
+
+  // Delete from sessions.json
+  delete store.channels[channelId];
+  saveSessions(store);
+  console.log(`  ✓ Removed channel ${channelId} from sessions.json`);
+
+  console.log(`✅ Cleanup complete for channel ${channelId}`);
 }
