@@ -42,6 +42,8 @@ export interface Session {
   configuredAt: number | null;   // When it was set
   // Usage data from last query (for /status and /context)
   lastUsage?: LastUsage;
+  // Extended thinking configuration
+  maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
 }
 
 /**
@@ -65,6 +67,8 @@ export interface ThreadSession {
   resumeSessionAtMessageId?: string;
   // Usage data from last query (for /status and /context)
   lastUsage?: LastUsage;
+  // Extended thinking configuration (inherited from channel)
+  maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
 }
 
 /**
@@ -79,6 +83,7 @@ export interface ActivityEntry {
   // For thinking blocks
   thinkingContent?: string;     // Full content (stored for modal/download)
   thinkingTruncated?: string;   // First 500 chars (for live display)
+  thinkingInProgress?: boolean; // True while thinking is streaming (for rolling window)
 }
 
 /**
@@ -203,6 +208,7 @@ export function saveSession(channelId: string, session: Partial<Session>): void 
     configuredBy: existing?.configuredBy ?? null,
     configuredAt: existing?.configuredAt ?? null,
     lastUsage: existing?.lastUsage,  // Preserve usage data for /status and /context
+    maxThinkingTokens: existing?.maxThinkingTokens,  // Preserve thinking token config
     threads: existing?.threads,  // Preserve existing threads
     messageMap: existing?.messageMap,  // Preserve message mappings for point-in-time forking
     activityLogs: existing?.activityLogs,  // Preserve activity logs for View Log modal
@@ -277,6 +283,8 @@ export function saveThreadSession(
     configuredBy: existingThread?.configuredBy ?? store.channels[channelId].configuredBy,
     configuredAt: existingThread?.configuredAt ?? store.channels[channelId].configuredAt,
     lastUsage: existingThread?.lastUsage,  // Preserve usage data for /status and /context
+    // Inherit thinking token config from channel
+    maxThinkingTokens: existingThread?.maxThinkingTokens ?? store.channels[channelId].maxThinkingTokens,
     ...session,
   };
 
@@ -337,6 +345,8 @@ export function getOrCreateThreadSession(
     configuredAt: mainSession?.configuredAt ?? null,
     // Point-in-time forking: store the SDK message ID to fork from
     resumeSessionAtMessageId: forkPoint?.messageId,
+    // Inherit thinking token config from main session
+    maxThinkingTokens: mainSession?.maxThinkingTokens,
   };
 
   // Save the new thread session

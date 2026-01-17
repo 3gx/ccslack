@@ -489,13 +489,17 @@ export interface StatusDisplayParams {
   configuredBy: string | null;
   configuredAt: number | null;
   lastUsage?: LastUsage;
+  maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
 }
+
+// Default thinking tokens for display
+const THINKING_TOKENS_DEFAULT = 31999;
 
 /**
  * Build blocks for /status command response.
  */
 export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
-  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage } = params;
+  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens } = params;
 
   // SDK mode emojis for display
   const modeEmoji: Record<PermissionMode, string> = {
@@ -521,6 +525,15 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
       ? Math.round((totalTokens / lastUsage.contextWindow) * 100)
       : 0;
     statusLines.push(`*Context:* ${contextPercent}% (${totalTokens.toLocaleString()} / ${lastUsage.contextWindow.toLocaleString()} tokens)`);
+  }
+
+  // Add thinking tokens info
+  if (maxThinkingTokens === 0) {
+    statusLines.push(`*Thinking Tokens:* disabled`);
+  } else if (maxThinkingTokens === undefined) {
+    statusLines.push(`*Thinking Tokens:* ${THINKING_TOKENS_DEFAULT.toLocaleString()} (default)`);
+  } else {
+    statusLines.push(`*Thinking Tokens:* ${maxThinkingTokens.toLocaleString()}`);
   }
 
   if (pathConfigured) {
@@ -1053,6 +1066,7 @@ export interface ActivityEntry {
   message?: string;
   thinkingContent?: string;
   thinkingTruncated?: string;
+  thinkingInProgress?: boolean; // True while thinking is streaming (for rolling window)
 }
 
 // Constants for activity log display
@@ -1351,21 +1365,42 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
         lines.push(':brain: *Analyzing request...*');
         break;
       case 'thinking':
-        // Show truncated thinking (500 chars max)
+        // Show thinking content - rolling window for in-progress, truncated for complete
         const thinkingText = entry.thinkingTruncated || entry.thinkingContent || '';
         const charCount = entry.thinkingContent?.length || thinkingText.length;
-        const truncatedIndicator = charCount > THINKING_TRUNCATE_LENGTH
-          ? ` _[${charCount} chars]_`
-          : '';
         const thinkingDuration = entry.durationMs
           ? ` [${(entry.durationMs / 1000).toFixed(1)}s]`
           : '';
-        lines.push(`:brain: *Thinking...*${thinkingDuration}${truncatedIndicator}`);
-        if (thinkingText) {
-          // Indent thinking content and wrap in code block for readability
-          const preview = thinkingText.substring(0, 200).replace(/\n/g, ' ').trim();
-          if (preview) {
-            lines.push(`> ${preview}${thinkingText.length > 200 ? '...' : ''}`);
+
+        if (entry.thinkingInProgress) {
+          // In-progress: show "Thinking..." with rolling window of latest content
+          const charIndicator = charCount > 0 ? ` _[${charCount} chars]_` : '';
+          lines.push(`:brain: *Thinking...*${thinkingDuration}${charIndicator}`);
+          if (thinkingText) {
+            // Rolling window: thinkingTruncated contains last 500 chars with "..." prefix
+            // Show up to 300 chars for live display to keep it readable
+            const displayText = thinkingText.replace(/\n/g, ' ').trim();
+            const preview = displayText.length > 300
+              ? displayText.substring(displayText.length - 300)
+              : displayText;
+            if (preview) {
+              // Add "..." prefix if this is a rolling window (starts with "...")
+              const prefix = thinkingText.startsWith('...') && !preview.startsWith('...') ? '...' : '';
+              lines.push(`> ${prefix}${preview}`);
+            }
+          }
+        } else {
+          // Completed: show final summary with first 500 chars
+          const truncatedIndicator = charCount > THINKING_TRUNCATE_LENGTH
+            ? ` _[${charCount} chars]_`
+            : '';
+          lines.push(`:brain: *Thinking*${thinkingDuration}${truncatedIndicator}`);
+          if (thinkingText) {
+            // Show first 200 chars as preview for completed thinking
+            const preview = thinkingText.substring(0, 200).replace(/\n/g, ' ').trim();
+            if (preview) {
+              lines.push(`> ${preview}${thinkingText.length > 200 ? '...' : ''}`);
+            }
           }
         }
         break;

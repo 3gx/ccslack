@@ -584,4 +584,82 @@ describe('commands', () => {
       expect(sectionBlock?.text?.text).toContain('50%'); // (5000 + 95000) / 200000 = 50%
     });
   });
+
+  describe('/max-thinking-tokens', () => {
+    it('should show default value when not set', () => {
+      const result = parseCommand('/max-thinking-tokens', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('31,999');
+      expect(result.response).toContain('default');
+    });
+
+    it('should show current value when set', () => {
+      const sessionWithThinking: Session = { ...mockSession, maxThinkingTokens: 16000 };
+      const result = parseCommand('/max-thinking-tokens', sessionWithThinking);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('16,000');
+      expect(result.response).not.toContain('default');
+    });
+
+    it('should show disabled when set to 0', () => {
+      const sessionDisabled: Session = { ...mockSession, maxThinkingTokens: 0 };
+      const result = parseCommand('/max-thinking-tokens', sessionDisabled);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('disabled');
+    });
+
+    it('should accept 0 to disable thinking', () => {
+      const result = parseCommand('/max-thinking-tokens 0', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.maxThinkingTokens).toBe(0);
+      expect(result.response).toContain('disabled');
+    });
+
+    it('should reject values below minimum (1-1023)', () => {
+      const result = parseCommand('/max-thinking-tokens 500', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Minimum is 1,024');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should accept minimum value (1024)', () => {
+      const result = parseCommand('/max-thinking-tokens 1024', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.maxThinkingTokens).toBe(1024);
+    });
+
+    it('should accept maximum value (128000)', () => {
+      const result = parseCommand('/max-thinking-tokens 128000', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.maxThinkingTokens).toBe(128000);
+    });
+
+    it('should reject values above maximum', () => {
+      const result = parseCommand('/max-thinking-tokens 200000', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Maximum is 128,000');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should reject non-numeric input', () => {
+      const result = parseCommand('/max-thinking-tokens abc', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Invalid value');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should appear in /help output', () => {
+      const result = parseCommand('/help', mockSession);
+      expect(result.response).toContain('/max-thinking-tokens');
+      expect(result.response).toContain('0=disable');
+      expect(result.response).toContain('1024-128000');
+    });
+
+    it('should accept value in valid range', () => {
+      const result = parseCommand('/max-thinking-tokens 50000', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.maxThinkingTokens).toBe(50000);
+      expect(result.response).toContain('50,000');
+    });
+  });
 });

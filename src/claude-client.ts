@@ -26,6 +26,7 @@ export interface StreamOptions {
   forkSession?: boolean;  // Fork from sessionId instead of resuming
   resumeSessionAt?: string;  // SDK message ID for point-in-time forking
   canUseTool?: CanUseToolCallback;  // For tool approval in default mode
+  maxThinkingTokens?: number;  // Extended thinking budget (0 = disabled, undefined = default)
   slackContext?: {
     channel: string;
     threadTs?: string;
@@ -58,6 +59,15 @@ export function startClaudeQuery(
     // Enable stream_event messages for real-time activity tracking
     includePartialMessages: true,
   };
+
+  // Add extended thinking tokens if enabled (undefined or > 0)
+  // If 0, don't pass to SDK (disables thinking)
+  if (options.maxThinkingTokens !== undefined && options.maxThinkingTokens > 0) {
+    queryOptions.maxThinkingTokens = options.maxThinkingTokens;
+    console.log(`Extended thinking enabled: ${options.maxThinkingTokens} tokens`);
+  } else if (options.maxThinkingTokens === 0) {
+    console.log('Extended thinking disabled');
+  }
 
   // Add model if specified
   if (options.model) {

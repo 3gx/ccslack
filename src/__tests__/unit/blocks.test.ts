@@ -318,6 +318,52 @@ describe('blocks', () => {
       expect(blocks[1].text?.text).not.toContain('Model:');
       expect(blocks[1].text?.text).not.toContain('Context:');
     });
+
+    it('should show default thinking tokens when not set', () => {
+      const blocks = buildStatusDisplayBlocks({
+        sessionId: 'abc-123',
+        mode: 'plan',
+        workingDir: '/test',
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        maxThinkingTokens: undefined,
+      });
+
+      expect(blocks[1].text?.text).toContain('*Thinking Tokens:* 31,999 (default)');
+    });
+
+    it('should show custom thinking tokens value', () => {
+      const blocks = buildStatusDisplayBlocks({
+        sessionId: 'abc-123',
+        mode: 'plan',
+        workingDir: '/test',
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        maxThinkingTokens: 16000,
+      });
+
+      expect(blocks[1].text?.text).toContain('*Thinking Tokens:* 16,000');
+      expect(blocks[1].text?.text).not.toContain('(default)');
+    });
+
+    it('should show disabled when thinking tokens is 0', () => {
+      const blocks = buildStatusDisplayBlocks({
+        sessionId: 'abc-123',
+        mode: 'plan',
+        workingDir: '/test',
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        maxThinkingTokens: 0,
+      });
+
+      expect(blocks[1].text?.text).toContain('*Thinking Tokens:* disabled');
+    });
   });
 
   describe('buildContextDisplayBlocks', () => {
@@ -1660,7 +1706,8 @@ describe('blocks', () => {
         },
       ];
       const text = buildActivityLogText(entries, true);
-      expect(text).toContain(':brain: *Thinking...* [0.5s]');
+      // Completed thinking (no thinkingInProgress flag) shows "Thinking" without ellipsis
+      expect(text).toContain(':brain: *Thinking* [0.5s]');
     });
 
     it('should show [in progress] for in-progress tool_start entries', () => {
@@ -1693,6 +1740,79 @@ describe('blocks', () => {
 
       const text = buildActivityLogText(entries, true);
       expect(text).toContain('[600 chars]');
+    });
+
+    it('should show "Thinking..." for in-progress thinking entries', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: 'Let me analyze...',
+          thinkingTruncated: 'Let me analyze...',
+          thinkingInProgress: true,
+          durationMs: 1500,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':brain: *Thinking...*');
+      expect(text).toContain('[1.5s]');
+      expect(text).toContain('[17 chars]');
+    });
+
+    it('should show rolling window preview for in-progress thinking', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: 'A'.repeat(600),
+          thinkingTruncated: '...' + 'B'.repeat(500), // Rolling window with ... prefix
+          thinkingInProgress: true,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':brain: *Thinking...*');
+      expect(text).toContain('[600 chars]');
+      // Should show preview with "..." prefix since it's a rolling window
+      expect(text).toContain('> ...');
+      expect(text).toContain('BBBB');
+    });
+
+    it('should show "Thinking" (not "Thinking...") for completed thinking entries', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: 'Full thinking content here',
+          thinkingTruncated: 'Full thinking content here',
+          thinkingInProgress: false,
+          durationMs: 2000,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      // Completed: should show "Thinking" without ellipsis
+      expect(text).toContain(':brain: *Thinking*');
+      expect(text).not.toContain(':brain: *Thinking...*');
+      expect(text).toContain('[2.0s]');
+    });
+
+    it('should show first 200 chars preview for completed thinking', () => {
+      const longContent = 'A'.repeat(300);
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: longContent,
+          thinkingTruncated: longContent,
+          thinkingInProgress: false,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      // Completed: shows first 200 chars with ... at end
+      expect(text).toContain('> ' + 'A'.repeat(200) + '...');
     });
 
     it('should format tool_start entries with appropriate emoji', () => {

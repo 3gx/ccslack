@@ -14,6 +14,11 @@ import {
   buildContextDisplayBlocks,
 } from './blocks.js';
 
+// Extended thinking token limits
+const THINKING_TOKENS_MIN = 1024;
+const THINKING_TOKENS_MAX = 128000;
+const THINKING_TOKENS_DEFAULT = 31999;
+
 export interface CommandResult {
   handled: boolean;
   response?: string;
@@ -82,6 +87,8 @@ export function parseCommand(
       return handleCompact(session);
     case 'clear':
       return handleClear(session);
+    case 'max-thinking-tokens':
+      return handleMaxThinkingTokens(argString, session);
     default:
       // Unknown command - return error
       return {
@@ -104,6 +111,7 @@ function handleHelp(): CommandResult {
 \`/context\` - Show context window usage
 \`/mode\` - Show mode picker
 \`/model\` - Show model picker
+\`/max-thinking-tokens [n]\` - Set thinking budget (0=disable, 1024-128000, default=31999)
 \`/continue\` - Get command to continue session in terminal
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
@@ -302,6 +310,7 @@ function handleStatus(session: Session): CommandResult {
       configuredBy: session.configuredBy,
       configuredAt: session.configuredAt,
       lastUsage: session.lastUsage,
+      maxThinkingTokens: session.maxThinkingTokens,
     }),
   };
 }
@@ -515,5 +524,62 @@ function handleClear(session: Session): CommandResult {
   return {
     handled: true,
     clearSession: true,
+  };
+}
+
+/**
+ * /max-thinking-tokens [n] - Set or show thinking token budget
+ * - No args: Show current value
+ * - 0: Disable extended thinking
+ * - 1024-128000: Set thinking token budget
+ */
+function handleMaxThinkingTokens(args: string, session: Session): CommandResult {
+  // No args - show current value
+  if (!args.trim()) {
+    const current = session.maxThinkingTokens;
+    if (current === 0) {
+      return { handled: true, response: 'Thinking tokens: disabled' };
+    } else if (current === undefined) {
+      return { handled: true, response: `Thinking tokens: ${THINKING_TOKENS_DEFAULT.toLocaleString()} (default)` };
+    } else {
+      return { handled: true, response: `Thinking tokens: ${current.toLocaleString()}` };
+    }
+  }
+
+  // Parse value
+  const value = parseInt(args.trim(), 10);
+  if (isNaN(value)) {
+    return {
+      handled: true,
+      response: 'Invalid value. Please provide a number (0 to disable, or 1,024-128,000).',
+    };
+  }
+
+  // Validate
+  if (value === 0) {
+    return {
+      handled: true,
+      response: 'Extended thinking disabled.',
+      sessionUpdate: { maxThinkingTokens: 0 },
+    };
+  }
+  if (value < THINKING_TOKENS_MIN) {
+    return {
+      handled: true,
+      response: `Invalid value. Minimum is ${THINKING_TOKENS_MIN.toLocaleString()} tokens (or 0 to disable).`,
+    };
+  }
+  if (value > THINKING_TOKENS_MAX) {
+    return {
+      handled: true,
+      response: `Invalid value. Maximum is ${THINKING_TOKENS_MAX.toLocaleString()} tokens.`,
+    };
+  }
+
+  // Set value
+  return {
+    handled: true,
+    response: `Thinking tokens set to ${value.toLocaleString()}.`,
+    sessionUpdate: { maxThinkingTokens: value },
   };
 }

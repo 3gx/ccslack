@@ -985,6 +985,7 @@ async function handleMessage(params: {
     configuredBy: string | null;
     configuredAt: number | null;
     lastUsage?: LastUsage;
+    maxThinkingTokens?: number;  // Extended thinking budget
   };
   let isNewFork = false;
   let forkedFromSessionId: string | null = null;
@@ -1019,6 +1020,7 @@ async function handleMessage(params: {
       configuredBy: threadResult.session.configuredBy,
       configuredAt: threadResult.session.configuredAt,
       lastUsage: threadResult.session.lastUsage,
+      maxThinkingTokens: threadResult.session.maxThinkingTokens,
     };
     isNewFork = threadResult.isNewFork;
     forkedFromSessionId = threadResult.session.forkedFrom;
@@ -1471,6 +1473,10 @@ async function handleMessage(params: {
     // For new thread forks, use forkSession flag with parent session ID
     // Also detect uninitialized forks created by /fork-thread (sessionId null but forkedFrom set)
     const needsFork = isNewFork || (session.sessionId === null && forkedFromSessionId !== null);
+    // Determine thinking tokens: 0 = disabled, undefined = use default (31,999)
+    const maxThinkingTokens = session.maxThinkingTokens === 0
+      ? 0  // Disabled
+      : (session.maxThinkingTokens ?? 31999);  // Use configured or default
     const claudeQuery = startClaudeQuery(userText!, {
       sessionId: needsFork ? forkedFromSessionId ?? undefined : session.sessionId ?? undefined,
       workingDir: session.workingDir,
@@ -1479,6 +1485,7 @@ async function handleMessage(params: {
       forkSession: needsFork,  // Fork when first message in thread or uninitialized fork
       resumeSessionAt: needsFork ? resumeSessionAtMessageId : undefined,  // Point-in-time forking
       canUseTool,  // For manual approval in default mode
+      maxThinkingTokens,  // Extended thinking budget
       slackContext: {
         channel: channelId,
         threadTs,
@@ -1504,23 +1511,60 @@ async function handleMessage(params: {
     let currentAssistantMessageId: string | null = null;  // For message mapping
     let costUsd: number | undefined;
 
-    // Helper to add thinking to activity log
-    const logThinking = (content: string) => {
-      const truncated = content.length > THINKING_TRUNCATE_LENGTH
-        ? content.substring(0, THINKING_TRUNCATE_LENGTH) + '...'
-        : content;
+    // Helper to start an in-progress thinking entry (for live streaming)
+    const startThinkingEntry = () => {
       const elapsedMs = Date.now() - processingState.startTime;
-
       processingState.activityLog.push({
         timestamp: Date.now(),
         type: 'thinking',
-        thinkingContent: content,
-        thinkingTruncated: truncated,
-        durationMs: elapsedMs,  // Time since processing started
+        thinkingContent: '',
+        thinkingTruncated: '',
+        thinkingInProgress: true,
+        durationMs: elapsedMs,
       });
       processingState.thinkingBlockCount++;
       processingState.status = 'thinking';
-      console.log(`[Activity] Thinking block added (${content.length} chars), total: ${processingState.activityLog.length} entries`);
+      console.log(`[Activity] Thinking block started (in-progress), total: ${processingState.activityLog.length} entries`);
+    };
+
+    // Helper to update the in-progress thinking entry with rolling window (last 500 chars)
+    const updateThinkingEntry = (content: string) => {
+      // Find the last in-progress thinking entry
+      for (let i = processingState.activityLog.length - 1; i >= 0; i--) {
+        const entry = processingState.activityLog[i];
+        if (entry.type === 'thinking' && entry.thinkingInProgress) {
+          const elapsedMs = Date.now() - processingState.startTime;
+          // Rolling window: show last 500 chars (what Claude is thinking NOW)
+          const rollingWindow = content.length > THINKING_TRUNCATE_LENGTH
+            ? '...' + content.substring(content.length - THINKING_TRUNCATE_LENGTH)
+            : content;
+          entry.thinkingContent = content;
+          entry.thinkingTruncated = rollingWindow;
+          entry.durationMs = elapsedMs;
+          break;
+        }
+      }
+    };
+
+    // Helper to finalize the in-progress thinking entry
+    const finalizeThinkingEntry = (content: string) => {
+      // Find the last in-progress thinking entry and finalize it
+      for (let i = processingState.activityLog.length - 1; i >= 0; i--) {
+        const entry = processingState.activityLog[i];
+        if (entry.type === 'thinking' && entry.thinkingInProgress) {
+          const elapsedMs = Date.now() - processingState.startTime;
+          // For final state, store full content and first 500 chars for summary
+          const truncated = content.length > THINKING_TRUNCATE_LENGTH
+            ? content.substring(0, THINKING_TRUNCATE_LENGTH) + '...'
+            : content;
+          entry.thinkingContent = content;
+          entry.thinkingTruncated = truncated;
+          entry.thinkingInProgress = false;
+          entry.durationMs = elapsedMs;
+          console.log(`[Activity] Thinking block finalized (${content.length} chars)`);
+          break;
+        }
+      }
     };
 
     // Helper to add tool start to activity log
@@ -1714,23 +1758,32 @@ async function handleMessage(params: {
       if ((msg as any).type === 'stream_event') {
         const event = (msg as any).event;
 
-        // Thinking block started
+        // Thinking block started - create in-progress entry for live display
         if (event?.type === 'content_block_start' && event.content_block?.type === 'thinking') {
+          console.log('[Activity] Thinking block started');
           processingState.currentThinkingIndex = event.index;
           processingState.currentThinkingContent = '';
           processingState.status = 'thinking';
+          startThinkingEntry();
+          await updateStatusMessages();
         }
 
-        // Thinking content streaming
+        // Thinking content streaming - update rolling window (last 500 chars)
         if (event?.type === 'content_block_delta' && event.delta?.type === 'thinking_delta') {
+          const prevLen = processingState.currentThinkingContent.length;
           processingState.currentThinkingContent += event.delta.thinking || '';
+          updateThinkingEntry(processingState.currentThinkingContent);
+          // Log periodically (every ~1000 chars) to avoid spam
+          if (Math.floor(processingState.currentThinkingContent.length / 1000) > Math.floor(prevLen / 1000)) {
+            console.log(`[Activity] Thinking delta: ${processingState.currentThinkingContent.length} chars total`);
+          }
         }
 
-        // Thinking block completed - add to activity log
+        // Thinking block completed - finalize entry with full content
         if (event?.type === 'content_block_stop' &&
             processingState.currentThinkingIndex === event.index &&
             processingState.currentThinkingContent) {
-          logThinking(processingState.currentThinkingContent);
+          finalizeThinkingEntry(processingState.currentThinkingContent);
           processingState.currentThinkingContent = '';
           processingState.currentThinkingIndex = null;
           await updateStatusMessages();
