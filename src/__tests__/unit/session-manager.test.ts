@@ -1773,4 +1773,152 @@ describe('session-manager', () => {
       expect(result).toBeNull();
     });
   });
+
+  describe('saveThreadSession with lastUsage', () => {
+    it('should save lastUsage to thread session', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {},
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const lastUsage = {
+        inputTokens: 1000,
+        outputTokens: 500,
+        cacheReadInputTokens: 45000,
+        contextWindow: 200000,
+        model: 'claude-sonnet-4-5',
+      };
+
+      saveThreadSession('C123', 'thread123', { lastUsage });
+
+      // Verify writeFileSync was called with the lastUsage
+      expect(fs.writeFileSync).toHaveBeenCalled();
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['C123'].threads['thread123'].lastUsage).toEqual(lastUsage);
+    });
+
+    it('should preserve existing lastUsage when saving other fields', () => {
+      const existingLastUsage = {
+        inputTokens: 500,
+        outputTokens: 200,
+        cacheReadInputTokens: 10000,
+        contextWindow: 200000,
+        model: 'claude-haiku',
+      };
+
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {
+              'thread123': {
+                sessionId: 'thread-session',
+                forkedFrom: 'main-session',
+                workingDir: '/test',
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: '/test',
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+                lastUsage: existingLastUsage,
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Update mode but not lastUsage
+      saveThreadSession('C123', 'thread123', { mode: 'bypassPermissions' });
+
+      // Verify lastUsage was preserved
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['C123'].threads['thread123'].lastUsage).toEqual(existingLastUsage);
+      expect(writtenData.channels['C123'].threads['thread123'].mode).toBe('bypassPermissions');
+    });
+
+    it('should allow overwriting lastUsage', () => {
+      const oldUsage = {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheReadInputTokens: 1000,
+        contextWindow: 200000,
+        model: 'old-model',
+      };
+
+      const newUsage = {
+        inputTokens: 2000,
+        outputTokens: 1000,
+        cacheReadInputTokens: 50000,
+        contextWindow: 200000,
+        model: 'claude-opus-4-5',
+      };
+
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {
+              'thread123': {
+                sessionId: 'thread-session',
+                forkedFrom: 'main-session',
+                workingDir: '/test',
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: '/test',
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+                lastUsage: oldUsage,
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      saveThreadSession('C123', 'thread123', { lastUsage: newUsage });
+
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['C123'].threads['thread123'].lastUsage).toEqual(newUsage);
+    });
+  });
 });

@@ -11,6 +11,7 @@ import {
   buildStatusDisplayBlocks,
   buildTerminalCommandBlocks,
   buildModeSelectionBlocks,
+  buildContextDisplayBlocks,
 } from './blocks.js';
 
 export interface CommandResult {
@@ -55,6 +56,8 @@ export function parseCommand(
       return handleHelp();
     case 'status':
       return handleStatus(session);
+    case 'context':
+      return handleContext(session);
     case 'mode':
       return handleMode(argString, session);
     case 'set-current-path':
@@ -97,7 +100,8 @@ function handleHelp(): CommandResult {
 \`/ls [path]\` - List files in directory (relative or absolute)
 \`/cd [path]\` - Change directory (only before path locked)
 \`/set-current-path\` - Lock current directory (one-time only)
-\`/status\` - Show session info (ID, mode, directory)
+\`/status\` - Show session info (ID, mode, directory, context)
+\`/context\` - Show context window usage
 \`/mode\` - Show mode picker
 \`/model\` - Show model picker
 \`/continue\` - Get command to continue session in terminal
@@ -297,7 +301,25 @@ function handleStatus(session: Session): CommandResult {
       pathConfigured: session.pathConfigured,
       configuredBy: session.configuredBy,
       configuredAt: session.configuredAt,
+      lastUsage: session.lastUsage,
     }),
+  };
+}
+
+/**
+ * /context - Show context window usage
+ */
+function handleContext(session: Session): CommandResult {
+  if (!session.lastUsage) {
+    return {
+      handled: true,
+      response: 'No context data available. Run a query first.',
+    };
+  }
+
+  return {
+    handled: true,
+    blocks: buildContextDisplayBlocks(session.lastUsage),
   };
 }
 

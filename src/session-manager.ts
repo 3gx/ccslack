@@ -16,6 +16,17 @@ export type PermissionMode = 'plan' | 'default' | 'bypassPermissions' | 'acceptE
  */
 export const PERMISSION_MODES: readonly PermissionMode[] = ['plan', 'default', 'bypassPermissions', 'acceptEdits'];
 
+/**
+ * Usage data from the last query (for /status and /context commands).
+ */
+export interface LastUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  contextWindow: number;
+  model: string;
+}
+
 export interface Session {
   sessionId: string | null;
   previousSessionIds?: string[];  // Track all sessions before /clear
@@ -29,6 +40,8 @@ export interface Session {
   configuredPath: string | null; // The immutable path
   configuredBy: string | null;   // User ID who set it
   configuredAt: number | null;   // When it was set
+  // Usage data from last query (for /status and /context)
+  lastUsage?: LastUsage;
 }
 
 /**
@@ -50,6 +63,8 @@ export interface ThreadSession {
   configuredAt: number | null;
   /** SDK message ID this thread forked from (for point-in-time forking via resumeSessionAt) */
   resumeSessionAtMessageId?: string;
+  // Usage data from last query (for /status and /context)
+  lastUsage?: LastUsage;
 }
 
 /**
@@ -187,6 +202,7 @@ export function saveSession(channelId: string, session: Partial<Session>): void 
     configuredPath: existing?.configuredPath ?? null,
     configuredBy: existing?.configuredBy ?? null,
     configuredAt: existing?.configuredAt ?? null,
+    lastUsage: existing?.lastUsage,  // Preserve usage data for /status and /context
     threads: existing?.threads,  // Preserve existing threads
     messageMap: existing?.messageMap,  // Preserve message mappings for point-in-time forking
     activityLogs: existing?.activityLogs,  // Preserve activity logs for View Log modal
@@ -260,6 +276,7 @@ export function saveThreadSession(
     configuredPath: existingThread?.configuredPath ?? store.channels[channelId].configuredPath,
     configuredBy: existingThread?.configuredBy ?? store.channels[channelId].configuredBy,
     configuredAt: existingThread?.configuredAt ?? store.channels[channelId].configuredAt,
+    lastUsage: existingThread?.lastUsage,  // Preserve usage data for /status and /context
     ...session,
   };
 

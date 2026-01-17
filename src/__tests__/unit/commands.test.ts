@@ -521,4 +521,67 @@ describe('commands', () => {
       expect(result.response).toContain('/clear');
     });
   });
+
+  describe('/context', () => {
+    it('should return error when no usage data', () => {
+      const result = parseCommand('/context', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('No context data available');
+    });
+
+    it('should return context blocks when usage data exists', () => {
+      const sessionWithUsage: Session = {
+        ...mockSession,
+        lastUsage: {
+          inputTokens: 1000,
+          outputTokens: 500,
+          cacheReadInputTokens: 45000,
+          contextWindow: 200000,
+          model: 'claude-sonnet-4-5-20250929',
+        },
+      };
+      const result = parseCommand('/context', sessionWithUsage);
+
+      expect(result.handled).toBe(true);
+      expect(result.blocks).toBeDefined();
+      expect(result.blocks!.length).toBeGreaterThan(0);
+
+      // Check header block
+      const headerBlock = result.blocks![0];
+      expect(headerBlock.type).toBe('header');
+      expect(headerBlock.text?.text).toBe('Context Usage');
+    });
+
+    it('should include /context in help output', () => {
+      const result = parseCommand('/help', mockSession);
+
+      expect(result.response).toContain('/context');
+    });
+  });
+
+  describe('/status with lastUsage', () => {
+    it('should include model and context info when lastUsage exists', () => {
+      const sessionWithUsage: Session = {
+        ...mockSession,
+        lastUsage: {
+          inputTokens: 5000,
+          outputTokens: 2000,
+          cacheReadInputTokens: 95000,
+          contextWindow: 200000,
+          model: 'claude-opus-4-5-20251101',
+        },
+      };
+      const result = parseCommand('/status', sessionWithUsage);
+
+      expect(result.handled).toBe(true);
+      expect(result.blocks).toBeDefined();
+
+      // Find section with status lines
+      const sectionBlock = result.blocks!.find(b => b.type === 'section');
+      expect(sectionBlock?.text?.text).toContain('claude-opus-4-5-20251101');
+      expect(sectionBlock?.text?.text).toContain('Context:');
+      expect(sectionBlock?.text?.text).toContain('50%'); // (5000 + 95000) / 200000 = 50%
+    });
+  });
 });

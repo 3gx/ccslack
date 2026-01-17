@@ -3,7 +3,7 @@
  * Centralizes construction of interactive message blocks.
  */
 
-import { PermissionMode } from './session-manager.js';
+import { PermissionMode, LastUsage } from './session-manager.js';
 import type { ModelInfo } from './model-cache.js';
 
 // Slack Block Kit types (simplified for our use case)
@@ -488,13 +488,14 @@ export interface StatusDisplayParams {
   pathConfigured: boolean;
   configuredBy: string | null;
   configuredAt: number | null;
+  lastUsage?: LastUsage;
 }
 
 /**
  * Build blocks for /status command response.
  */
 export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
-  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt } = params;
+  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage } = params;
 
   // SDK mode emojis for display
   const modeEmoji: Record<PermissionMode, string> = {
@@ -511,6 +512,16 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
     `*Working Directory:* \`${workingDir}\``,
     `*Last Active:* ${lastActive}`,
   ];
+
+  // Add model and context info if available
+  if (lastUsage) {
+    statusLines.push(`*Model:* ${lastUsage.model}`);
+    const totalTokens = lastUsage.inputTokens + lastUsage.cacheReadInputTokens;
+    const contextPercent = lastUsage.contextWindow > 0
+      ? Math.round((totalTokens / lastUsage.contextWindow) * 100)
+      : 0;
+    statusLines.push(`*Context:* ${contextPercent}% (${totalTokens.toLocaleString()} / ${lastUsage.contextWindow.toLocaleString()} tokens)`);
+  }
 
   if (pathConfigured) {
     const configuredDate = new Date(configuredAt!).toLocaleString();
@@ -538,6 +549,82 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
         type: "mrkdwn",
         // NOTE: Terminal detection disabled - see README.md for details
         text: ":warning: *Terminal detection:* _disabled (coming soon)_",
+      }],
+    },
+  ];
+}
+
+/**
+ * Build blocks for /context command response.
+ * Shows context window usage with a visual progress bar.
+ */
+export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
+  const { inputTokens, outputTokens, cacheReadInputTokens, contextWindow, model } = usage;
+  const totalTokens = inputTokens + cacheReadInputTokens;
+  const percent = contextWindow > 0
+    ? Number(((totalTokens / contextWindow) * 100).toFixed(1))
+    : 0;
+  const remaining = contextWindow - totalTokens;
+
+  // Calculate % left until auto-compact triggers (threshold ~77.5% of context)
+  const AUTOCOMPACT_THRESHOLD_PERCENT = 0.775;
+  const compactPercent = contextWindow > 0
+    ? Number((((contextWindow * AUTOCOMPACT_THRESHOLD_PERCENT - totalTokens) / contextWindow) * 100).toFixed(1))
+    : 0;
+
+  // Build visual progress bar using block characters (20 blocks total)
+  const filled = Math.round(percent / 5);
+  const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(20 - filled);
+
+  // Determine health status
+  let healthText: string;
+  let healthEmoji: string;
+  if (compactPercent <= 0) {
+    healthText = 'Auto-compact imminent. Use `/compact` now.';
+    healthEmoji = ':x:';
+  } else if (compactPercent <= 10) {
+    healthText = 'Context nearly full. Use `/compact` to reduce.';
+    healthEmoji = ':x:';
+  } else if (compactPercent <= 20) {
+    healthText = 'Context usage high. Consider `/compact` to reduce.';
+    healthEmoji = ':warning:';
+  } else {
+    healthText = 'Healthy context usage';
+    healthEmoji = ':white_check_mark:';
+  }
+
+  // Format compact status
+  const compactStatus = compactPercent > 0
+    ? `*Auto-compact:* ${compactPercent}% remaining`
+    : `*Auto-compact:* imminent`;
+
+  return [
+    {
+      type: "header",
+      text: { type: "plain_text", text: "Context Usage" },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          `*Model:* ${model}`,
+          `\n\`${bar}\` *${percent}%*`,
+          `\n*Tokens used:* ${totalTokens.toLocaleString()} / ${contextWindow.toLocaleString()}`,
+          `*Remaining:* ${remaining.toLocaleString()} tokens`,
+          compactStatus,
+          `\n_Breakdown:_`,
+          `\u2022 Input: ${inputTokens.toLocaleString()}`,
+          `\u2022 Output: ${outputTokens.toLocaleString()}`,
+          `\u2022 Cache read: ${cacheReadInputTokens.toLocaleString()}`,
+        ].join('\n'),
+      },
+    },
+    {
+      type: "context",
+      elements: [{
+        type: "mrkdwn",
+        text: `${healthEmoji} ${healthText}`,
       }],
     },
   ];
@@ -987,6 +1074,7 @@ export interface StatusPanelParams {
   inputTokens?: number;
   outputTokens?: number;
   contextPercent?: number;
+  compactPercent?: number;  // % left until auto-compact triggers
   costUsd?: number;
   conversationKey: string;
   errorMessage?: string;
@@ -1035,6 +1123,7 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
     inputTokens,
     outputTokens,
     contextPercent,
+    compactPercent,
     costUsd,
     conversationKey,
     errorMessage,
@@ -1158,7 +1247,13 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
           statsParts.push(`${inStr} in / ${outStr} out`);
         }
         if (contextPercent !== undefined) {
-          statsParts.push(`${contextPercent}% ctx`);
+          if (compactPercent !== undefined && compactPercent > 0) {
+            statsParts.push(`${contextPercent}% ctx (${compactPercent}% to compact)`);
+          } else if (compactPercent !== undefined && compactPercent <= 0) {
+            statsParts.push(`${contextPercent}% ctx (compact soon)`);
+          } else {
+            statsParts.push(`${contextPercent}% ctx`);
+          }
         }
         if (costUsd !== undefined) {
           statsParts.push(`$${costUsd.toFixed(4)}`);

@@ -8,6 +8,7 @@ import {
   buildAnsweredBlocks,
   buildApprovalResultBlocks,
   buildStatusDisplayBlocks,
+  buildContextDisplayBlocks,
   buildTerminalCommandBlocks,
   buildModeSelectionBlocks,
   buildModelSelectionBlocks,
@@ -26,6 +27,7 @@ import {
   ActivityEntry,
 } from '../../blocks.js';
 import type { ModelInfo } from '../../model-cache.js';
+import type { LastUsage } from '../../session-manager.js';
 
 describe('blocks', () => {
   describe('buildQuestionBlocks', () => {
@@ -277,6 +279,186 @@ describe('blocks', () => {
       });
 
       expect(blocks[1].text?.text).toContain('/my/project/dir');
+    });
+
+    it('should show model and context info when lastUsage provided', () => {
+      const blocks = buildStatusDisplayBlocks({
+        sessionId: 'abc-123',
+        mode: 'plan',
+        workingDir: '/test',
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        lastUsage: {
+          inputTokens: 5000,
+          outputTokens: 2000,
+          cacheReadInputTokens: 95000,
+          contextWindow: 200000,
+          model: 'claude-opus-4-5',
+        },
+      });
+
+      expect(blocks[1].text?.text).toContain('claude-opus-4-5');
+      expect(blocks[1].text?.text).toContain('Context:');
+      expect(blocks[1].text?.text).toContain('50%'); // (5000 + 95000) / 200000 = 50%
+    });
+
+    it('should not show model/context when no lastUsage', () => {
+      const blocks = buildStatusDisplayBlocks({
+        sessionId: 'abc-123',
+        mode: 'plan',
+        workingDir: '/test',
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      expect(blocks[1].text?.text).not.toContain('Model:');
+      expect(blocks[1].text?.text).not.toContain('Context:');
+    });
+  });
+
+  describe('buildContextDisplayBlocks', () => {
+    const baseUsage: LastUsage = {
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadInputTokens: 49000,
+      contextWindow: 200000,
+      model: 'claude-sonnet-4-5',
+    };
+
+    it('should show header with Context Usage title', () => {
+      const blocks = buildContextDisplayBlocks(baseUsage);
+
+      expect(blocks[0].type).toBe('header');
+      expect(blocks[0].text?.text).toBe('Context Usage');
+    });
+
+    it('should show model name', () => {
+      const blocks = buildContextDisplayBlocks(baseUsage);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      expect(sectionBlock?.text?.text).toContain('claude-sonnet-4-5');
+    });
+
+    it('should show progress bar', () => {
+      const blocks = buildContextDisplayBlocks(baseUsage);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      // Progress bar uses block characters
+      expect(sectionBlock?.text?.text).toMatch(/[\u2588\u2591]+/);
+    });
+
+    it('should calculate percentage correctly', () => {
+      const blocks = buildContextDisplayBlocks(baseUsage);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      // (1000 + 49000) / 200000 = 25%
+      expect(sectionBlock?.text?.text).toContain('25%');
+    });
+
+    it('should show token breakdown', () => {
+      const blocks = buildContextDisplayBlocks(baseUsage);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      expect(sectionBlock?.text?.text).toContain('Input: 1,000');
+      expect(sectionBlock?.text?.text).toContain('Output: 500');
+      expect(sectionBlock?.text?.text).toContain('Cache read: 49,000');
+    });
+
+    it('should show tokens used and remaining', () => {
+      const blocks = buildContextDisplayBlocks(baseUsage);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      expect(sectionBlock?.text?.text).toContain('*Tokens used:* 50,000 / 200,000');
+      expect(sectionBlock?.text?.text).toContain('*Remaining:* 150,000');
+    });
+
+    it('should show healthy status when under 80%', () => {
+      const blocks = buildContextDisplayBlocks(baseUsage);
+      const contextBlock = blocks.find((b: any) => b.type === 'context');
+
+      expect(contextBlock?.elements?.[0]?.text).toContain(':white_check_mark:');
+      expect(contextBlock?.elements?.[0]?.text).toContain('Healthy');
+    });
+
+    it('should show warning when compact percent <= 20%', () => {
+      // 200k * 0.775 = 155k threshold. Want ~15% compact left = 30k tokens to threshold
+      // So need 155k - 30k = 125k tokens used
+      const highUsage: LastUsage = {
+        ...baseUsage,
+        inputTokens: 25000,
+        cacheReadInputTokens: 100000, // 125000 / 200000 = 62.5% ctx, 15% to compact
+      };
+      const blocks = buildContextDisplayBlocks(highUsage);
+      const contextBlock = blocks.find((b: any) => b.type === 'context');
+
+      expect(contextBlock?.elements?.[0]?.text).toContain(':warning:');
+      expect(contextBlock?.elements?.[0]?.text).toContain('Consider `/compact`');
+    });
+
+    it('should show error when compact percent <= 10%', () => {
+      // 200k * 0.775 = 155k threshold. Want ~5% compact left = 10k tokens to threshold
+      // So need 155k - 10k = 145k tokens used
+      const veryHighUsage: LastUsage = {
+        ...baseUsage,
+        inputTokens: 45000,
+        cacheReadInputTokens: 100000, // 145000 / 200000 = 72.5% ctx, 5% to compact
+      };
+      const blocks = buildContextDisplayBlocks(veryHighUsage);
+      const contextBlock = blocks.find((b: any) => b.type === 'context');
+
+      expect(contextBlock?.elements?.[0]?.text).toContain(':x:');
+      expect(contextBlock?.elements?.[0]?.text).toContain('nearly full');
+    });
+
+    it('should show imminent when past threshold', () => {
+      // 200k * 0.775 = 155k threshold. Using 160k is past threshold
+      const pastThreshold: LastUsage = {
+        ...baseUsage,
+        inputTokens: 60000,
+        cacheReadInputTokens: 100000, // 160000 / 200000 = 80% ctx, -2.5% to compact
+      };
+      const blocks = buildContextDisplayBlocks(pastThreshold);
+      const contextBlock = blocks.find((b: any) => b.type === 'context');
+
+      expect(contextBlock?.elements?.[0]?.text).toContain(':x:');
+      expect(contextBlock?.elements?.[0]?.text).toContain('imminent');
+    });
+
+    it('should show auto-compact remaining percentage', () => {
+      // 200k * 0.775 = 155k threshold. 50k used = 52.5% to compact
+      const blocks = buildContextDisplayBlocks(baseUsage);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      expect(sectionBlock?.text?.text).toContain('Auto-compact:');
+      expect(sectionBlock?.text?.text).toContain('52.5% remaining'); // (155k - 50k) / 200k * 100 = 52.5%
+    });
+
+    it('should show auto-compact imminent when past threshold', () => {
+      const pastThreshold: LastUsage = {
+        ...baseUsage,
+        inputTokens: 60000,
+        cacheReadInputTokens: 100000, // 160k used, past 155k threshold
+      };
+      const blocks = buildContextDisplayBlocks(pastThreshold);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      expect(sectionBlock?.text?.text).toContain('Auto-compact:');
+      expect(sectionBlock?.text?.text).toContain('imminent');
+    });
+
+    it('should handle zero context window gracefully', () => {
+      const zeroWindow: LastUsage = {
+        ...baseUsage,
+        contextWindow: 0,
+      };
+      const blocks = buildContextDisplayBlocks(zeroWindow);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      expect(sectionBlock?.text?.text).toContain('0%');
     });
   });
 
@@ -1081,6 +1263,43 @@ describe('blocks', () => {
 
         const contextText = (blocks[1] as any).elements[0].text;
         expect(contextText).toContain('45% ctx');
+      });
+
+      it('should show context with compact percent when both provided', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          contextPercent: 45,
+          compactPercent: 32,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('45% ctx (32% to compact)');
+      });
+
+      it('should show compact soon when compactPercent <= 0', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          contextPercent: 80,
+          compactPercent: -2,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('80% ctx (compact soon)');
+      });
+
+      it('should show just ctx when no compactPercent', () => {
+        const blocks = buildStatusPanelBlocks({
+          ...baseParams,
+          status: 'complete',
+          contextPercent: 50,
+        });
+
+        const contextText = (blocks[1] as any).elements[0].text;
+        expect(contextText).toContain('50% ctx');
+        expect(contextText).not.toContain('to compact');
+        expect(contextText).not.toContain('compact soon');
       });
 
       it('should show cost', () => {

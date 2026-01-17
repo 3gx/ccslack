@@ -17,6 +17,7 @@ import {
   PermissionMode,
   ActivityEntry,
   ForkPointResult,
+  LastUsage,
 } from './session-manager.js';
 import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
 import {
@@ -983,6 +984,7 @@ async function handleMessage(params: {
     configuredPath: string | null;
     configuredBy: string | null;
     configuredAt: number | null;
+    lastUsage?: LastUsage;
   };
   let isNewFork = false;
   let forkedFromSessionId: string | null = null;
@@ -1016,6 +1018,7 @@ async function handleMessage(params: {
       configuredPath: threadResult.session.configuredPath,
       configuredBy: threadResult.session.configuredBy,
       configuredAt: threadResult.session.configuredAt,
+      lastUsage: threadResult.session.lastUsage,
     };
     isNewFork = threadResult.isNewFork;
     forkedFromSessionId = threadResult.session.forkedFrom;
@@ -1809,7 +1812,14 @@ async function handleMessage(params: {
     // This gives accurate context utilization since cached tokens are in the context window
     const totalContextTokens = (processingState.inputTokens || 0) + (processingState.cacheReadInputTokens || 0);
     const contextPercent = processingState.contextWindow && totalContextTokens > 0
-      ? Math.round((totalContextTokens / processingState.contextWindow) * 100)
+      ? Number(((totalContextTokens / processingState.contextWindow) * 100).toFixed(1))
+      : undefined;
+
+    // Calculate % left until auto-compact triggers
+    // Auto-compact threshold is approximately 77.5% of context window (based on CLI behavior)
+    const AUTOCOMPACT_THRESHOLD_PERCENT = 0.775;
+    const compactPercent = processingState.contextWindow && totalContextTokens > 0
+      ? Number((((processingState.contextWindow * AUTOCOMPACT_THRESHOLD_PERCENT - totalContextTokens) / processingState.contextWindow) * 100).toFixed(1))
       : undefined;
 
     // Final elapsed time
@@ -1837,6 +1847,7 @@ async function handleMessage(params: {
                   inputTokens: processingState.inputTokens,
                   outputTokens: processingState.outputTokens,
                   contextPercent,
+                  compactPercent,
                   costUsd: processingState.costUsd,
                   conversationKey,
                   rateLimitHits: processingState.rateLimitHits,
@@ -1874,6 +1885,24 @@ async function handleMessage(params: {
       // Save activity log for modal/download (keyed by message, not conversation)
       console.log(`[Activity] Saving activity log for ${activityLogKey}: ${processingState.activityLog.length} entries`);
       await saveActivityLog(activityLogKey, processingState.activityLog);
+
+      // Save usage data for /status and /context commands
+      if (processingState.model && processingState.contextWindow) {
+        const lastUsage: LastUsage = {
+          inputTokens: processingState.inputTokens || 0,
+          outputTokens: processingState.outputTokens || 0,
+          cacheReadInputTokens: processingState.cacheReadInputTokens || 0,
+          contextWindow: processingState.contextWindow,
+          model: processingState.model,
+        };
+        if (threadTs) {
+          saveThreadSession(channelId, threadTs, { lastUsage });
+          console.log(`[Usage] Saved thread lastUsage: ${lastUsage.inputTokens + lastUsage.cacheReadInputTokens}/${lastUsage.contextWindow} tokens (${Math.round((lastUsage.inputTokens + lastUsage.cacheReadInputTokens) / lastUsage.contextWindow * 100)}%)`);
+        } else {
+          saveSession(channelId, { lastUsage });
+          console.log(`[Usage] Saved lastUsage: ${lastUsage.inputTokens + lastUsage.cacheReadInputTokens}/${lastUsage.contextWindow} tokens (${Math.round((lastUsage.inputTokens + lastUsage.cacheReadInputTokens) / lastUsage.contextWindow * 100)}%)`);
+        }
+      }
     }
 
     // Post complete response (only if not aborted and we have content)
