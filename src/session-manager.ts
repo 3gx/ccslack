@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 
 /**
- * SDK Permission Mode type - matches @anthropic-ai/claude-code SDK.
+ * SDK Permission Mode type - matches @anthropic-ai/claude-agent-sdk.
  * - 'plan': Read-only mode, writes to plan file via ExitPlanMode tool
  * - 'default': Ask-based mode, prompts for approval on tool use
  * - 'bypassPermissions': Auto mode, runs tools without approval

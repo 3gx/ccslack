@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock the SDK before importing
-vi.mock('@anthropic-ai/claude-code', () => ({
+vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: vi.fn().mockReturnValue({
     [Symbol.asyncIterator]: async function* () {
       yield { type: 'system', subtype: 'init', session_id: 'test-123' };
@@ -10,7 +10,7 @@ vi.mock('@anthropic-ai/claude-code', () => ({
   }),
 }));
 
-import { query } from '@anthropic-ai/claude-code';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { startClaudeQuery } from '../../claude-client.js';
 
 describe('claude-client', () => {
@@ -104,13 +104,14 @@ describe('claude-client', () => {
       );
     });
 
-    it('should set systemPrompt to claude_code', () => {
+    it('should set systemPrompt to claude_code preset', () => {
       startClaudeQuery('test prompt', {});
 
       expect(query).toHaveBeenCalledWith(
         expect.objectContaining({
           options: expect.objectContaining({
-            systemPrompt: 'claude_code',
+            systemPrompt: { type: 'preset', preset: 'claude_code' },
+            settingSources: ['user', 'project', 'local'],
           }),
         })
       );

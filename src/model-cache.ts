@@ -3,7 +3,7 @@
  * Caches the list of available models from the SDK to avoid repeated queries.
  */
 
-import { query } from '@anthropic-ai/claude-code';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
 /**
  * Model info from SDK.

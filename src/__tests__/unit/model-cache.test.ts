@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock the SDK before any imports
-vi.mock('@anthropic-ai/claude-code', () => ({
+vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: vi.fn(),
 }));
 
-import { query } from '@anthropic-ai/claude-code';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
 describe('model-cache', () => {
   // We need to reset module state between tests
@@ -40,7 +40,7 @@ describe('model-cache', () => {
     vi.resetModules();
 
     // Re-mock after reset
-    vi.doMock('@anthropic-ai/claude-code', () => ({
+    vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
       query: vi.fn(),
     }));
 
@@ -55,7 +55,7 @@ describe('model-cache', () => {
 
   describe('Cache TTL Logic', () => {
     it('getAvailableModels returns cached models when fresh', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -71,7 +71,7 @@ describe('model-cache', () => {
     });
 
     it('getAvailableModels refreshes when cache is stale', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -93,7 +93,7 @@ describe('model-cache', () => {
     });
 
     it('getAvailableModels refreshes on first call with empty cache', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -107,7 +107,7 @@ describe('model-cache', () => {
 
   describe('SDK Integration', () => {
     it('refreshModelCache creates query with correct options', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -122,7 +122,7 @@ describe('model-cache', () => {
     });
 
     it('refreshModelCache calls supportedModels on query', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -132,7 +132,7 @@ describe('model-cache', () => {
     });
 
     it('refreshModelCache updates cache and timestamp', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -147,7 +147,7 @@ describe('model-cache', () => {
     });
 
     it('refreshModelCache calls interrupt after getting models', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -159,7 +159,7 @@ describe('model-cache', () => {
 
   describe('Error Handling', () => {
     it('refreshModelCache uses fallback when SDK fails and cache empty', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery([], true); // Will fail
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -173,7 +173,7 @@ describe('model-cache', () => {
     });
 
     it('refreshModelCache keeps existing cache when SDK fails', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
 
       // First call succeeds
       const successMock = createMockQuery();
@@ -195,7 +195,7 @@ describe('model-cache', () => {
     });
 
     it('interrupt errors are silently ignored', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       mock.interrupt = vi.fn().mockRejectedValue(new Error('Interrupt failed'));
       vi.mocked(mockQuery).mockReturnValue(mock as any);
@@ -207,7 +207,7 @@ describe('model-cache', () => {
 
   describe('Model Lookup', () => {
     it('isModelAvailable returns true for existing model', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -216,7 +216,7 @@ describe('model-cache', () => {
     });
 
     it('isModelAvailable returns false for non-existing model', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -225,7 +225,7 @@ describe('model-cache', () => {
     });
 
     it('getModelInfo returns model info for existing model', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -234,7 +234,7 @@ describe('model-cache', () => {
     });
 
     it('getModelInfo returns undefined for unknown model', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -243,7 +243,7 @@ describe('model-cache', () => {
     });
 
     it('getDefaultModel returns first model', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery();
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 
@@ -252,7 +252,7 @@ describe('model-cache', () => {
     });
 
     it('getDefaultModel returns undefined for empty list', async () => {
-      const { query: mockQuery } = await import('@anthropic-ai/claude-code');
+      const { query: mockQuery } = await import('@anthropic-ai/claude-agent-sdk');
       const mock = createMockQuery([]);
       vi.mocked(mockQuery).mockReturnValue(mock as any);
 

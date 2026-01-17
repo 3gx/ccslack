@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { query } from '@anthropic-ai/claude-code';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
 /**
  * Live SDK Verification Tests
@@ -256,44 +256,8 @@ describe.skipIf(SKIP_LIVE)('SDK Live Verification', { timeout: 30000, concurrent
       await q.interrupt();
     });
 
-    it('CANARY: resume + forkSession + resumeSessionAt accepted', async () => {
-      // Fork options structure used by point-in-time forking
-      // Will fail if SDK changes option format
-      // We expect this to fail with a session-related error, not an option format error
-      let errorOccurred = false;
-      let errorMessage = '';
-
-      try {
-        const q = query({
-          prompt: 'echo test',
-          options: {
-            maxTurns: 1,
-            resume: 'test-session-id-that-does-not-exist',
-            forkSession: true,
-            resumeSessionAt: 'test-message-id',
-          },
-        });
-
-        const iter = q[Symbol.asyncIterator]();
-        await iter.next();
-        await q.interrupt().catch(() => {});
-      } catch (e: any) {
-        errorOccurred = true;
-        errorMessage = (e.message || String(e)).toLowerCase();
-      }
-
-      // We expect an error because the session doesn't exist
-      // The key is that the OPTIONS were accepted (not rejected as unknown)
-      // Valid errors: session not found, invalid session, no such file, etc.
-      // Invalid errors: unknown option, invalid option name, etc.
-      if (errorOccurred) {
-        const isOptionError = errorMessage.includes('unknown option') ||
-          errorMessage.includes('invalid option') ||
-          errorMessage.includes('unrecognized');
-        expect(isOptionError).toBe(false);
-      }
-      // If no error, that's also fine - options were accepted
-    });
+    // NOTE: 'CANARY: resume + forkSession + resumeSessionAt accepted' moved to
+    // sdk-fork-canary.test.ts for process isolation (SDK may hang on invalid sessions)
 
     it('CANARY: mcpServers config structure accepted', async () => {
       // MCP server config format used by claude-client.ts

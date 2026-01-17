@@ -8,11 +8,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
  */
 
 // Mock the SDK
-vi.mock('@anthropic-ai/claude-code', () => ({
+vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: vi.fn(),
 }));
 
-import { query } from '@anthropic-ai/claude-code';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { startClaudeQuery } from '../../claude-client.js';
 
 describe('SDK Message Handling Robustness', () => {

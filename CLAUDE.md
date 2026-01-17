@@ -89,7 +89,7 @@ Sessions are automatically cleaned up when:
 - Split messages over 4000 characters
 
 ### Claude SDK Integration
-- Use `query()` from `@anthropic-ai/claude-code`
+- Use `query()` from `@anthropic-ai/claude-agent-sdk`
 - Pass `permissionMode` directly to SDK
 - Handle `canUseTool` callback for manual approval mode
 - MCP server provides `ask_user` and `approve_action` tools

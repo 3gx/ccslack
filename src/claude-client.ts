@@ -1,4 +1,4 @@
-import { query, type SDKMessage } from '@anthropic-ai/claude-code';
+import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { PermissionMode } from './session-manager.js';
@@ -53,7 +53,8 @@ export function startClaudeQuery(
     outputFormat: 'stream-json',
     permissionMode,
     // Claude Code preset configuration
-    systemPrompt: 'claude_code',
+    systemPrompt: { type: 'preset', preset: 'claude_code' },
+    settingSources: ['user', 'project', 'local'],
     // Enable stream_event messages for real-time activity tracking
     includePartialMessages: true,
   };
