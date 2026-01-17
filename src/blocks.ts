@@ -490,16 +490,19 @@ export interface StatusDisplayParams {
   configuredAt: number | null;
   lastUsage?: LastUsage;
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
+  updateRateSeconds?: number;  // undefined = 1 (default), range 1-10
 }
 
 // Default thinking tokens for display
 const THINKING_TOKENS_DEFAULT = 31999;
+// Default update rate for display
+const UPDATE_RATE_DEFAULT = 1;
 
 /**
  * Build blocks for /status command response.
  */
 export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
-  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens } = params;
+  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens, updateRateSeconds } = params;
 
   // SDK mode emojis for display
   const modeEmoji: Record<PermissionMode, string> = {
@@ -534,6 +537,13 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
     statusLines.push(`*Thinking Tokens:* ${THINKING_TOKENS_DEFAULT.toLocaleString()} (default)`);
   } else {
     statusLines.push(`*Thinking Tokens:* ${maxThinkingTokens.toLocaleString()}`);
+  }
+
+  // Add update rate info
+  if (updateRateSeconds === undefined) {
+    statusLines.push(`*Update Rate:* ${UPDATE_RATE_DEFAULT}s (default)`);
+  } else {
+    statusLines.push(`*Update Rate:* ${updateRateSeconds}s`);
   }
 
   if (pathConfigured) {
@@ -1060,13 +1070,17 @@ export function buildPathSetupBlocks(): Block[] {
 // Activity entry type (mirrors session-manager.ts)
 export interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating';
   tool?: string;
   durationMs?: number;
   message?: string;
   thinkingContent?: string;
   thinkingTruncated?: string;
   thinkingInProgress?: boolean; // True while thinking is streaming (for rolling window)
+  // For generating (text streaming)
+  generatingChunks?: number;    // Number of text chunks received
+  generatingChars?: number;     // Total characters generated
+  generatingInProgress?: boolean; // True while text is streaming
 }
 
 // Constants for activity log display
@@ -1079,7 +1093,7 @@ const MODAL_PAGE_SIZE = 15;
  * Parameters for status panel blocks.
  */
 export interface StatusPanelParams {
-  status: 'starting' | 'thinking' | 'tool' | 'complete' | 'error' | 'aborted';
+  status: 'starting' | 'thinking' | 'tool' | 'complete' | 'error' | 'aborted' | 'generating';
   mode: PermissionMode;
   model?: string;
   currentTool?: string;
@@ -1193,6 +1207,7 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
 
     case 'thinking':
     case 'tool':
+    case 'generating':
       // Header with spinner and elapsed time
       blocks.push({
         type: 'section',
@@ -1208,6 +1223,8 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
         activityParts.push(customStatus);
       } else if (status === 'thinking') {
         activityParts.push('Thinking...');
+      } else if (status === 'generating') {
+        activityParts.push('Generating...');
       } else if (currentTool) {
         activityParts.push(`Running: ${currentTool}`);
       }
@@ -1390,16 +1407,19 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
             }
           }
         } else {
-          // Completed: show final summary with first 500 chars
+          // Completed: show final summary with last 500 chars (conclusion)
           const truncatedIndicator = charCount > THINKING_TRUNCATE_LENGTH
             ? ` _[${charCount} chars]_`
             : '';
           lines.push(`:brain: *Thinking*${thinkingDuration}${truncatedIndicator}`);
           if (thinkingText) {
-            // Show first 200 chars as preview for completed thinking
-            const preview = thinkingText.substring(0, 200).replace(/\n/g, ' ').trim();
+            // Show last 500 chars of thinking (thinkingTruncated already contains last 500 with "..." prefix)
+            const displayText = thinkingText.replace(/\n/g, ' ').trim();
+            const preview = displayText.length > THINKING_TRUNCATE_LENGTH
+              ? '...' + displayText.substring(displayText.length - THINKING_TRUNCATE_LENGTH)
+              : displayText;
             if (preview) {
-              lines.push(`> ${preview}${thinkingText.length > 200 ? '...' : ''}`);
+              lines.push(`> ${preview}`);
             }
           }
         }
@@ -1418,6 +1438,17 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
         break;
       case 'error':
         lines.push(`:x: Error: ${entry.message}`);
+        break;
+      case 'generating':
+        // Show text generation progress
+        const genDuration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+        const chunkInfo = entry.generatingChunks ? ` [${entry.generatingChunks} chunks]` : '';
+        const charInfo = entry.generatingChars ? ` _[${entry.generatingChars.toLocaleString()} chars]_` : '';
+        if (entry.generatingInProgress) {
+          lines.push(`:pencil: *Generating...*${genDuration}${chunkInfo}${charInfo}`);
+        } else {
+          lines.push(`:pencil: *Response*${genDuration}${charInfo}`);
+        }
         break;
     }
   }
@@ -1544,6 +1575,15 @@ export function buildActivityLogModalView(
       blocks.push({
         type: 'section',
         text: { type: 'mrkdwn', text: `:x: Error: ${entry.message} _${timestamp}_` },
+      });
+    } else if (entry.type === 'generating') {
+      const duration = entry.durationMs ? ` (${(entry.durationMs / 1000).toFixed(1)}s)` : '';
+      const chunks = entry.generatingChunks ? ` ${entry.generatingChunks} chunks` : '';
+      const chars = entry.generatingChars ? ` ${entry.generatingChars.toLocaleString()} chars` : '';
+      const status = entry.generatingInProgress ? 'in progress' : 'complete';
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `:pencil: *Response*${duration}${chunks}${chars} (${status}) _${timestamp}_` },
       });
     }
   }

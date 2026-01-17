@@ -19,6 +19,11 @@ const THINKING_TOKENS_MIN = 1024;
 const THINKING_TOKENS_MAX = 128000;
 const THINKING_TOKENS_DEFAULT = 31999;
 
+// Update rate limits (seconds)
+const UPDATE_RATE_MIN = 1;
+const UPDATE_RATE_MAX = 10;
+const UPDATE_RATE_DEFAULT = 1;
+
 export interface CommandResult {
   handled: boolean;
   response?: string;
@@ -89,6 +94,8 @@ export function parseCommand(
       return handleClear(session);
     case 'max-thinking-tokens':
       return handleMaxThinkingTokens(argString, session);
+    case 'update-rate':
+      return handleUpdateRate(argString, session);
     default:
       // Unknown command - return error
       return {
@@ -112,6 +119,7 @@ function handleHelp(): CommandResult {
 \`/mode\` - Show mode picker
 \`/model\` - Show model picker
 \`/max-thinking-tokens [n]\` - Set thinking budget (0=disable, 1024-128000, default=31999)
+\`/update-rate [n]\` - Set status update interval (1-10 seconds, default=1)
 \`/continue\` - Get command to continue session in terminal
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
@@ -311,6 +319,7 @@ function handleStatus(session: Session): CommandResult {
       configuredAt: session.configuredAt,
       lastUsage: session.lastUsage,
       maxThinkingTokens: session.maxThinkingTokens,
+      updateRateSeconds: session.updateRateSeconds,
     }),
   };
 }
@@ -581,5 +590,52 @@ function handleMaxThinkingTokens(args: string, session: Session): CommandResult 
     handled: true,
     response: `Thinking tokens set to ${value.toLocaleString()}.`,
     sessionUpdate: { maxThinkingTokens: value },
+  };
+}
+
+/**
+ * /update-rate [n] - Set or show status update interval
+ * - No args: Show current value
+ * - 1-10: Set update interval in seconds (fractional allowed)
+ */
+function handleUpdateRate(args: string, session: Session): CommandResult {
+  // No args - show current value
+  if (!args.trim()) {
+    const current = session.updateRateSeconds;
+    if (current === undefined) {
+      return { handled: true, response: `Update rate: ${UPDATE_RATE_DEFAULT}s (default)` };
+    } else {
+      return { handled: true, response: `Update rate: ${current}s` };
+    }
+  }
+
+  // Parse value (allow fractional)
+  const value = parseFloat(args.trim());
+  if (isNaN(value)) {
+    return {
+      handled: true,
+      response: `Invalid value. Please provide a number between ${UPDATE_RATE_MIN} and ${UPDATE_RATE_MAX} seconds.`,
+    };
+  }
+
+  // Validate range
+  if (value < UPDATE_RATE_MIN) {
+    return {
+      handled: true,
+      response: `Invalid value. Minimum is ${UPDATE_RATE_MIN} second.`,
+    };
+  }
+  if (value > UPDATE_RATE_MAX) {
+    return {
+      handled: true,
+      response: `Invalid value. Maximum is ${UPDATE_RATE_MAX} seconds.`,
+    };
+  }
+
+  // Set value
+  return {
+    handled: true,
+    response: `Update rate set to ${value}s.`,
+    sessionUpdate: { updateRateSeconds: value },
   };
 }

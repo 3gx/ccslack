@@ -802,6 +802,49 @@ describe('session-manager', () => {
 
       expect(result.channels['C123'].previousSessionIds).toEqual([]);
     });
+
+    it('should clear lastUsage when /clear sets sessionId to null', () => {
+      // Setup: Session with lastUsage data from previous query
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'old-session',
+            previousSessionIds: [],
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            lastUsage: {
+              inputTokens: 34,
+              outputTokens: 2499,
+              cacheReadInputTokens: 94023,
+              contextWindow: 200000,
+              model: 'claude-opus-4-5-20251101',
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Simulate /clear: set sessionId to null and clear lastUsage
+      saveSession('C123', {
+        sessionId: null,
+        previousSessionIds: ['old-session'],
+        lastUsage: undefined,
+      });
+
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['C123'].sessionId).toBeNull();
+      expect(writtenData.channels['C123'].previousSessionIds).toEqual(['old-session']);
+      // lastUsage should be cleared (undefined means it won't appear in JSON)
+      expect(writtenData.channels['C123'].lastUsage).toBeUndefined();
+    });
   });
 
   describe('deleteSession with previousSessionIds', () => {

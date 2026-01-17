@@ -44,6 +44,8 @@ export interface Session {
   lastUsage?: LastUsage;
   // Extended thinking configuration
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
+  // Status update rate configuration
+  updateRateSeconds?: number;  // undefined = 1 (default), range 1-10
 }
 
 /**
@@ -69,6 +71,8 @@ export interface ThreadSession {
   lastUsage?: LastUsage;
   // Extended thinking configuration (inherited from channel)
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
+  // Status update rate configuration (inherited from channel)
+  updateRateSeconds?: number;  // undefined = 1 (default), range 1-10
 }
 
 /**
@@ -76,7 +80,7 @@ export interface ThreadSession {
  */
 export interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating';
   tool?: string;
   durationMs?: number;
   message?: string;
@@ -84,6 +88,10 @@ export interface ActivityEntry {
   thinkingContent?: string;     // Full content (stored for modal/download)
   thinkingTruncated?: string;   // First 500 chars (for live display)
   thinkingInProgress?: boolean; // True while thinking is streaming (for rolling window)
+  // For generating (text streaming)
+  generatingChunks?: number;    // Number of text chunks received
+  generatingChars?: number;     // Total characters generated
+  generatingInProgress?: boolean; // True while text is streaming
 }
 
 /**

@@ -62,7 +62,7 @@ const STATUS_UPDATE_INTERVAL = 1000; // TEMP: 1s for testing spinner updates
 
 // Processing state for real-time activity tracking
 interface ProcessingState {
-  status: 'starting' | 'thinking' | 'tool' | 'complete' | 'error' | 'aborted';
+  status: 'starting' | 'thinking' | 'tool' | 'complete' | 'error' | 'aborted' | 'generating';
   model?: string;
   currentTool?: string;
   toolsCompleted: number;
@@ -651,6 +651,7 @@ async function runClearSession(
     saveSession(channelId, {
       sessionId: null,  // Next message will start fresh without resuming
       previousSessionIds: previousIds,
+      lastUsage: undefined,  // Clear stale usage data so /status and /context show fresh state
     });
     console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
 
@@ -986,6 +987,7 @@ async function handleMessage(params: {
     configuredAt: number | null;
     lastUsage?: LastUsage;
     maxThinkingTokens?: number;  // Extended thinking budget
+    updateRateSeconds?: number;  // Status update interval (1-10s)
   };
   let isNewFork = false;
   let forkedFromSessionId: string | null = null;
@@ -1021,6 +1023,7 @@ async function handleMessage(params: {
       configuredAt: threadResult.session.configuredAt,
       lastUsage: threadResult.session.lastUsage,
       maxThinkingTokens: threadResult.session.maxThinkingTokens,
+      updateRateSeconds: threadResult.session.updateRateSeconds,
     };
     isNewFork = threadResult.isNewFork;
     forkedFromSessionId = threadResult.session.forkedFrom;
@@ -1553,9 +1556,9 @@ async function handleMessage(params: {
         const entry = processingState.activityLog[i];
         if (entry.type === 'thinking' && entry.thinkingInProgress) {
           const elapsedMs = Date.now() - processingState.startTime;
-          // For final state, store full content and first 500 chars for summary
+          // For final state, store full content and last 500 chars for summary (shows conclusion)
           const truncated = content.length > THINKING_TRUNCATE_LENGTH
-            ? content.substring(0, THINKING_TRUNCATE_LENGTH) + '...'
+            ? '...' + content.substring(content.length - THINKING_TRUNCATE_LENGTH)
             : content;
           entry.thinkingContent = content;
           entry.thinkingTruncated = truncated;
@@ -1567,8 +1570,64 @@ async function handleMessage(params: {
       }
     };
 
+    // Track generating chunks for activity log
+    let generatingChunkCount = 0;
+    let generatingStartTime: number | null = null;
+
+    // Helper to finalize generating entry (called when tool starts or streaming completes)
+    const finalizeGeneratingEntry = (finalCharCount: number) => {
+      const entry = processingState.activityLog.find(
+        e => e.type === 'generating' && e.generatingInProgress
+      );
+      if (entry) {
+        entry.generatingInProgress = false;
+        entry.generatingChunks = generatingChunkCount;
+        entry.generatingChars = finalCharCount;
+        entry.durationMs = Date.now() - (generatingStartTime || processingState.startTime);
+        console.log(`[Activity] Generating complete: ${generatingChunkCount} chunks, ${finalCharCount} chars`);
+        // Reset for next generating block
+        generatingChunkCount = 0;
+        generatingStartTime = null;
+      }
+    };
+
+    // Helper to start or update generating entry (for text streaming visibility)
+    const updateGeneratingEntry = (charCount: number) => {
+      generatingChunkCount++;
+
+      // Find existing generating entry or create new one
+      const existingEntry = processingState.activityLog.find(
+        e => e.type === 'generating' && e.generatingInProgress
+      );
+
+      if (existingEntry) {
+        // Update existing entry
+        existingEntry.generatingChunks = generatingChunkCount;
+        existingEntry.generatingChars = charCount;
+        existingEntry.durationMs = Date.now() - (generatingStartTime || processingState.startTime);
+      } else {
+        // Create new entry
+        generatingStartTime = Date.now();
+        const elapsedMs = Date.now() - processingState.startTime;
+        processingState.activityLog.push({
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: generatingChunkCount,
+          generatingChars: charCount,
+          generatingInProgress: true,
+          durationMs: elapsedMs,
+        });
+        processingState.status = 'generating';
+        console.log(`[Activity] Generating started, total: ${processingState.activityLog.length} entries`);
+      }
+    };
+
     // Helper to add tool start to activity log
     const logToolStart = (toolName: string) => {
+      // Finalize any in-progress generating entry before tool starts
+      // This ensures text before tools gets its own entry, and text after tools gets a new one
+      finalizeGeneratingEntry(fullResponse.length);
+
       const formattedName = formatToolName(toolName);
       const elapsedMs = Date.now() - processingState.startTime;
       processingState.activityLog.push({
@@ -1584,6 +1643,10 @@ async function handleMessage(params: {
 
     // Helper to add tool complete to activity log
     const logToolComplete = () => {
+      // Finalize any in-progress generating entry before tool completes
+      // This handles generating entries created DURING tool execution
+      finalizeGeneratingEntry(fullResponse.length);
+
       const lastToolStart = [...processingState.activityLog].reverse().find(e => e.type === 'tool_start');
       if (lastToolStart) {
         // Calculate duration from tool start to now
@@ -1685,9 +1748,11 @@ async function handleMessage(params: {
     };
 
     // Periodic timer to update spinner even when no events are firing
+    // Use session's configured update rate (default 1 second)
+    const updateIntervalMs = (session.updateRateSeconds ?? 1) * 1000;
     const spinnerTimer = setInterval(() => {
       updateStatusMessages();
-    }, STATUS_UPDATE_INTERVAL);
+    }, updateIntervalMs);
 
     for await (const msg of claudeQuery) {
       // Capture assistant message UUID for message mapping (point-in-time forking)
@@ -1696,6 +1761,8 @@ async function handleMessage(params: {
       if (msg.type === 'assistant' && (msg as any).uuid) {
         currentAssistantMessageId = (msg as any).uuid;
         console.log(`[Mapping] Captured assistant message UUID: ${currentAssistantMessageId}`);
+        // Track generating activity for user visibility (shows text is being streamed)
+        updateGeneratingEntry(fullResponse.length);
       }
 
       // Capture session ID and model from init message
@@ -1856,6 +1923,11 @@ async function handleMessage(params: {
           }
         }
       }
+    }
+
+    // Finalize generating entry if we were streaming text
+    if (generatingChunkCount > 0) {
+      finalizeGeneratingEntry(fullResponse.length);
     }
 
     // Stop the spinner timer now that processing is complete

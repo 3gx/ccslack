@@ -662,4 +662,76 @@ describe('commands', () => {
       expect(result.response).toContain('50,000');
     });
   });
+
+  describe('/update-rate', () => {
+    it('should show default value when not set', () => {
+      const result = parseCommand('/update-rate', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('1s');
+      expect(result.response).toContain('default');
+    });
+
+    it('should show current value when set', () => {
+      const sessionWithRate: Session = { ...mockSession, updateRateSeconds: 2.5 };
+      const result = parseCommand('/update-rate', sessionWithRate);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('2.5s');
+      expect(result.response).not.toContain('default');
+    });
+
+    it('should accept minimum value (1)', () => {
+      const result = parseCommand('/update-rate 1', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.updateRateSeconds).toBe(1);
+      expect(result.response).toContain('1s');
+    });
+
+    it('should accept maximum value (10)', () => {
+      const result = parseCommand('/update-rate 10', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.updateRateSeconds).toBe(10);
+      expect(result.response).toContain('10s');
+    });
+
+    it('should accept fractional values', () => {
+      const result = parseCommand('/update-rate 1.5', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.updateRateSeconds).toBe(1.5);
+      expect(result.response).toContain('1.5s');
+    });
+
+    it('should accept other fractional values', () => {
+      const result = parseCommand('/update-rate 2.75', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.updateRateSeconds).toBe(2.75);
+      expect(result.response).toContain('2.75s');
+    });
+
+    it('should reject values below minimum', () => {
+      const result = parseCommand('/update-rate 0.5', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Minimum is 1');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should reject values above maximum', () => {
+      const result = parseCommand('/update-rate 15', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Maximum is 10');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should reject non-numeric input', () => {
+      const result = parseCommand('/update-rate abc', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Invalid value');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should appear in /help output', () => {
+      const result = parseCommand('/help', mockSession);
+      expect(result.response).toContain('/update-rate');
+      expect(result.response).toContain('1-10');
+    });
+  });
 });

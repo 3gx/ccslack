@@ -347,7 +347,8 @@ describe('blocks', () => {
       });
 
       expect(blocks[1].text?.text).toContain('*Thinking Tokens:* 16,000');
-      expect(blocks[1].text?.text).not.toContain('(default)');
+      // Should not show "(default)" on the thinking tokens line specifically
+      expect(blocks[1].text?.text).not.toContain('*Thinking Tokens:* 16,000 (default)');
     });
 
     it('should show disabled when thinking tokens is 0', () => {
@@ -363,6 +364,52 @@ describe('blocks', () => {
       });
 
       expect(blocks[1].text?.text).toContain('*Thinking Tokens:* disabled');
+    });
+
+    it('should show default update rate when not set', () => {
+      const blocks = buildStatusDisplayBlocks({
+        sessionId: 'abc-123',
+        mode: 'plan',
+        workingDir: '/test',
+        lastActiveAt: Date.now(),
+        pathConfigured: false,
+        configuredBy: null,
+        configuredAt: null,
+      });
+
+      expect(blocks[1].text?.text).toContain('*Update Rate:* 1s (default)');
+    });
+
+    it('should show custom update rate value', () => {
+      const blocks = buildStatusDisplayBlocks({
+        sessionId: 'abc-123',
+        mode: 'plan',
+        workingDir: '/test',
+        lastActiveAt: Date.now(),
+        pathConfigured: false,
+        configuredBy: null,
+        configuredAt: null,
+        updateRateSeconds: 2.5,
+      });
+
+      expect(blocks[1].text?.text).toContain('*Update Rate:* 2.5s');
+      // Should not show "(default)" on the update rate line specifically
+      expect(blocks[1].text?.text).not.toContain('*Update Rate:* 2.5s (default)');
+    });
+
+    it('should show integer update rate without decimal', () => {
+      const blocks = buildStatusDisplayBlocks({
+        sessionId: 'abc-123',
+        mode: 'plan',
+        workingDir: '/test',
+        lastActiveAt: Date.now(),
+        pathConfigured: false,
+        configuredBy: null,
+        configuredAt: null,
+        updateRateSeconds: 5,
+      });
+
+      expect(blocks[1].text?.text).toContain('*Update Rate:* 5s');
     });
   });
 
@@ -1734,7 +1781,7 @@ describe('blocks', () => {
           timestamp: Date.now(),
           type: 'thinking',
           thinkingContent: longContent,
-          thinkingTruncated: longContent.substring(0, 500) + '...',
+          thinkingTruncated: '...' + longContent.substring(longContent.length - 500),
         },
       ];
 
@@ -1798,21 +1845,76 @@ describe('blocks', () => {
       expect(text).toContain('[2.0s]');
     });
 
-    it('should show first 200 chars preview for completed thinking', () => {
-      const longContent = 'A'.repeat(300);
+    it('should show full content for short completed thinking (under 500 chars)', () => {
+      const shortContent = 'A'.repeat(300);
       const entries: ActivityEntry[] = [
         {
           timestamp: Date.now(),
           type: 'thinking',
-          thinkingContent: longContent,
-          thinkingTruncated: longContent,
+          thinkingContent: shortContent,
+          thinkingTruncated: shortContent,
           thinkingInProgress: false,
         },
       ];
 
       const text = buildActivityLogText(entries, true);
-      // Completed: shows first 200 chars with ... at end
-      expect(text).toContain('> ' + 'A'.repeat(200) + '...');
+      // Completed: shows full content when under 500 chars (no truncation needed)
+      expect(text).toContain('> ' + 'A'.repeat(300));
+    });
+
+    it('should show last 500 chars for completed long thinking (conclusion)', () => {
+      // Simulate long thinking where thinkingTruncated already has "..." + last 500 chars
+      // Full content: BEGINNING (10) + X's (600) + CONCLUSION (10) = 620 chars
+      // thinkingTruncated: "..." + last 500 = "..." + X's (490) + CONCLUSION (10)
+      // Display should show the CONCLUSION at the end, not the beginning
+      const fullContent = 'BEGINNING_' + 'X'.repeat(600) + 'CONCLUSION';
+      const truncated = '...' + fullContent.substring(fullContent.length - 500);
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: fullContent,
+          thinkingTruncated: truncated,
+          thinkingInProgress: false,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      // Should show "..." prefix (indicates truncation from beginning)
+      expect(text).toContain('> ...');
+      // Should NOT contain beginning of thinking
+      expect(text).not.toContain('BEGINNING_');
+      // Should contain the CONCLUSION at the end
+      expect(text).toContain('CONCLUSION');
+    });
+
+    it('should show END of thinking, not middle, for very long content', () => {
+      // This is the key regression test: ensure we show the CONCLUSION, not the MIDDLE
+      // Full thinking: "I need to analyze..." (beginning) + lots of reasoning + "Therefore the answer is X" (end)
+      const beginning = 'I_NEED_TO_ANALYZE_THIS_PROBLEM_FIRST_';
+      const middle = 'M'.repeat(800);
+      const conclusion = '_THEREFORE_THE_ANSWER_IS_42';
+      const fullContent = beginning + middle + conclusion;
+      // thinkingTruncated stores last 500 chars (from slack-bot.ts)
+      const truncated = '...' + fullContent.substring(fullContent.length - 500);
+
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: fullContent,
+          thinkingTruncated: truncated,
+          thinkingInProgress: false,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      // Must NOT show beginning (would indicate wrong truncation)
+      expect(text).not.toContain('I_NEED_TO_ANALYZE');
+      // Must show the conclusion (the actual answer)
+      expect(text).toContain('THEREFORE_THE_ANSWER_IS_42');
+      // Should have "..." prefix indicating truncation
+      expect(text).toContain('> ...');
     });
 
     it('should format tool_start entries with appropriate emoji', () => {
@@ -1847,6 +1949,123 @@ describe('blocks', () => {
       const text = buildActivityLogText(entries, true);
       expect(text).toContain(':x:');
       expect(text).toContain('Connection failed');
+    });
+
+    it('should format in-progress generating entries with pencil emoji and chunk count', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 25,
+          generatingChars: 1500,
+          generatingInProgress: true,
+          durationMs: 2500,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':pencil:');
+      expect(text).toContain('*Generating...*');
+      expect(text).toContain('[25 chunks]');
+      expect(text).toContain('[1,500 chars]');
+      expect(text).toContain('[2.5s]');
+    });
+
+    it('should format completed generating entries without chunk count', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 50,
+          generatingChars: 3200,
+          generatingInProgress: false,
+          durationMs: 4000,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':pencil:');
+      expect(text).toContain('*Response*');
+      expect(text).toContain('[4.0s]');
+      expect(text).toContain('[3,200 chars]');
+      // Completed should NOT show chunk count (cleaner)
+      expect(text).not.toContain('chunks');
+    });
+
+    it('should show generating activity alongside other entries', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'thinking', thinkingTruncated: 'Analyzing...', thinkingInProgress: false, durationMs: 1000 },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
+        { timestamp: Date.now(), type: 'generating', generatingChunks: 30, generatingChars: 2000, generatingInProgress: true, durationMs: 1500 },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':brain:'); // Thinking
+      expect(text).toContain(':white_check_mark:'); // Tool complete
+      expect(text).toContain(':pencil:'); // Generating
+      expect(text).toContain('*Generating...*');
+    });
+
+    it('should show multiple generating entries when tools run between them', () => {
+      // Simulates: text → tool → text (should show 2 generating entries)
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        // First generating block (before tool)
+        { timestamp: Date.now(), type: 'generating', generatingChunks: 10, generatingChars: 500, generatingInProgress: false, durationMs: 1000 },
+        // Tool runs
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Task', durationMs: 3000 },
+        // Second generating block (after tool) - should be a NEW entry
+        { timestamp: Date.now(), type: 'generating', generatingChunks: 25, generatingChars: 1500, generatingInProgress: true, durationMs: 2000 },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      // Should have two pencil entries
+      const pencilMatches = text.match(/:pencil:/g) || [];
+      expect(pencilMatches.length).toBe(2);
+      // First one should be completed (Response), second in-progress (Generating...)
+      expect(text).toContain('*Response*');
+      expect(text).toContain('*Generating...*');
+      // Tool should be between them
+      expect(text).toContain(':white_check_mark:');
+    });
+
+    it('should show Response (not Generating) for completed generating entries', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'generating', generatingChunks: 50, generatingChars: 3000, generatingInProgress: false, durationMs: 5000 },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':pencil:');
+      expect(text).toContain('*Response*');
+      expect(text).not.toContain('*Generating...*');
+      expect(text).toContain('[5.0s]');
+      expect(text).toContain('[3,000 chars]');
+    });
+
+    it('should show finalized generating entry created during tool execution', () => {
+      // Simulates: tool starts → generating during execution → tool completes
+      // The generating entry should be finalized (Response) and appear before tool_complete
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Task' },
+        // Generating created DURING tool execution (e.g., from assistant messages)
+        { timestamp: Date.now(), type: 'generating', generatingChunks: 30, generatingChars: 2000, generatingInProgress: false, durationMs: 8900 },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Task', durationMs: 3400 },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      // Generating should show as Response (finalized), not Generating...
+      expect(text).toContain(':pencil:');
+      expect(text).toContain('*Response*');
+      expect(text).not.toContain('*Generating...*');
+      // Tool should show as complete
+      expect(text).toContain(':white_check_mark:');
+      expect(text).toContain('*Task*');
+      expect(text).toContain('[3.4s]');
+      // Response should appear (tool_start is hidden since tool_complete exists)
+      expect(text).toContain('[8.9s]');
+      expect(text).toContain('[2,000 chars]');
     });
 
     it('should apply rolling window when entries exceed MAX_LIVE_ENTRIES', () => {
@@ -2255,6 +2474,21 @@ describe('blocks', () => {
       const text = JSON.stringify(blocks);
       expect(text).toContain('Claude is working');
       expect(text).toContain('◑');
+    });
+
+    it('should show spinner and Generating status in status panel', () => {
+      const blocks = buildStatusPanelBlocks({
+        status: 'generating',
+        mode: 'plan',
+        toolsCompleted: 2,
+        elapsedMs: 8000,
+        conversationKey: 'test',
+        spinner: '◒',
+      });
+      const text = JSON.stringify(blocks);
+      expect(text).toContain('Claude is working');
+      expect(text).toContain('◒');
+      expect(text).toContain('Generating...');
     });
 
     it('should show spinner immediately on initial status panel (spinner provided)', () => {
