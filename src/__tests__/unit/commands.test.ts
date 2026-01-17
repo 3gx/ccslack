@@ -467,4 +467,58 @@ describe('commands', () => {
       expect(result.response).toContain('/fork-thread');
     });
   });
+
+  describe('/compact', () => {
+    it('should return compactSession flag when session exists', () => {
+      const result = parseCommand('/compact', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.compactSession).toBe(true);
+    });
+
+    it('should return error when no session', () => {
+      const noSessionMock: Session = {
+        ...mockSession,
+        sessionId: null,
+      };
+      const result = parseCommand('/compact', noSessionMock);
+
+      expect(result.handled).toBe(true);
+      expect(result.compactSession).toBeUndefined();
+      expect(result.response).toContain('No active session');
+    });
+
+    it('should include /compact in help output', () => {
+      const result = parseCommand('/help', mockSession);
+
+      expect(result.response).toContain('/compact');
+    });
+  });
+
+  describe('/clear', () => {
+    it('should return clearSession flag when session exists', () => {
+      const result = parseCommand('/clear', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.clearSession).toBe(true);
+    });
+
+    it('should return error when no session', () => {
+      const noSessionMock: Session = {
+        ...mockSession,
+        sessionId: null,
+      };
+      const result = parseCommand('/clear', noSessionMock);
+
+      expect(result.handled).toBe(true);
+      expect(result.clearSession).toBeUndefined();
+      expect(result.response).toContain('No active session');
+    });
+
+    it('should include /clear in help output', () => {
+      const result = parseCommand('/help', mockSession);
+
+      expect(result.response).toContain('/clear');
+    });
+  });
 });

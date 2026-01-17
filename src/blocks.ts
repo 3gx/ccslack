@@ -992,6 +992,7 @@ export interface StatusPanelParams {
   errorMessage?: string;
   spinner?: string;  // Current spinner frame (cycles to show bot is alive)
   rateLimitHits?: number;  // Number of Slack rate limits encountered
+  customStatus?: string;  // Custom status text (overrides default for thinking/complete)
 }
 
 /**
@@ -1039,6 +1040,7 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
     errorMessage,
     spinner,
     rateLimitHits,
+    customStatus,
   } = params;
 
   const blocks: Block[] = [];
@@ -1099,7 +1101,9 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
       // Build status line with current activity
       const activityParts = [modeLabel];
       if (model) activityParts.push(model);
-      if (status === 'thinking') {
+      if (customStatus) {
+        activityParts.push(customStatus);
+      } else if (status === 'thinking') {
         activityParts.push('Thinking...');
       } else if (currentTool) {
         activityParts.push(`Running: ${currentTool}`);
@@ -1144,16 +1148,21 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
       // Build final stats line
       const statsParts = [modeLabel];
       if (model) statsParts.push(model);
-      if (inputTokens || outputTokens) {
-        const inStr = inputTokens ? inputTokens.toLocaleString() : '0';
-        const outStr = outputTokens ? outputTokens.toLocaleString() : '0';
-        statsParts.push(`${inStr} in / ${outStr} out`);
-      }
-      if (contextPercent !== undefined) {
-        statsParts.push(`${contextPercent}% ctx`);
-      }
-      if (costUsd !== undefined) {
-        statsParts.push(`$${costUsd.toFixed(4)}`);
+      if (customStatus) {
+        // Use custom status text for completion (e.g., compaction results)
+        statsParts.push(customStatus);
+      } else {
+        if (inputTokens || outputTokens) {
+          const inStr = inputTokens ? inputTokens.toLocaleString() : '0';
+          const outStr = outputTokens ? outputTokens.toLocaleString() : '0';
+          statsParts.push(`${inStr} in / ${outStr} out`);
+        }
+        if (contextPercent !== undefined) {
+          statsParts.push(`${contextPercent}% ctx`);
+        }
+        if (costUsd !== undefined) {
+          statsParts.push(`$${costUsd.toFixed(4)}`);
+        }
       }
       statsParts.push(`${elapsedSec}s`);
       if (rateLimitHits && rateLimitHits > 0) {
@@ -1179,12 +1188,12 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
           text: ':x: *Error*',
         },
       });
-      // Error message
+      // Error message (customStatus takes precedence if provided)
       blocks.push({
         type: 'context',
         elements: [{
           type: 'mrkdwn',
-          text: `_${errorMessage || 'Unknown error'}_`,
+          text: `_${customStatus || errorMessage || 'Unknown error'}_`,
         }],
       });
       break;

@@ -52,10 +52,10 @@ describe('point-in-time thread forking integration', () => {
           'C123': {
             ...mockSession,
             messageMap: {
-              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
-              '1234.002': { sdkMessageId: 'msg_017pagAKz', type: 'assistant' as const, parentSlackTs: '1234.001' },
-              '1234.003': { sdkMessageId: 'user_002', type: 'user' as const },
-              '1234.004': { sdkMessageId: 'msg_bdrk_01Tp3g', type: 'assistant' as const, parentSlackTs: '1234.003' },
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_017pagAKz', sessionId: 'main-session-123', type: 'assistant' as const, parentSlackTs: '1234.001' },
+              '1234.003': { sdkMessageId: 'user_002', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.004': { sdkMessageId: 'msg_bdrk_01Tp3g', sessionId: 'main-session-123', type: 'assistant' as const, parentSlackTs: '1234.003' },
             },
           },
         },
@@ -65,11 +65,11 @@ describe('point-in-time thread forking integration', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Step 1: Find fork point for message B (ts: 1234.002)
-      const forkPointMessageId = findForkPointMessageId('C123', '1234.002');
-      expect(forkPointMessageId).toBe('msg_017pagAKz');
+      const forkPoint = findForkPointMessageId('C123', '1234.002');
+      expect(forkPoint).toEqual({ messageId: 'msg_017pagAKz', sessionId: 'main-session-123' });
 
       // Step 2: Create thread session at message B
-      const threadResult = getOrCreateThreadSession('C123', '1234.002', forkPointMessageId);
+      const threadResult = getOrCreateThreadSession('C123', '1234.002', forkPoint);
 
       expect(threadResult.isNewFork).toBe(true);
       expect(threadResult.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
@@ -84,10 +84,10 @@ describe('point-in-time thread forking integration', () => {
           'C123': {
             ...mockSession,
             messageMap: {
-              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
-              '1234.002': { sdkMessageId: 'msg_001', type: 'assistant' as const },
-              '1234.003': { sdkMessageId: 'user_002', type: 'user' as const },  // User replies HERE
-              '1234.004': { sdkMessageId: 'msg_002', type: 'assistant' as const },  // Future context
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const },
+              '1234.003': { sdkMessageId: 'user_002', sessionId: 'main-session-123', type: 'user' as const },  // User replies HERE
+              '1234.004': { sdkMessageId: 'msg_002', sessionId: 'main-session-123', type: 'assistant' as const },  // Future context
             },
           },
         },
@@ -97,13 +97,13 @@ describe('point-in-time thread forking integration', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Find fork point for user message at 1234.003
-      const forkPointMessageId = findForkPointMessageId('C123', '1234.003');
+      const forkPoint = findForkPointMessageId('C123', '1234.003');
 
       // Should get msg_001 (last assistant BEFORE 1234.003), NOT msg_002 (after)
-      expect(forkPointMessageId).toBe('msg_001');
+      expect(forkPoint).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
 
       // Create thread
-      const threadResult = getOrCreateThreadSession('C123', '1234.003', forkPointMessageId);
+      const threadResult = getOrCreateThreadSession('C123', '1234.003', forkPoint);
       expect(threadResult.session.resumeSessionAtMessageId).toBe('msg_001');
     });
 
@@ -114,12 +114,12 @@ describe('point-in-time thread forking integration', () => {
           'C123': {
             ...mockSession,
             messageMap: {
-              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
-              '1234.002': { sdkMessageId: 'msg_001', type: 'assistant' as const },
-              '1234.003': { sdkMessageId: 'msg_001', type: 'assistant' as const, isContinuation: true },
-              '1234.004': { sdkMessageId: 'msg_001', type: 'assistant' as const, isContinuation: true },
-              '1234.005': { sdkMessageId: 'user_002', type: 'user' as const },
-              '1234.006': { sdkMessageId: 'msg_002', type: 'assistant' as const },
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const },
+              '1234.003': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const, isContinuation: true },
+              '1234.004': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const, isContinuation: true },
+              '1234.005': { sdkMessageId: 'user_002', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.006': { sdkMessageId: 'msg_002', sessionId: 'main-session-123', type: 'assistant' as const },
             },
           },
         },
@@ -128,10 +128,10 @@ describe('point-in-time thread forking integration', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      // User clicks on any part of the split message - should all return same ID
-      expect(findForkPointMessageId('C123', '1234.002')).toBe('msg_001');
-      expect(findForkPointMessageId('C123', '1234.003')).toBe('msg_001');
-      expect(findForkPointMessageId('C123', '1234.004')).toBe('msg_001');
+      // User clicks on any part of the split message - should all return same ID and sessionId
+      expect(findForkPointMessageId('C123', '1234.002')).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
+      expect(findForkPointMessageId('C123', '1234.003')).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
+      expect(findForkPointMessageId('C123', '1234.004')).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
     });
 
     it('should gracefully handle old channels without message mappings', () => {
@@ -149,8 +149,8 @@ describe('point-in-time thread forking integration', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Should return null (graceful degradation)
-      const forkPointMessageId = findForkPointMessageId('C123', '1234.002');
-      expect(forkPointMessageId).toBeNull();
+      const forkPoint = findForkPointMessageId('C123', '1234.002');
+      expect(forkPoint).toBeNull();
 
       // Thread should still be created, but without resumeSessionAtMessageId
       const threadResult = getOrCreateThreadSession('C123', '1234.002', null);
@@ -165,7 +165,7 @@ describe('point-in-time thread forking integration', () => {
           'C123': {
             ...mockSession,
             messageMap: {
-              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
             },
           },
         },
@@ -175,8 +175,8 @@ describe('point-in-time thread forking integration', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // No assistant message exists before user message
-      const forkPointMessageId = findForkPointMessageId('C123', '1234.001');
-      expect(forkPointMessageId).toBeNull();
+      const forkPoint = findForkPointMessageId('C123', '1234.001');
+      expect(forkPoint).toBeNull();
     });
   });
 
@@ -193,14 +193,16 @@ describe('point-in-time thread forking integration', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      // Create thread with fork point
-      getOrCreateThreadSession('C123', '1234.002', 'msg_017pagAKz');
+      // Create thread with fork point (now uses ForkPointResult format)
+      const forkPoint = { messageId: 'msg_017pagAKz', sessionId: 'main-session-123' };
+      getOrCreateThreadSession('C123', '1234.002', forkPoint);
 
       // Verify it was written to disk
       const writeCall = vi.mocked(fs.writeFileSync).mock.calls[0];
       const writtenData = JSON.parse(writeCall[1] as string);
 
       expect(writtenData.channels['C123'].threads['1234.002'].resumeSessionAtMessageId).toBe('msg_017pagAKz');
+      expect(writtenData.channels['C123'].threads['1234.002'].forkedFrom).toBe('main-session-123');
     });
 
     it('should preserve resumeSessionAtMessageId when returning existing thread', () => {
@@ -236,6 +238,97 @@ describe('point-in-time thread forking integration', () => {
 
       expect(threadResult.isNewFork).toBe(false);
       expect(threadResult.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
+    });
+  });
+
+  describe('fork after /clear - time travel scenario', () => {
+    it('should fork from OLD session when replying to message from before /clear', () => {
+      // This is the critical bug fix test:
+      // 1. User has session S1 with messages
+      // 2. User runs /clear - main session becomes null, S1 tracked in previousSessionIds
+      // 3. User replies to a message from BEFORE /clear
+      // 4. Thread should fork from S1 (not null!)
+
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: null,  // CLEARED - main session is null
+            previousSessionIds: ['old-session-S1'],  // Old session tracked
+            workingDir: '/Users/testuser/projects/myapp',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/Users/testuser/projects/myapp',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            // messageMap preserved from BEFORE /clear
+            messageMap: {
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'old-session-S1', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_from_S1', sessionId: 'old-session-S1', type: 'assistant' as const },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Find fork point for message from BEFORE /clear
+      const forkPoint = findForkPointMessageId('C123', '1234.002');
+
+      // CRITICAL: Should return OLD session ID from the message, not null
+      expect(forkPoint).toEqual({
+        messageId: 'msg_from_S1',
+        sessionId: 'old-session-S1',  // From messageMap, NOT from current main session
+      });
+
+      // Create thread using the fork point
+      const threadResult = getOrCreateThreadSession('C123', '1234.002', forkPoint);
+
+      expect(threadResult.isNewFork).toBe(true);
+      expect(threadResult.session.resumeSessionAtMessageId).toBe('msg_from_S1');
+      // CRITICAL: forkedFrom should be OLD session, not null
+      expect(threadResult.session.forkedFrom).toBe('old-session-S1');
+    });
+
+    it('should still work for messages after /clear (uses current session)', () => {
+      // After /clear, new messages get new session S2
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'new-session-S2',  // New session after /clear
+            previousSessionIds: ['old-session-S1'],
+            workingDir: '/Users/testuser/projects/myapp',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/Users/testuser/projects/myapp',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              // Old messages from S1
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'old-session-S1', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_from_S1', sessionId: 'old-session-S1', type: 'assistant' as const },
+              // New messages from S2 (after /clear)
+              '1234.003': { sdkMessageId: 'user_002', sessionId: 'new-session-S2', type: 'user' as const },
+              '1234.004': { sdkMessageId: 'msg_from_S2', sessionId: 'new-session-S2', type: 'assistant' as const },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Fork from OLD message (should use S1)
+      const forkPointOld = findForkPointMessageId('C123', '1234.002');
+      expect(forkPointOld?.sessionId).toBe('old-session-S1');
+
+      // Fork from NEW message (should use S2)
+      const forkPointNew = findForkPointMessageId('C123', '1234.004');
+      expect(forkPointNew?.sessionId).toBe('new-session-S2');
     });
   });
 });

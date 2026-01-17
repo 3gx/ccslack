@@ -68,11 +68,11 @@ describe('session-manager', () => {
             mode: 'plan',
             createdAt: 1000,
             lastActiveAt: 2000,
-                pathConfigured: true,
-      configuredPath: '/test/dir',
-      configuredBy: 'U123',
-      configuredAt: Date.now(),
-              },
+            pathConfigured: true,
+            configuredPath: '/test/dir',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
         },
       };
 
@@ -81,7 +81,9 @@ describe('session-manager', () => {
 
       const result = loadSessions();
 
-      expect(result).toEqual(mockStore);
+      // Migration adds previousSessionIds to existing sessions
+      expect(result.channels['C123'].previousSessionIds).toEqual([]);
+      expect(result.channels['C123'].sessionId).toBe('sess-123');
       expect(fs.readFileSync).toHaveBeenCalledWith('./sessions.json', 'utf-8');
     });
   });
@@ -102,11 +104,11 @@ describe('session-manager', () => {
         mode: 'bypassPermissions' as const,
         createdAt: 1000,
         lastActiveAt: 2000,
-            pathConfigured: true,
-      configuredPath: '/test/dir',
-      configuredBy: 'U123',
-      configuredAt: Date.now(),
-          };
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      };
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
@@ -115,7 +117,9 @@ describe('session-manager', () => {
 
       const result = getSession('C123');
 
-      expect(result).toEqual(mockSession);
+      // Migration adds previousSessionIds
+      expect(result?.sessionId).toBe('sess-456');
+      expect(result?.previousSessionIds).toEqual([]);
     });
   });
 
@@ -439,6 +443,501 @@ describe('session-manager', () => {
       const writtenData = JSON.parse(finalWrite[1] as string);
       expect(writtenData.channels['C123']).toBeUndefined();
     });
+
+    it('should continue deleting other sessions when one SDK file deletion fails', () => {
+      // Setup: Channel with main + 2 threads, middle one will fail
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: mockWorkingDir,
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: mockWorkingDir,
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {
+              '1234.5678': {
+                sessionId: 'thread-session-456',
+                forkedFrom: 'main-session-123',
+                workingDir: mockWorkingDir,
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: mockWorkingDir,
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+              },
+              '1234.9999': {
+                sessionId: 'thread-session-789',
+                forkedFrom: 'main-session-123',
+                workingDir: mockWorkingDir,
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: mockWorkingDir,
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
+        if (path === './sessions.json') return true;
+        // All SDK files exist
+        if (typeof path === 'string' && path.includes('.jsonl')) return true;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Make unlinkSync throw for one specific file (simulating permission error)
+      vi.mocked(fs.unlinkSync).mockImplementation((path) => {
+        if (typeof path === 'string' && path.includes('thread-session-456.jsonl')) {
+          throw new Error('EACCES: permission denied');
+        }
+        // Other files delete successfully
+      });
+
+      // Capture console.error to verify error is logged
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // Should not throw - error handling should catch and continue
+      expect(() => deleteSession('C123')).not.toThrow();
+
+      // Verify error was logged for the failed file
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Error deleting SDK session file thread-session-456'),
+        expect.any(Error)
+      );
+
+      // Verify all 3 files were attempted to be deleted
+      expect(fs.unlinkSync).toHaveBeenCalledTimes(3);
+
+      // Verify sessions.json was still updated (cleanup continues despite SDK file error)
+      const finalWrite = vi.mocked(fs.writeFileSync).mock.calls[vi.mocked(fs.writeFileSync).mock.calls.length - 1];
+      const writtenData = JSON.parse(finalWrite[1] as string);
+      expect(writtenData.channels['C123']).toBeUndefined();
+
+      consoleSpy.mockRestore();
+    });
+
+    it('should handle SDK file not found gracefully', () => {
+      // Setup: Channel exists but SDK file was already deleted externally
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: mockWorkingDir,
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: mockWorkingDir,
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
+        if (path === './sessions.json') return true;
+        // SDK file does NOT exist (already deleted)
+        if (typeof path === 'string' && path.includes('.jsonl')) return false;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Capture console.log to verify info message
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      // Should not throw
+      expect(() => deleteSession('C123')).not.toThrow();
+
+      // Verify info message was logged (not error)
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('SDK session file not found')
+      );
+
+      // Verify unlinkSync was NOT called (file doesn't exist)
+      expect(fs.unlinkSync).not.toHaveBeenCalled();
+
+      // Verify sessions.json was still updated
+      const finalWrite = vi.mocked(fs.writeFileSync).mock.calls[vi.mocked(fs.writeFileSync).mock.calls.length - 1];
+      const writtenData = JSON.parse(finalWrite[1] as string);
+      expect(writtenData.channels['C123']).toBeUndefined();
+
+      consoleSpy.mockRestore();
+    });
+
+    it('should handle large session history (10+ previous sessions from /clear)', () => {
+      // Setup: Channel with many previous sessions (simulating heavy /clear usage)
+      const previousIds = Array.from({ length: 12 }, (_, i) => `prev-session-${i + 1}`);
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'current-session',
+            previousSessionIds: previousIds,
+            workingDir: mockWorkingDir,
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: mockWorkingDir,
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
+        if (path === './sessions.json') return true;
+        if (typeof path === 'string' && path.includes('.jsonl')) return true;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Delete channel
+      deleteSession('C123');
+
+      // Should delete all 13 SDK files (1 current + 12 previous)
+      expect(fs.unlinkSync).toHaveBeenCalledTimes(13);
+
+      // Verify current session was deleted
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('current-session.jsonl')
+      );
+
+      // Verify all previous sessions were deleted
+      for (let i = 1; i <= 12; i++) {
+        expect(fs.unlinkSync).toHaveBeenCalledWith(
+          expect.stringContaining(`prev-session-${i}.jsonl`)
+        );
+      }
+
+      // Verify sessions.json was updated
+      const finalWrite = vi.mocked(fs.writeFileSync).mock.calls[vi.mocked(fs.writeFileSync).mock.calls.length - 1];
+      const writtenData = JSON.parse(finalWrite[1] as string);
+      expect(writtenData.channels['C123']).toBeUndefined();
+    });
+
+    it('should delete nested thread hierarchy (thread forked from thread)', () => {
+      // Setup: Main → Thread1 → Thread2 (nested fork)
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session',
+            workingDir: mockWorkingDir,
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: mockWorkingDir,
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {
+              '1234.001': {
+                sessionId: 'thread-1',
+                forkedFrom: 'main-session',
+                workingDir: mockWorkingDir,
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: mockWorkingDir,
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+              },
+              '1234.002': {
+                sessionId: 'thread-2',
+                forkedFrom: 'thread-1',
+                forkedFromThreadTs: '1234.001', // Forked from another thread
+                workingDir: mockWorkingDir,
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: mockWorkingDir,
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
+        if (path === './sessions.json') return true;
+        if (typeof path === 'string' && path.includes('.jsonl')) return true;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Delete channel
+      deleteSession('C123');
+
+      // Should delete all 3 sessions (main + 2 nested threads)
+      expect(fs.unlinkSync).toHaveBeenCalledTimes(3);
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('main-session.jsonl')
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('thread-1.jsonl')
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('thread-2.jsonl')
+      );
+
+      // Verify sessions.json was updated
+      const finalWrite = vi.mocked(fs.writeFileSync).mock.calls[vi.mocked(fs.writeFileSync).mock.calls.length - 1];
+      const writtenData = JSON.parse(finalWrite[1] as string);
+      expect(writtenData.channels['C123']).toBeUndefined();
+    });
+  });
+
+  // ============================================================================
+  // previousSessionIds Tracking Tests (for /clear command)
+  // ============================================================================
+
+  describe('previousSessionIds tracking', () => {
+    it('should initialize previousSessionIds as empty array for new sessions', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      saveSession('new-channel', { sessionId: 'S1' });
+
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['new-channel'].previousSessionIds).toEqual([]);
+    });
+
+    it('should preserve previousSessionIds when saving other fields', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'S2',
+            previousSessionIds: ['S1'],
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Update session with new sessionId but without previousSessionIds
+      saveSession('C123', { sessionId: 'S3' });
+
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['C123'].sessionId).toBe('S3');
+      expect(writtenData.channels['C123'].previousSessionIds).toEqual(['S1']); // preserved
+    });
+
+    it('should allow updating previousSessionIds via saveSession', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'S2',
+            previousSessionIds: ['S1'],
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Update both sessionId and previousSessionIds (as /clear does)
+      saveSession('C123', {
+        sessionId: 'S3',
+        previousSessionIds: ['S1', 'S2'],
+      });
+
+      const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+      expect(writtenData.channels['C123'].sessionId).toBe('S3');
+      expect(writtenData.channels['C123'].previousSessionIds).toEqual(['S1', 'S2']);
+    });
+
+    it('should migrate existing sessions without previousSessionIds field', () => {
+      // Simulate old session format without previousSessionIds
+      const oldFormatStore = {
+        channels: {
+          'C123': {
+            sessionId: 'S1',
+            workingDir: '/test',
+            mode: 'plan',
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            // No previousSessionIds field
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(oldFormatStore));
+
+      // loadSessions should migrate and add empty previousSessionIds
+      const result = loadSessions();
+
+      expect(result.channels['C123'].previousSessionIds).toEqual([]);
+    });
+  });
+
+  describe('deleteSession with previousSessionIds', () => {
+    const mockWorkingDir = '/Users/testuser/projects/myapp';
+
+    it('should delete all previous session SDK files', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'S3',
+            previousSessionIds: ['S1', 'S2'],
+            workingDir: mockWorkingDir,
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: mockWorkingDir,
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
+        if (path === './sessions.json') return true;
+        // All SDK files exist
+        if (typeof path === 'string' && path.includes('.jsonl')) return true;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      deleteSession('C123');
+
+      // Should delete all 3 SDK files (current + 2 previous)
+      expect(fs.unlinkSync).toHaveBeenCalledTimes(3);
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        '/mock/home/.claude/projects/-Users-testuser-projects-myapp/S3.jsonl'
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        '/mock/home/.claude/projects/-Users-testuser-projects-myapp/S1.jsonl'
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        '/mock/home/.claude/projects/-Users-testuser-projects-myapp/S2.jsonl'
+      );
+    });
+
+    it('should handle empty previousSessionIds', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'S1',
+            previousSessionIds: [],
+            workingDir: mockWorkingDir,
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: mockWorkingDir,
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
+        if (path === './sessions.json') return true;
+        if (typeof path === 'string' && path.includes('S1.jsonl')) return true;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      deleteSession('C123');
+
+      // Should only delete current session, no previous
+      expect(fs.unlinkSync).toHaveBeenCalledTimes(1);
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        '/mock/home/.claude/projects/-Users-testuser-projects-myapp/S1.jsonl'
+      );
+    });
+
+    it('should delete previous sessions AND thread sessions', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'S3',
+            previousSessionIds: ['S1', 'S2'],
+            workingDir: mockWorkingDir,
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: mockWorkingDir,
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {
+              '1234.5678': {
+                sessionId: 'T1',
+                forkedFrom: 'S1',
+                workingDir: mockWorkingDir,
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: mockWorkingDir,
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+              },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
+        if (path === './sessions.json') return true;
+        if (typeof path === 'string' && path.includes('.jsonl')) return true;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      deleteSession('C123');
+
+      // Should delete: S3 (current) + S1, S2 (previous) + T1 (thread) = 4 files
+      expect(fs.unlinkSync).toHaveBeenCalledTimes(4);
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('S3.jsonl')
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('S1.jsonl')
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('S2.jsonl')
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('T1.jsonl')
+      );
+    });
   });
 
   // ============================================================================
@@ -469,12 +968,14 @@ describe('session-manager', () => {
 
       saveMessageMapping('C123', '1234.001', {
         sdkMessageId: 'msg_017pagAKz',
+        sessionId: 'main-session-123',
         type: 'assistant',
       });
 
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
       expect(writtenData.channels['C123'].messageMap).toBeDefined();
       expect(writtenData.channels['C123'].messageMap['1234.001'].sdkMessageId).toBe('msg_017pagAKz');
+      expect(writtenData.channels['C123'].messageMap['1234.001'].sessionId).toBe('main-session-123');
       expect(writtenData.channels['C123'].messageMap['1234.001'].type).toBe('assistant');
     });
 
@@ -495,6 +996,7 @@ describe('session-manager', () => {
             messageMap: {
               '1234.001': {
                 sdkMessageId: 'msg_001',
+                sessionId: 'main-session-123',
                 type: 'user' as const,
               },
             },
@@ -507,6 +1009,7 @@ describe('session-manager', () => {
 
       saveMessageMapping('C123', '1234.002', {
         sdkMessageId: 'msg_002',
+        sessionId: 'main-session-123',
         type: 'assistant',
         parentSlackTs: '1234.001',
       });
@@ -524,6 +1027,7 @@ describe('session-manager', () => {
       // Should not throw
       expect(() => saveMessageMapping('C999', '1234.001', {
         sdkMessageId: 'msg_001',
+        sessionId: 'some-session',
         type: 'user',
       })).not.toThrow();
 
@@ -549,6 +1053,7 @@ describe('session-manager', () => {
             messageMap: {
               '1234.001': {
                 sdkMessageId: 'msg_017pagAKz',
+                sessionId: 'main-session-123',
                 type: 'assistant' as const,
               },
             },
@@ -562,6 +1067,7 @@ describe('session-manager', () => {
       const mapping = getMessageMapping('C123', '1234.001');
       expect(mapping).toEqual({
         sdkMessageId: 'msg_017pagAKz',
+        sessionId: 'main-session-123',
         type: 'assistant',
       });
     });
@@ -617,7 +1123,7 @@ describe('session-manager', () => {
   });
 
   describe('findForkPointMessageId', () => {
-    it('should return assistant message ID directly when clicking on bot message', () => {
+    it('should return assistant message ID and sessionId when clicking on bot message', () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -633,6 +1139,7 @@ describe('session-manager', () => {
             messageMap: {
               '1234.002': {
                 sdkMessageId: 'msg_017pagAKz',
+                sessionId: 'main-session-123',
                 type: 'assistant' as const,
               },
             },
@@ -643,8 +1150,11 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      const messageId = findForkPointMessageId('C123', '1234.002');
-      expect(messageId).toBe('msg_017pagAKz');
+      const result = findForkPointMessageId('C123', '1234.002');
+      expect(result).toEqual({
+        messageId: 'msg_017pagAKz',
+        sessionId: 'main-session-123',
+      });
     });
 
     it('should find LAST assistant message BEFORE user message (not response to it)', () => {
@@ -662,10 +1172,10 @@ describe('session-manager', () => {
             configuredBy: 'U123',
             configuredAt: Date.now(),
             messageMap: {
-              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
-              '1234.002': { sdkMessageId: 'msg_001', type: 'assistant' as const },
-              '1234.003': { sdkMessageId: 'user_002', type: 'user' as const },  // User clicks HERE
-              '1234.004': { sdkMessageId: 'msg_002', type: 'assistant' as const },  // Response AFTER
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const },
+              '1234.003': { sdkMessageId: 'user_002', sessionId: 'main-session-123', type: 'user' as const },  // User clicks HERE
+              '1234.004': { sdkMessageId: 'msg_002', sessionId: 'main-session-123', type: 'assistant' as const },  // Response AFTER
             },
           },
         },
@@ -675,8 +1185,11 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Should return msg_001 (before .003), NOT msg_002 (after .003)
-      const messageId = findForkPointMessageId('C123', '1234.003');
-      expect(messageId).toBe('msg_001');
+      const result = findForkPointMessageId('C123', '1234.003');
+      expect(result).toEqual({
+        messageId: 'msg_001',
+        sessionId: 'main-session-123',
+      });
     });
 
     it('should return null if no assistant message before the timestamp', () => {
@@ -694,7 +1207,7 @@ describe('session-manager', () => {
             configuredBy: 'U123',
             configuredAt: Date.now(),
             messageMap: {
-              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
             },
           },
         },
@@ -703,8 +1216,8 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      const messageId = findForkPointMessageId('C123', '1234.001');
-      expect(messageId).toBeNull();
+      const result = findForkPointMessageId('C123', '1234.001');
+      expect(result).toBeNull();
     });
 
     it('should work with split messages (continuation)', () => {
@@ -722,10 +1235,10 @@ describe('session-manager', () => {
             configuredBy: 'U123',
             configuredAt: Date.now(),
             messageMap: {
-              '1234.001': { sdkMessageId: 'user_001', type: 'user' as const },
-              '1234.002': { sdkMessageId: 'msg_001', type: 'assistant' as const },
-              '1234.003': { sdkMessageId: 'msg_001', type: 'assistant' as const, isContinuation: true },
-              '1234.004': { sdkMessageId: 'msg_001', type: 'assistant' as const, isContinuation: true },
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const },
+              '1234.003': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const, isContinuation: true },
+              '1234.004': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const, isContinuation: true },
             },
           },
         },
@@ -734,10 +1247,10 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      // All should return the same SDK message ID
-      expect(findForkPointMessageId('C123', '1234.002')).toBe('msg_001');
-      expect(findForkPointMessageId('C123', '1234.003')).toBe('msg_001');
-      expect(findForkPointMessageId('C123', '1234.004')).toBe('msg_001');
+      // All should return the same SDK message ID and sessionId
+      expect(findForkPointMessageId('C123', '1234.002')).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
+      expect(findForkPointMessageId('C123', '1234.003')).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
+      expect(findForkPointMessageId('C123', '1234.004')).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
     });
 
     it('should return null if channel has no messageMap', () => {
@@ -789,6 +1302,7 @@ describe('session-manager', () => {
       // Step 2: Save a message mapping
       saveMessageMapping('C123', '1234.001', {
         sdkMessageId: 'msg_001',
+        sessionId: 'sess-1',
         type: 'assistant',
       });
 
@@ -830,12 +1344,12 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Save user message mapping
-      saveMessageMapping('C123', '1234.001', { sdkMessageId: 'user_001', type: 'user' });
+      saveMessageMapping('C123', '1234.001', { sdkMessageId: 'user_001', sessionId: 'sess-1', type: 'user' });
       currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[1][1] as string);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Save assistant message mapping
-      saveMessageMapping('C123', '1234.002', { sdkMessageId: 'msg_001', type: 'assistant' });
+      saveMessageMapping('C123', '1234.002', { sdkMessageId: 'msg_001', sessionId: 'sess-1', type: 'assistant' });
       currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[2][1] as string);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
@@ -845,7 +1359,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Add another user message
-      saveMessageMapping('C123', '1234.003', { sdkMessageId: 'user_002', type: 'user' });
+      saveMessageMapping('C123', '1234.003', { sdkMessageId: 'user_002', sessionId: 'sess-1', type: 'user' });
       currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[4][1] as string);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
@@ -861,8 +1375,8 @@ describe('session-manager', () => {
     });
   });
 
-  describe('getOrCreateThreadSession with resumeSessionAtMessageId', () => {
-    it('should create thread session with resumeSessionAtMessageId', () => {
+  describe('getOrCreateThreadSession with ForkPointResult', () => {
+    it('should create thread session with forkPoint (messageId + sessionId)', () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -882,14 +1396,49 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      const result = getOrCreateThreadSession('C123', '1234.002', 'msg_017pagAKz');
+      // Pass ForkPointResult with both messageId and sessionId
+      const forkPoint = { messageId: 'msg_017pagAKz', sessionId: 'main-session-123' };
+      const result = getOrCreateThreadSession('C123', '1234.002', forkPoint);
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
+      // forkedFrom should use sessionId from forkPoint
       expect(result.session.forkedFrom).toBe('main-session-123');
     });
 
-    it('should handle thread creation without message mapping', () => {
+    it('should use forkPoint.sessionId even if main session is null (after /clear)', () => {
+      // This tests the "time travel" scenario - forking from message before /clear
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: null,  // Main session is null after /clear
+            previousSessionIds: ['old-session-before-clear'],
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // forkPoint has session ID from BEFORE /clear
+      const forkPoint = { messageId: 'msg_from_old_session', sessionId: 'old-session-before-clear' };
+      const result = getOrCreateThreadSession('C123', '1234.002', forkPoint);
+
+      expect(result.isNewFork).toBe(true);
+      expect(result.session.resumeSessionAtMessageId).toBe('msg_from_old_session');
+      // CRITICAL: forkedFrom should be OLD session, not null
+      expect(result.session.forkedFrom).toBe('old-session-before-clear');
+    });
+
+    it('should handle thread creation without fork point', () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -914,6 +1463,7 @@ describe('session-manager', () => {
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.resumeSessionAtMessageId).toBeUndefined();
+      // Falls back to main session when no forkPoint
       expect(result.session.forkedFrom).toBe('main-session-123');
     });
 

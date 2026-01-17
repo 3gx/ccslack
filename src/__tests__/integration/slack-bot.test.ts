@@ -1365,8 +1365,11 @@ describe('slack-bot handlers', () => {
         configuredAt: Date.now(),
       });
 
-      // CRITICAL: Mock findForkPointMessageId to return a specific SDK message ID
-      vi.mocked(findForkPointMessageId).mockReturnValue(forkPointMessageId);
+      // CRITICAL: Mock findForkPointMessageId to return ForkPointResult (messageId + sessionId)
+      vi.mocked(findForkPointMessageId).mockReturnValue({
+        messageId: forkPointMessageId,
+        sessionId: 'main-session-abc',
+      });
 
       vi.mocked(getOrCreateThreadSession).mockReturnValue({
         session: {
@@ -1896,6 +1899,108 @@ describe('slack-bot handlers', () => {
       expect(saveCall[2].forkedFrom).toBe(threadSessionId);
       expect(saveCall[2].forkedFrom).not.toBe(mainSessionId);
     });
+
+    it('should save sessionId at init time even if SDK crashes after', async () => {
+      // Critical bug fix test: sessionId must be saved immediately when init message received
+      // If saved only at end of try block, SDK crash after init causes sessionId to never be saved
+      // Next message then sees sessionId: null and tries to fork again (instead of resume)
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      const threadTs = '1234567890.123456';
+      const newSessionId = 'new-session-after-fork';
+
+      // Existing thread without sessionId (simulating first message in thread)
+      vi.mocked(getOrCreateThreadSession).mockReturnValue({
+        session: {
+          sessionId: null,
+          forkedFrom: 'parent-session',
+          workingDir: '/test/dir',
+          mode: 'plan',
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+          pathConfigured: true,
+          configuredPath: '/test/dir',
+          configuredBy: 'U123',
+          configuredAt: Date.now(),
+        },
+        isNewFork: true,
+      });
+
+      // Mock SDK: returns init message with session_id, then throws error (simulating crash)
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: newSessionId, model: 'claude-opus-4-1-20250805' };
+          // SDK crashes after init but before result
+          throw new Error('SDK crashed after init');
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Handler should catch the error gracefully
+      await handler({
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          text: '<@BOT123> test message',
+          channel: 'C123',
+          ts: '5555555555.555555',
+          thread_ts: threadTs,
+        },
+        client: mockClient,
+      });
+
+      // CRITICAL: sessionId should have been saved at init time (before crash)
+      // This is the fix for the bug where SDK crash caused sessionId to never be saved
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', threadTs, {
+        sessionId: newSessionId,
+      });
+    });
+
+    it('should save main session sessionId at init time even if SDK crashes after', async () => {
+      // Same test but for main channel session (not thread)
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      const newSessionId = 'new-main-session';
+
+      // Main session without sessionId (e.g., after /clear or first message)
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock SDK: returns init message, then throws error
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: newSessionId, model: 'claude-opus-4-1-20250805' };
+          throw new Error('SDK crashed after init');
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          text: '<@BOT123> test message',
+          channel: 'C123',
+          ts: '1111111111.111111',
+          // No thread_ts - this is a main channel message
+        },
+        client: mockClient,
+      });
+
+      // CRITICAL: main session sessionId should have been saved at init time
+      expect(saveSession).toHaveBeenCalledWith('C123', {
+        sessionId: newSessionId,
+      });
+    });
   });
 
   describe('view_activity_log handler', () => {
@@ -2230,6 +2335,457 @@ describe('slack-bot handlers', () => {
           content: expect.stringMatching(/TOOL COMPLETE: Edit \(1500ms\)/),
         })
       );
+    });
+  });
+
+  describe('/compact command', () => {
+    it('should call runCompactSession when compactSession flag is set', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mock session with existing session ID
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock SDK to return compact_boundary message
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'compacted-session-456', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 5000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should have started query with /compact as prompt
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        '/compact',
+        expect.objectContaining({
+          sessionId: 'existing-session-123',
+        })
+      );
+
+      // Should have posted status messages
+      expect(mockClient.chat.postMessage).toHaveBeenCalled();
+    });
+
+    it('should return error when no session for /compact', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mock session without session ID
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should NOT start a query since no session
+      expect(startClaudeQuery).not.toHaveBeenCalledWith('/compact', expect.anything());
+
+      // Should post error response about no session
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('No active session'),
+        })
+      );
+    });
+
+    it('should update session ID after successful compaction', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'old-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock SDK to return new session ID after compaction
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'new-compacted-session', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 10000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should save new session ID
+      expect(saveSession).toHaveBeenCalledWith(
+        'C123',
+        expect.objectContaining({
+          sessionId: 'new-compacted-session',
+        })
+      );
+    });
+  });
+
+  describe('/clear command', () => {
+    it('should set sessionId to null after /clear succeeds', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mock session with existing session ID
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'old-session-id',
+        previousSessionIds: [],
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // SDK returns same session ID (this is actual SDK behavior - /clear as prompt does nothing)
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'old-session-id', model: 'claude-sonnet' };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /clear',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should have started query with /clear as prompt
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        '/clear',
+        expect.objectContaining({
+          sessionId: 'old-session-id',
+        })
+      );
+
+      // CRITICAL: Should set sessionId to NULL so next message starts fresh
+      expect(saveSession).toHaveBeenCalledWith(
+        'C123',
+        expect.objectContaining({
+          sessionId: null,
+          previousSessionIds: ['old-session-id'],
+        })
+      );
+
+      // Should post success message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Session history cleared'),
+        })
+      );
+    });
+
+    it('should track multiple previous sessions after repeated /clear', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mock session that already has previous sessions (from earlier /clear commands)
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'session-v2',
+        previousSessionIds: ['session-v1'],
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // SDK returns same session ID (as expected)
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'session-v2', model: 'claude-sonnet' };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /clear',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should save with sessionId: null and accumulated previous session IDs
+      expect(saveSession).toHaveBeenCalledWith(
+        'C123',
+        expect.objectContaining({
+          sessionId: null,
+          previousSessionIds: ['session-v1', 'session-v2'],
+        })
+      );
+    });
+
+    it('should return error when no session for /clear', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mock session without session ID
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /clear',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should NOT start a query since no session
+      expect(startClaudeQuery).not.toHaveBeenCalledWith('/clear', expect.anything());
+
+      // Should post error response about no session
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('No active session'),
+        })
+      );
+    });
+  });
+
+  describe('auto-compact notification', () => {
+    it('should notify user when auto-compaction triggers', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session',
+        workingDir: '/test/dir',
+        mode: 'default',
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock SDK to return auto-triggered compact_boundary
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };
+          yield { type: 'result', result: 'Response after compaction' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+        client: mockClient,
+      });
+
+      // Should post auto-compact notification
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Auto-compacting context'),
+        })
+      );
+      // Should include token count
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('150,000 tokens'),
+        })
+      );
+    });
+
+    it('should not notify for manual compaction in regular flow', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session',
+        workingDir: '/test/dir',
+        mode: 'default',
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock SDK to return manual-triggered compact_boundary
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'manual', pre_tokens: 50000 } };
+          yield { type: 'result', result: 'Response after manual compaction' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+        client: mockClient,
+      });
+
+      // Should NOT post auto-compact notification for manual trigger
+      const autoCompactCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes('Auto-compacting context')
+      );
+      expect(autoCompactCalls.length).toBe(0);
+    });
+
+    it('should only notify once per query', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session',
+        workingDir: '/test/dir',
+        mode: 'default',
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock SDK to return multiple compact_boundary messages
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 100000 } };
+          yield { type: 'result', result: 'Response after compaction' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+        client: mockClient,
+      });
+
+      // Should only post auto-compact notification once
+      const autoCompactCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes('Auto-compacting context')
+      );
+      expect(autoCompactCalls.length).toBe(1);
+    });
+
+    it('should retry auto-compact notification on rate limit', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session',
+        workingDir: '/test/dir',
+        mode: 'default',
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock SDK to return auto-triggered compact_boundary
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };
+          yield { type: 'result', result: 'Response after compaction' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Track call count to simulate rate limit on first auto-compact attempt
+      let postMessageCallCount = 0;
+      mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+        postMessageCallCount++;
+        // Rate limit the auto-compact notification on first attempt (call 3 = status, activity, then auto-compact)
+        if (params.text?.includes('Auto-compacting context') && postMessageCallCount <= 3) {
+          const rateLimitError = new Error('ratelimited') as any;
+          rateLimitError.data = { error: 'ratelimited' };
+          throw rateLimitError;
+        }
+        return { ts: `msg${postMessageCallCount}`, channel: 'C123' };
+      });
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+        client: mockClient,
+      });
+
+      // Should have retried and eventually posted auto-compact notification
+      const autoCompactCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes('Auto-compacting context')
+      );
+      // At least 2 calls: first failed (rate limited), second succeeded (retry)
+      expect(autoCompactCalls.length).toBeGreaterThanOrEqual(2);
     });
   });
 });

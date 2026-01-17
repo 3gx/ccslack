@@ -18,6 +18,7 @@ export const PERMISSION_MODES: readonly PermissionMode[] = ['plan', 'default', '
 
 export interface Session {
   sessionId: string | null;
+  previousSessionIds?: string[];  // Track all sessions before /clear
   workingDir: string;
   mode: PermissionMode;
   model?: string;  // Selected model ID (e.g., "claude-sonnet-4-5-20250929")
@@ -71,6 +72,8 @@ export interface ActivityEntry {
 export interface SlackMessageMapping {
   /** SDK message ID (e.g., "msg_017pagAKz...") */
   sdkMessageId: string;
+  /** Session ID this message belongs to (for forking from correct session after /clear) */
+  sessionId: string;
   /** Message type */
   type: 'user' | 'assistant';
   /** Parent Slack timestamp - links assistant response to user message that triggered it */
@@ -119,6 +122,10 @@ export function loadSessions(): SessionStore {
             channel.configuredBy = null;
             channel.configuredAt = null;
           }
+          // Migration: Add previousSessionIds field to existing sessions
+          if (channel.previousSessionIds === undefined) {
+            channel.previousSessionIds = [];
+          }
           // Migrate threads too
           if (channel.threads) {
             for (const threadTs in channel.threads) {
@@ -128,6 +135,17 @@ export function loadSessions(): SessionStore {
                 thread.configuredPath = channel.configuredPath;
                 thread.configuredBy = channel.configuredBy;
                 thread.configuredAt = channel.configuredAt;
+              }
+            }
+          }
+          // Migration: Add sessionId to messageMap entries that don't have it
+          // This enables "time travel" forking after /clear
+          if (channel.messageMap && channel.sessionId) {
+            for (const slackTs in channel.messageMap) {
+              const mapping = channel.messageMap[slackTs];
+              if (!mapping.sessionId) {
+                // Assign current sessionId to old entries (best effort)
+                mapping.sessionId = channel.sessionId;
               }
             }
           }
@@ -159,6 +177,7 @@ export function saveSession(channelId: string, session: Partial<Session>): void 
 
   store.channels[channelId] = {
     sessionId: existing?.sessionId ?? null,
+    previousSessionIds: existing?.previousSessionIds ?? [],  // Preserve previous session history
     workingDir: existing?.workingDir ?? process.cwd(),
     mode: existing?.mode ?? 'default',
     model: existing?.model,  // Preserve selected model
@@ -258,16 +277,16 @@ export interface ThreadSessionResult {
 /**
  * Get or create a thread session.
  * If the thread doesn't have a session, returns a new session that should be forked
- * from the main session.
+ * from the appropriate session (determined by fork point, not current main session).
  *
  * @param channelId - Slack channel ID
  * @param threadTs - Slack thread timestamp
- * @param resumeSessionAtMessageId - Optional SDK message ID for point-in-time forking
+ * @param forkPoint - Fork point info from findForkPointMessageId (messageId + sessionId)
  */
 export function getOrCreateThreadSession(
   channelId: string,
   threadTs: string,
-  resumeSessionAtMessageId?: string | null
+  forkPoint?: ForkPointResult | null
 ): ThreadSessionResult {
   const existing = getThreadSession(channelId, threadTs);
 
@@ -281,9 +300,14 @@ export function getOrCreateThreadSession(
   // Thread doesn't have a session - create one that will be forked
   const mainSession = getSession(channelId);
 
+  // IMPORTANT: Use the session ID from the fork point (where the message lives)
+  // NOT the current main session (which may be null after /clear)
+  // This enables "time travel" - forking a message from before /clear uses old session
+  const forkedFromSessionId = forkPoint?.sessionId ?? mainSession?.sessionId ?? null;
+
   const newThreadSession: ThreadSession = {
     sessionId: null,  // Will be set after SDK creates the forked session
-    forkedFrom: mainSession?.sessionId ?? null,
+    forkedFrom: forkedFromSessionId,
     workingDir: mainSession?.workingDir ?? process.cwd(),
     mode: mainSession?.mode ?? 'default',
     model: mainSession?.model,  // Inherit model from main session
@@ -295,7 +319,7 @@ export function getOrCreateThreadSession(
     configuredBy: mainSession?.configuredBy ?? null,
     configuredAt: mainSession?.configuredAt ?? null,
     // Point-in-time forking: store the SDK message ID to fork from
-    resumeSessionAtMessageId: resumeSessionAtMessageId ?? undefined,
+    resumeSessionAtMessageId: forkPoint?.messageId,
   };
 
   // Save the new thread session
@@ -356,6 +380,16 @@ export function getMessageMapping(
 }
 
 /**
+ * Result of finding a fork point - includes both message ID and session ID.
+ */
+export interface ForkPointResult {
+  /** SDK message ID to use for resumeSessionAt */
+  messageId: string;
+  /** Session ID the message belongs to (for forking from correct session) */
+  sessionId: string;
+}
+
+/**
  * Find the SDK message ID to fork from, given a parent Slack timestamp.
  *
  * Logic:
@@ -363,12 +397,12 @@ export function getMessageMapping(
  * - If parent is user message (or not found): Find the LAST assistant message BEFORE this timestamp
  *   (not the response TO this message - we want past context, not future)
  *
- * @returns SDK message ID to use for resumeSessionAt, or null if no assistant message found
+ * @returns Fork point info (messageId + sessionId), or null if no assistant message found
  */
 export function findForkPointMessageId(
   channelId: string,
   parentSlackTs: string
-): string | null {
+): ForkPointResult | null {
   const store = loadSessions();
   const channelSession = store.channels[channelId];
 
@@ -380,8 +414,8 @@ export function findForkPointMessageId(
   const mapping = channelSession.messageMap[parentSlackTs];
 
   // If parent is assistant message, use it directly
-  if (mapping?.type === 'assistant') {
-    return mapping.sdkMessageId;
+  if (mapping?.type === 'assistant' && mapping.sessionId) {
+    return { messageId: mapping.sdkMessageId, sessionId: mapping.sessionId };
   }
 
   // Parent is user message (or not found) - find last assistant message BEFORE this timestamp
@@ -392,9 +426,9 @@ export function findForkPointMessageId(
 
   for (const ts of sortedTimestamps) {
     const msg = channelSession.messageMap[ts];
-    if (msg.type === 'assistant') {
-      console.log(`Found last assistant message at ${ts} (before ${parentSlackTs})`);
-      return msg.sdkMessageId;
+    if (msg.type === 'assistant' && msg.sessionId) {
+      console.log(`Found last assistant message at ${ts} (before ${parentSlackTs}) in session ${msg.sessionId}`);
+      return { messageId: msg.sdkMessageId, sessionId: msg.sessionId };
     }
   }
 
@@ -461,10 +495,14 @@ export function deleteSession(channelId: string): void {
   const threadCount = channelSession.threads
     ? Object.keys(channelSession.threads).length
     : 0;
-  const totalSessions = 1 + threadCount; // main + threads
+  const previousCount = channelSession.previousSessionIds?.length ?? 0;
+  const totalSessions = 1 + previousCount + threadCount; // main + previous + threads
 
   console.log(`  Found ${totalSessions} session(s) to delete:`);
   console.log(`    - 1 main session`);
+  if (previousCount > 0) {
+    console.log(`    - ${previousCount} previous session(s) (from /clear operations)`);
+  }
   if (threadCount > 0) {
     console.log(`    - ${threadCount} thread session(s)`);
   }
@@ -473,6 +511,17 @@ export function deleteSession(channelId: string): void {
   if (channelSession.sessionId) {
     console.log(`  Deleting main session: ${channelSession.sessionId}`);
     deleteSdkSessionFile(channelSession.sessionId, channelSession.workingDir);
+  }
+
+  // Delete all previous session SDK files (from /clear operations)
+  if (channelSession.previousSessionIds && channelSession.previousSessionIds.length > 0) {
+    console.log(`  Deleting ${channelSession.previousSessionIds.length} previous session(s)...`);
+    for (const prevId of channelSession.previousSessionIds) {
+      if (prevId) {
+        console.log(`    Previous: ${prevId}`);
+        deleteSdkSessionFile(prevId, channelSession.workingDir);
+      }
+    }
   }
 
   // Delete all thread session SDK files

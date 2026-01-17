@@ -28,6 +28,10 @@ export interface CommandResult {
   };
   // For /model command - triggers model selection UI (async fetch in handler)
   showModelSelection?: boolean;
+  // For /compact command - triggers session compaction
+  compactSession?: boolean;
+  // For /clear command - clears session history
+  clearSession?: boolean;
 }
 
 /**
@@ -71,6 +75,10 @@ export function parseCommand(
       return handleWait(argString);
     case 'model':
       return handleModel(argString);
+    case 'compact':
+      return handleCompact(session);
+    case 'clear':
+      return handleClear(session);
     default:
       // Unknown command - return error
       return {
@@ -96,6 +104,8 @@ function handleHelp(): CommandResult {
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
 \`/resume <id>\` - Resume a terminal session in Slack
+\`/compact\` - Compact session to reduce context size
+\`/clear\` - Clear session history (start fresh)
 \`/wait <sec>\` - Rate limit test (1-300 seconds)`;
 
   return {
@@ -445,5 +455,43 @@ function handleModel(modelArg: string): CommandResult {
   return {
     handled: true,
     showModelSelection: true,
+  };
+}
+
+/**
+ * /compact - Compact session to reduce context size
+ * Requires an active session. Triggers SDK compaction via /compact prompt.
+ */
+function handleCompact(session: Session): CommandResult {
+  if (!session.sessionId) {
+    return {
+      handled: true,
+      response: 'No active session to compact. Start a conversation first.',
+    };
+  }
+
+  // Return flag - actual compaction handled in slack-bot.ts
+  return {
+    handled: true,
+    compactSession: true,
+  };
+}
+
+/**
+ * /clear - Clear session history and start fresh
+ * Requires an active session. Triggers SDK clear via /clear prompt.
+ */
+function handleClear(session: Session): CommandResult {
+  if (!session.sessionId) {
+    return {
+      handled: true,
+      response: 'No active session to clear. Start a conversation first.',
+    };
+  }
+
+  // Return flag - actual clear handled in slack-bot.ts
+  return {
+    handled: true,
+    clearSession: true,
   };
 }

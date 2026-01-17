@@ -192,7 +192,9 @@ describe.skipIf(SKIP_LIVE)('SDK Live Verification', { timeout: 30000, concurrent
         }
       }
 
-      // message.id is critical for point-in-time forking
+      // NOTE: message.id is Anthropic's API message ID (msg_xxx format)
+      // For point-in-time forking, use msg.uuid instead (SDK's internal UUID)
+      // See sdk-fork-e2e.test.ts for proper fork tests
       if (assistantMsg) {
         expect(assistantMsg.message).toHaveProperty('id');
         expect(typeof assistantMsg.message.id).toBe('string');

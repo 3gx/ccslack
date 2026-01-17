@@ -12,9 +12,11 @@ import {
   findForkPointMessageId,
   saveActivityLog,
   getActivityLog,
+  Session,
   ThreadSession,
   PermissionMode,
   ActivityEntry,
+  ForkPointResult,
 } from './session-manager.js';
 import { isSessionActiveInTerminal, buildConcurrentWarningBlocks, getContinueCommand } from './concurrent-check.js';
 import {
@@ -85,6 +87,8 @@ interface ProcessingState {
   // Rate limit tracking
   rateLimitHits: number;
   rateLimitNotified: boolean;
+  // Auto-compact tracking
+  autoCompactNotified: boolean;
 }
 
 // Spinner frames for visual "alive" indicator during processing
@@ -294,6 +298,385 @@ async function runWaitTest(
       }
     }, STATUS_UPDATE_INTERVAL);
   });
+}
+
+/**
+ * Compact session - reduces context size by summarizing conversation
+ * Sends /compact as prompt to resumed session and tracks progress
+ */
+async function runCompactSession(
+  client: any,
+  channelId: string,
+  threadTs: string | undefined,
+  session: Session,
+  originalTs: string | undefined
+): Promise<void> {
+  const startTime = Date.now();
+  let spinnerIndex = 0;
+
+  // Remove eyes reaction first
+  if (originalTs) {
+    try {
+      await client.reactions.remove({
+        channel: channelId,
+        timestamp: originalTs,
+        name: 'eyes',
+      });
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Post initial status message
+  const statusMsg = (await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      blocks: buildStatusPanelBlocks({
+        status: 'thinking',
+        mode: session.mode,
+        model: session.model,
+        toolsCompleted: 0,
+        elapsedMs: 0,
+        conversationKey: `compact_${channelId}`,
+        spinner: SPINNER_FRAMES[0],
+        customStatus: 'Compacting session...',
+      }),
+      text: 'Compacting session...',
+    })
+  )) as { ts?: string };
+
+  const statusMsgTs = statusMsg.ts!;
+  console.log(`[Compact] Started compaction for session ${session.sessionId}`);
+
+  // Start Claude query with /compact as prompt
+  const claudeQuery = startClaudeQuery('/compact', {
+    sessionId: session.sessionId ?? undefined,
+    workingDir: session.workingDir,
+    mode: session.mode,
+    model: session.model,
+  });
+
+  // Track compaction state
+  let compactBoundaryFound = false;
+  let preTokens: number | undefined;
+  let newSessionId: string | null = null;
+  let modelName: string | undefined;
+  let errorOccurred = false;
+  let errorMessage = '';
+
+  // Spinner update timer
+  const spinnerTimer = setInterval(async () => {
+    spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
+    const elapsed = Date.now() - startTime;
+
+    try {
+      await withSlackRetry(() =>
+        client.chat.update({
+          channel: channelId,
+          ts: statusMsgTs,
+          blocks: buildStatusPanelBlocks({
+            status: 'thinking',
+            mode: session.mode,
+            model: modelName || session.model,
+            toolsCompleted: 0,
+            elapsedMs: elapsed,
+            conversationKey: `compact_${channelId}`,
+            spinner: SPINNER_FRAMES[spinnerIndex],
+            customStatus: compactBoundaryFound ? 'Finalizing...' : 'Compacting session...',
+          }),
+          text: 'Compacting session...',
+        })
+      );
+    } catch {
+      // Ignore update errors
+    }
+  }, STATUS_UPDATE_INTERVAL);
+
+  try {
+    // Process SDK messages
+    for await (const msg of claudeQuery) {
+      // Capture session ID and model from init message
+      if (msg.type === 'system' && (msg as any).subtype === 'init') {
+        newSessionId = (msg as any).session_id;
+        modelName = (msg as any).model;
+        console.log(`[Compact] New session: ${newSessionId}, model: ${modelName}`);
+      }
+
+      // Capture compact_boundary message
+      if (msg.type === 'system' && (msg as any).subtype === 'compact_boundary') {
+        compactBoundaryFound = true;
+        const metadata = (msg as any).compact_metadata;
+        if (metadata) {
+          preTokens = metadata.pre_tokens;
+          console.log(`[Compact] Boundary found - pre_tokens: ${preTokens}`);
+        }
+      }
+
+      // Check for compacting status
+      if ((msg as any).status === 'compacting') {
+        console.log('[Compact] Compacting status received');
+      }
+    }
+  } catch (err: any) {
+    errorOccurred = true;
+    errorMessage = err.message || String(err);
+    console.error(`[Compact] Error: ${errorMessage}`);
+  } finally {
+    clearInterval(spinnerTimer);
+  }
+
+  const elapsed = Date.now() - startTime;
+
+  // Update final status
+  if (errorOccurred) {
+    // Error state
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: statusMsgTs,
+        blocks: buildStatusPanelBlocks({
+          status: 'error',
+          mode: session.mode,
+          model: modelName || session.model,
+          toolsCompleted: 0,
+          elapsedMs: elapsed,
+          conversationKey: `compact_${channelId}`,
+          customStatus: `Compaction failed: ${errorMessage}`,
+        }),
+        text: `Compaction failed: ${errorMessage}`,
+      })
+    );
+  } else if (compactBoundaryFound) {
+    // Success - update session with new ID if changed
+    if (newSessionId && newSessionId !== session.sessionId) {
+      saveSession(channelId, { sessionId: newSessionId });
+      console.log(`[Compact] Session updated: ${session.sessionId} → ${newSessionId}`);
+    }
+
+    // Build success message
+    const tokenInfo = preTokens
+      ? `Tokens before: ${preTokens.toLocaleString()}`
+      : 'Context compacted';
+
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: statusMsgTs,
+        blocks: buildStatusPanelBlocks({
+          status: 'complete',
+          mode: session.mode,
+          model: modelName || session.model,
+          toolsCompleted: 0,
+          elapsedMs: elapsed,
+          conversationKey: `compact_${channelId}`,
+          customStatus: `Compaction complete | ${tokenInfo}`,
+        }),
+        text: `Compaction complete | ${tokenInfo}`,
+      })
+    );
+
+    // Post success message
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: `:white_check_mark: *Session compacted*\n${tokenInfo}\nDuration: ${(elapsed / 1000).toFixed(1)}s`,
+    });
+  } else {
+    // No compact boundary found - may have been treated as text
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: statusMsgTs,
+        blocks: buildStatusPanelBlocks({
+          status: 'complete',
+          mode: session.mode,
+          model: modelName || session.model,
+          toolsCompleted: 0,
+          elapsedMs: elapsed,
+          conversationKey: `compact_${channelId}`,
+          customStatus: 'Compaction processed',
+        }),
+        text: 'Compaction processed',
+      })
+    );
+  }
+}
+
+/**
+ * Clear session - clears conversation history and starts fresh
+ * Sends /clear as prompt to resumed session and tracks progress
+ */
+async function runClearSession(
+  client: any,
+  channelId: string,
+  threadTs: string | undefined,
+  session: Session,
+  originalTs: string | undefined
+): Promise<void> {
+  const startTime = Date.now();
+  let spinnerIndex = 0;
+
+  // Remove eyes reaction first
+  if (originalTs) {
+    try {
+      await client.reactions.remove({
+        channel: channelId,
+        timestamp: originalTs,
+        name: 'eyes',
+      });
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Post initial status message
+  const statusMsg = (await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      blocks: buildStatusPanelBlocks({
+        status: 'thinking',
+        mode: session.mode,
+        model: session.model,
+        toolsCompleted: 0,
+        elapsedMs: 0,
+        conversationKey: `clear_${channelId}`,
+        spinner: SPINNER_FRAMES[0],
+        customStatus: 'Clearing session history...',
+      }),
+      text: 'Clearing session history...',
+    })
+  )) as { ts?: string };
+
+  const statusMsgTs = statusMsg.ts!;
+  console.log(`[Clear] Started clear for session ${session.sessionId}`);
+
+  // Start Claude query with /clear as prompt
+  const claudeQuery = startClaudeQuery('/clear', {
+    sessionId: session.sessionId ?? undefined,
+    workingDir: session.workingDir,
+    mode: session.mode,
+    model: session.model,
+  });
+
+  // Track clear state
+  let newSessionId: string | null = null;
+  let modelName: string | undefined;
+  let errorOccurred = false;
+  let errorMessage = '';
+
+  // Spinner update timer
+  const spinnerTimer = setInterval(async () => {
+    spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
+    const elapsed = Date.now() - startTime;
+
+    try {
+      await withSlackRetry(() =>
+        client.chat.update({
+          channel: channelId,
+          ts: statusMsgTs,
+          blocks: buildStatusPanelBlocks({
+            status: 'thinking',
+            mode: session.mode,
+            model: modelName || session.model,
+            toolsCompleted: 0,
+            elapsedMs: elapsed,
+            conversationKey: `clear_${channelId}`,
+            spinner: SPINNER_FRAMES[spinnerIndex],
+            customStatus: 'Clearing session history...',
+          }),
+          text: 'Clearing session history...',
+        })
+      );
+    } catch {
+      // Ignore update errors
+    }
+  }, STATUS_UPDATE_INTERVAL);
+
+  try {
+    // Process SDK messages
+    for await (const msg of claudeQuery) {
+      // Capture session ID and model from init message
+      if (msg.type === 'system' && (msg as any).subtype === 'init') {
+        newSessionId = (msg as any).session_id;
+        modelName = (msg as any).model;
+        console.log(`[Clear] New session: ${newSessionId}, model: ${modelName}`);
+      }
+
+      // Note: SDK doesn't emit clear_boundary - we detect success via new session ID
+    }
+  } catch (err: any) {
+    errorOccurred = true;
+    errorMessage = err.message || String(err);
+    console.error(`[Clear] Error: ${errorMessage}`);
+  } finally {
+    clearInterval(spinnerTimer);
+  }
+
+  const elapsed = Date.now() - startTime;
+
+  // Update final status
+  if (errorOccurred) {
+    // Error state
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: statusMsgTs,
+        blocks: buildStatusPanelBlocks({
+          status: 'error',
+          mode: session.mode,
+          model: modelName || session.model,
+          toolsCompleted: 0,
+          elapsedMs: elapsed,
+          conversationKey: `clear_${channelId}`,
+          customStatus: `Clear failed: ${errorMessage}`,
+        }),
+        text: `Clear failed: ${errorMessage}`,
+      })
+    );
+  } else {
+    // Success - /clear completed
+    // IMPORTANT: SDK does NOT create a new session - /clear as prompt is just text
+    // To actually clear, we set sessionId to NULL so next message starts fresh
+    console.log(`[Clear] Completed. Setting sessionId to null (was: ${session.sessionId})`);
+
+    // Track old session ID for cleanup, then set sessionId to null
+    const previousIds = session.previousSessionIds ?? [];
+    if (session.sessionId) {
+      previousIds.push(session.sessionId);
+    }
+
+    saveSession(channelId, {
+      sessionId: null,  // Next message will start fresh without resuming
+      previousSessionIds: previousIds,
+    });
+    console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
+
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: statusMsgTs,
+        blocks: buildStatusPanelBlocks({
+          status: 'complete',
+          mode: session.mode,
+          model: modelName || session.model,
+          toolsCompleted: 0,
+          elapsedMs: elapsed,
+          conversationKey: `clear_${channelId}`,
+          customStatus: 'Session cleared',
+        }),
+        text: 'Session cleared',
+      })
+    );
+
+    // Post success message
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: `:wastebasket: *Session history cleared*\nStarting fresh. Your next message begins a new conversation.\nDuration: ${(elapsed / 1000).toFixed(1)}s`,
+    });
+  }
 }
 
 // Handle /fork-thread command - creates new thread from existing thread session
@@ -609,16 +992,19 @@ async function handleMessage(params: {
 
   if (threadTs) {
     // Thread message - find fork point for point-in-time forking
-    const forkPointMessageId = findForkPointMessageId(channelId, threadTs);
-    if (forkPointMessageId) {
-      console.log(`[Fork] Thread will fork from message ${forkPointMessageId}`);
-      resumeSessionAtMessageId = forkPointMessageId;
+    // Returns both messageId AND sessionId (for forking from correct session after /clear)
+    const forkPoint = findForkPointMessageId(channelId, threadTs);
+    if (forkPoint) {
+      console.log(`[Fork] Thread will fork from message ${forkPoint.messageId} in session ${forkPoint.sessionId}`);
+      resumeSessionAtMessageId = forkPoint.messageId;
     } else {
       console.warn(`[Fork] No message mapping found for ${threadTs} - will fork from latest state`);
     }
 
     // Thread message - use or create forked session
-    const threadResult = getOrCreateThreadSession(channelId, threadTs, forkPointMessageId);
+    // Pass forkPoint so getOrCreateThreadSession uses the CORRECT session (from the message)
+    // not the current main session (which may be null after /clear)
+    const threadResult = getOrCreateThreadSession(channelId, threadTs, forkPoint);
     session = {
       sessionId: threadResult.session.sessionId,
       workingDir: threadResult.session.workingDir,
@@ -787,6 +1173,30 @@ async function handleMessage(params: {
     return;
   }
 
+  // Handle /compact command (session compaction)
+  if (commandResult.compactSession) {
+    await runCompactSession(
+      client,
+      channelId,
+      threadTs,
+      session,
+      originalTs
+    );
+    return;
+  }
+
+  // Handle /clear command (clear session history)
+  if (commandResult.clearSession) {
+    await runClearSession(
+      client,
+      channelId,
+      threadTs,
+      session,
+      originalTs
+    );
+    return;
+  }
+
   if (commandResult.handled) {
     // Apply any session updates from the command
     // Use updated mode if command changed it, otherwise use current mode
@@ -934,12 +1344,15 @@ async function handleMessage(params: {
   // Capture user message timestamp for message mapping (main channel only)
   // This enables point-in-time thread forking by tracking which SDK messages
   // correspond to which Slack timestamps
-  if (!threadTs && originalTs) {
+  // NOTE: sessionId may be null here (new session or after /clear) - that's fine
+  // because user messages are placeholders and we use assistant messages for forking
+  if (!threadTs && originalTs && session.sessionId) {
     saveMessageMapping(channelId, originalTs, {
       sdkMessageId: `user_${originalTs}`,  // Placeholder - user messages don't have SDK IDs
+      sessionId: session.sessionId,
       type: 'user',
     });
-    console.log(`[Mapping] Saved user message mapping for ${originalTs}`);
+    console.log(`[Mapping] Saved user message mapping for ${originalTs} in session ${session.sessionId}`);
   }
 
   // Mark conversation as busy
@@ -963,6 +1376,7 @@ async function handleMessage(params: {
     spinnerIndex: 0,
     rateLimitHits: 0,
     rateLimitNotified: false,
+    autoCompactNotified: false,
   };
 
   // Post Message 1: Status panel (Block Kit with Abort)
@@ -1229,10 +1643,12 @@ async function handleMessage(params: {
     }, STATUS_UPDATE_INTERVAL);
 
     for await (const msg of claudeQuery) {
-      // Capture assistant message ID for message mapping (point-in-time forking)
-      if (msg.type === 'assistant' && (msg as any).message?.id) {
-        currentAssistantMessageId = (msg as any).message.id;
-        console.log(`[Mapping] Captured assistant message ID: ${currentAssistantMessageId}`);
+      // Capture assistant message UUID for message mapping (point-in-time forking)
+      // IMPORTANT: Use msg.uuid (SDK's internal UUID), NOT msg.message.id (Anthropic's message ID)
+      // The SDK's resumeSessionAt parameter expects the uuid, not the message.id
+      if (msg.type === 'assistant' && (msg as any).uuid) {
+        currentAssistantMessageId = (msg as any).uuid;
+        console.log(`[Mapping] Captured assistant message UUID: ${currentAssistantMessageId}`);
       }
 
       // Capture session ID and model from init message
@@ -1241,6 +1657,19 @@ async function handleMessage(params: {
         modelName = (msg as any).model;
         processingState.model = modelName;
         console.log(`Session initialized: ${newSessionId}, model: ${modelName}`);
+
+        // CRITICAL: Save session ID immediately, not at end of try block
+        // If SDK crashes after init but before completion, we need the sessionId
+        // saved so subsequent messages can RESUME instead of trying to fork again
+        if (newSessionId) {
+          if (threadTs) {
+            saveThreadSession(channelId, threadTs, { sessionId: newSessionId });
+            console.log(`[Init] Saved thread session ID: ${newSessionId}`);
+          } else {
+            saveSession(channelId, { sessionId: newSessionId });
+            console.log(`[Init] Saved main session ID: ${newSessionId}`);
+          }
+        }
 
         // Update model in active query for abort handler
         const activeQuery = activeQueries.get(conversationKey);
@@ -1251,6 +1680,31 @@ async function handleMessage(params: {
         // Trigger immediate update with model name
         processingState.lastUpdateTime = 0; // Force update
         await updateStatusMessages();
+      }
+
+      // Detect auto-compaction during regular queries
+      if (msg.type === 'system' && (msg as any).subtype === 'compact_boundary') {
+        const metadata = (msg as any).compact_metadata;
+        const trigger = metadata?.trigger;
+
+        // Only notify for auto-triggered compaction (manual has its own flow)
+        if (trigger === 'auto' && !processingState.autoCompactNotified) {
+          processingState.autoCompactNotified = true;
+          const preTokens = metadata?.pre_tokens;
+          const tokenInfo = preTokens ? ` (was ${preTokens.toLocaleString()} tokens)` : '';
+
+          await withSlackRetry(
+            async () =>
+              client.chat.postMessage({
+                channel: channelId,
+                thread_ts: threadTs,
+                text: `:gear: Auto-compacting context${tokenInfo}...`,
+              }),
+            { onRateLimit: handleRateLimit }
+          );
+
+          console.log(`[AutoCompact] Triggered - pre_tokens: ${preTokens}`);
+        }
       }
 
       // Handle stream_event for real-time activity tracking
@@ -1434,21 +1888,23 @@ async function handleMessage(params: {
 
       // Link assistant message ID to Slack timestamps for message mapping (main channel only)
       // This enables point-in-time thread forking for future threads
-      if (currentAssistantMessageId && postedMessages.length > 0 && !threadTs && originalTs) {
+      // IMPORTANT: Include sessionId so forking after /clear uses correct session
+      if (currentAssistantMessageId && newSessionId && postedMessages.length > 0 && !threadTs && originalTs) {
         const userMessageTs = originalTs;  // Original user message timestamp
 
-        // Map ALL split message timestamps to the same SDK message ID
+        // Map ALL split message timestamps to the same SDK message UUID
         postedMessages.forEach((slackMsg, index) => {
           const isFirst = index === 0;
 
           saveMessageMapping(channelId, slackMsg.ts, {
-            sdkMessageId: currentAssistantMessageId!,
+            sdkMessageId: currentAssistantMessageId!,  // This is the UUID, not message.id
+            sessionId: newSessionId!,  // Track which session this message belongs to
             type: 'assistant',
             parentSlackTs: isFirst ? userMessageTs : undefined,  // Only first links to user message
             isContinuation: !isFirst,  // Mark continuations
           });
 
-          console.log(`[Mapping] Linked Slack ts ${slackMsg.ts} → SDK ${currentAssistantMessageId}${!isFirst ? ' (continuation)' : ''}`);
+          console.log(`[Mapping] Linked Slack ts ${slackMsg.ts} → SDK UUID ${currentAssistantMessageId} in session ${newSessionId}${!isFirst ? ' (continuation)' : ''}`);
         });
       }
 
@@ -1483,16 +1939,8 @@ async function handleMessage(params: {
       }
     }
 
-    // Save session (handle threads differently)
-    if (newSessionId) {
-      if (threadTs) {
-        // Save to thread session
-        saveThreadSession(channelId, threadTs, { sessionId: newSessionId });
-      } else {
-        // Save to main session
-        saveSession(channelId, { sessionId: newSessionId });
-      }
-    }
+    // Note: Session ID was already saved at init time (line ~1662)
+    // This is a redundant save for extra safety - no-op if already saved
 
   } catch (error: any) {
     console.error('Error streaming Claude response:', error);
@@ -2244,9 +2692,7 @@ app.action(/^view_activity_log_(.+)$/, async ({ action, ack, body, client }) => 
   }
 
   // Get activity log from storage
-  console.log(`[DEBUG] Fetching activity log for key: "${conversationKey}"`);
   const activityLog = await getActivityLog(conversationKey);
-  console.log(`[DEBUG] Activity log result: ${activityLog ? activityLog.length + ' entries' : 'null'}`);
 
   if (!activityLog) {
     // Log not found - session was cleared or bot restarted

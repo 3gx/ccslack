@@ -263,4 +263,112 @@ describe('channel lifecycle - deletion', () => {
     expect(writtenData.channels['C456']).toBeDefined();
     expect(writtenData.channels['C456'].sessionId).toBe('other-session');
   });
+
+  it('should not crash bot when SDK file deletion fails', async () => {
+    // Setup: Channel exists
+    const mockStore = {
+      channels: {
+        'C123': mockSession,
+      },
+    };
+
+    vi.mocked(fs.existsSync).mockImplementation((path) => {
+      if (path === './sessions.json') return true;
+      if (typeof path === 'string' && path.includes('.jsonl')) return true;
+      return false;
+    });
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+    // Make unlinkSync throw (simulating permission error)
+    vi.mocked(fs.unlinkSync).mockImplementation(() => {
+      throw new Error('EACCES: permission denied');
+    });
+
+    // Capture console.error to verify error is logged
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // Trigger channel_deleted event
+    const handler = registeredHandlers['event_channel_deleted'];
+
+    // Should NOT throw - event handler should catch and continue
+    await expect(
+      handler({
+        event: {
+          channel: 'C123',
+          type: 'channel_deleted',
+        },
+      })
+    ).resolves.not.toThrow();
+
+    // Verify error was logged
+    expect(consoleSpy).toHaveBeenCalled();
+
+    // Verify sessions.json was still updated (cleanup continues despite SDK file error)
+    const finalWrite = vi.mocked(fs.writeFileSync).mock.calls[vi.mocked(fs.writeFileSync).mock.calls.length - 1];
+    const writtenData = JSON.parse(finalWrite[1] as string);
+    expect(writtenData.channels['C123']).toBeUndefined();
+
+    consoleSpy.mockRestore();
+  });
+
+  it('should continue processing when SDK files are already deleted', async () => {
+    // Setup: Channel with main + threads, but SDK files were deleted externally
+    const mockStore = {
+      channels: {
+        'C123': {
+          ...mockSession,
+          threads: {
+            '1234.5678': {
+              sessionId: 'thread-456',
+              forkedFrom: 'main-session-123',
+              workingDir: '/Users/testuser/projects/myapp',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/Users/testuser/projects/myapp',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+
+    vi.mocked(fs.existsSync).mockImplementation((path) => {
+      if (path === './sessions.json') return true;
+      // SDK files do NOT exist (already deleted externally)
+      if (typeof path === 'string' && path.includes('.jsonl')) return false;
+      return false;
+    });
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+    // Capture console.log to verify info messages
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    // Trigger channel_deleted event
+    const handler = registeredHandlers['event_channel_deleted'];
+
+    await handler({
+      event: {
+        channel: 'C123',
+        type: 'channel_deleted',
+      },
+    });
+
+    // Verify unlinkSync was NOT called (files don't exist)
+    expect(fs.unlinkSync).not.toHaveBeenCalled();
+
+    // Verify info messages were logged
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('SDK session file not found')
+    );
+
+    // Verify sessions.json was still updated
+    const finalWrite = vi.mocked(fs.writeFileSync).mock.calls[vi.mocked(fs.writeFileSync).mock.calls.length - 1];
+    const writtenData = JSON.parse(finalWrite[1] as string);
+    expect(writtenData.channels['C123']).toBeUndefined();
+
+    consoleSpy.mockRestore();
+  });
 });
