@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse } from '../../streaming.js';
+import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse, truncateWithClosedFormatting } from '../../streaming.js';
 import { createMockSlackClient } from '../__fixtures__/slack-messages.js';
 import { createMockClaudeStream, mockSystemInit, mockAssistantText, mockAssistantContentBlocks, mockResult } from '../__fixtures__/claude-messages.js';
 
@@ -256,45 +256,120 @@ describe('streaming', () => {
     });
   });
 
+  describe('truncateWithClosedFormatting', () => {
+    it('returns text unchanged if under limit', () => {
+      expect(truncateWithClosedFormatting('short', 100)).toBe('short');
+    });
+
+    it('truncates and adds suffix for long text', () => {
+      const long = 'a'.repeat(600);
+      const result = truncateWithClosedFormatting(long, 500);
+      expect(result).toContain('_...truncated. Full response attached._');
+      expect(result.length).toBeLessThanOrEqual(500);
+    });
+
+    it('closes open code block', () => {
+      const text = '```python\ndef foo():\n    pass\n\ndef bar():' + 'x'.repeat(500);
+      const result = truncateWithClosedFormatting(text, 100);
+      const codeBlocks = (result.match(/```/g) || []).length;
+      expect(codeBlocks % 2).toBe(0); // Even = all closed
+    });
+
+    it('closes open inline code', () => {
+      const text = 'some `code that ' + 'x'.repeat(500);
+      const result = truncateWithClosedFormatting(text, 100);
+      const backticks = (result.match(/(?<!`)`(?!`)/g) || []).length;
+      expect(backticks % 2).toBe(0);
+    });
+
+    it('closes open bold', () => {
+      const text = 'here is *bold text that ' + 'x'.repeat(500);
+      const result = truncateWithClosedFormatting(text, 100);
+      const asterisks = (result.match(/(?<!\*)\*(?!\*)/g) || []).length;
+      expect(asterisks % 2).toBe(0);
+    });
+
+    it('closes open italic', () => {
+      const text = 'here is _italic text that ' + 'x'.repeat(500);
+      const result = truncateWithClosedFormatting(text, 100);
+      const underscores = (result.match(/(?<!_)_(?!_)/g) || []).length;
+      expect(underscores % 2).toBe(0);
+    });
+
+    it('closes open strikethrough', () => {
+      const text = 'here is ~struck text that ' + 'x'.repeat(500);
+      const result = truncateWithClosedFormatting(text, 100);
+      const tildes = (result.match(/~/g) || []).length;
+      expect(tildes % 2).toBe(0);
+    });
+
+    it('handles code block with inline markers inside', () => {
+      // When truncating inside a code block, only the code block is closed
+      // Inline markers (backticks, asterisks, etc.) inside code blocks are literal text
+      const text = '```js\nconst x = `template ' + 'x'.repeat(500);
+      const result = truncateWithClosedFormatting(text, 120);
+      // Code block should be closed
+      expect((result.match(/```/g) || []).length % 2).toBe(0);
+      // The inline backtick is NOT closed (it's literal text inside the code block)
+      expect(result).toContain('`template');
+      expect(result).not.toContain('`template`'); // NOT auto-closed
+    });
+
+    it('handles multiple open markers outside code blocks', () => {
+      // When NOT in a code block, all open markers should be closed
+      const text = 'Here is *bold and `code that ' + 'x'.repeat(500);
+      const result = truncateWithClosedFormatting(text, 80);
+      // Both should be closed
+      const boldCount = (result.match(/(?<!\*)\*(?!\*)/g) || []).length;
+      const inlineCodeCount = (result.match(/(?<!`)`(?!`)/g) || []).length;
+      expect(boldCount % 2).toBe(0);
+      expect(inlineCodeCount % 2).toBe(0);
+    });
+  });
+
   describe('uploadMarkdownWithResponse', () => {
-    it('should upload .md file with response as initial_comment', async () => {
+    it('posts text first, then uploads file', async () => {
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
-        files: [{
-          id: 'F123',
-          shares: { public: { 'C123': [{ ts: 'msg123' }] } },
-        }],
+        files: [{ id: 'F123' }],
       });
 
-      const result = await uploadMarkdownWithResponse(
+      await uploadMarkdownWithResponse(
         mockClient as any,
         'C123',
         '# Hello\n\nThis is **markdown**',
-        'Hello\n\nThis is *markdown*',  // Slack-formatted
+        'Hello\n\nThis is *markdown*',
         'thread123'
       );
 
+      // Text posted first
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          thread_ts: 'thread123',
+          text: 'Hello\n\nThis is *markdown*',
+        })
+      );
+      // Then file uploaded
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
           thread_ts: 'thread123',
           content: '# Hello\n\nThis is **markdown**',
-          initial_comment: 'Hello\n\nThis is *markdown*',
           title: 'Full Response (Markdown)',
         })
       );
-      expect(result).toEqual({ ts: 'msg123' });
     });
 
-    it('should generate unique .md filename with timestamp and markdown filetype', async () => {
+    it('generates unique .md filename with timestamp and markdown filetype', async () => {
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
-        files: [{ shares: { public: { 'C123': [{ ts: 'msg123' }] } } }],
+        files: [{ id: 'F123' }],
       });
 
-      await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw md', 'slack formatted');
+      await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw md', 'short text');
 
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -304,26 +379,73 @@ describe('streaming', () => {
       );
     });
 
-    it('should work without threadTs (main channel)', async () => {
+    it('posts full text for short responses (under limit)', async () => {
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
-        files: [{ shares: { public: { 'C123': [{ ts: 'msg123' }] } } }],
+        files: [{ id: 'F123' }],
       });
 
-      await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', 'formatted');
+      const shortResponse = 'Short response under 500 chars';
+      await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', shortResponse);
 
-      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
-          channel_id: 'C123',
-          thread_ts: undefined,
+          text: shortResponse,
         })
       );
     });
 
-    it('should return null on upload failure', async () => {
+    it('posts truncated text for long responses', async () => {
       const mockClient = createMockSlackClient();
-      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      const longResponse = 'a'.repeat(600);
+      await uploadMarkdownWithResponse(
+        mockClient as any,
+        'C123',
+        'raw',
+        longResponse,
+        undefined,
+        undefined,
+        500
+      );
+
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('_...truncated. Full response attached._'),
+        })
+      );
+    });
+
+    it('does NOT create threads for long responses', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      const longResponse = 'a'.repeat(600);
+      await uploadMarkdownWithResponse(
+        mockClient as any,
+        'C123',
+        'raw',
+        longResponse,
+        undefined,
+        undefined,
+        500
+      );
+
+      // Should only post once (no thread creation)
+      expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns null on failure', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.chat.postMessage = vi.fn().mockRejectedValue(new Error('Post failed'));
 
       const result = await uploadMarkdownWithResponse(
         mockClient as any,
@@ -335,9 +457,9 @@ describe('streaming', () => {
       expect(result).toBeNull();
     });
 
-    it('should send ephemeral notification on failure when userId provided', async () => {
+    it('sends ephemeral notification on failure when userId provided', async () => {
       const mockClient = createMockSlackClient();
-      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+      mockClient.chat.postMessage = vi.fn().mockRejectedValue(new Error('Post failed'));
 
       await uploadMarkdownWithResponse(
         mockClient as any,
@@ -355,9 +477,9 @@ describe('streaming', () => {
       });
     });
 
-    it('should not send ephemeral notification when userId not provided', async () => {
+    it('does not send ephemeral notification when userId not provided', async () => {
       const mockClient = createMockSlackClient();
-      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+      mockClient.chat.postMessage = vi.fn().mockRejectedValue(new Error('Post failed'));
 
       await uploadMarkdownWithResponse(
         mockClient as any,
@@ -365,18 +487,16 @@ describe('streaming', () => {
         'raw',
         'formatted',
         'thread123'
-        // no userId
       );
 
       expect(mockClient.chat.postEphemeral).not.toHaveBeenCalled();
     });
 
-    it('should ignore ephemeral failure silently', async () => {
+    it('ignores ephemeral failure silently', async () => {
       const mockClient = createMockSlackClient();
-      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+      mockClient.chat.postMessage = vi.fn().mockRejectedValue(new Error('Post failed'));
       mockClient.chat.postEphemeral = vi.fn().mockRejectedValue(new Error('Ephemeral failed'));
 
-      // Should not throw
       const result = await uploadMarkdownWithResponse(
         mockClient as any,
         'C123',
@@ -389,41 +509,31 @@ describe('streaming', () => {
       expect(result).toBeNull();
     });
 
-    it('should return null when files array is empty', async () => {
-      const mockClient = createMockSlackClient();
-      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({ ok: true, files: [] });
-
-      const result = await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', 'formatted');
-
-      expect(result).toBeNull();
-    });
-
-    it('should return success with undefined ts when shares not available', async () => {
+    it('uses custom charLimit when provided', async () => {
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
-        files: [{ id: 'F123' }], // no shares - but upload succeeded
+        files: [{ id: 'F123' }],
       });
 
-      const result = await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', 'formatted');
+      // 800 chars - under 1000 limit
+      const response = 'c'.repeat(800);
+      await uploadMarkdownWithResponse(
+        mockClient as any,
+        'C123',
+        'raw',
+        response,
+        undefined,
+        undefined,
+        1000
+      );
 
-      // Should return success (not null) even without ts
-      expect(result).toEqual({ ts: undefined });
-    });
-
-    it('should handle private channel shares', async () => {
-      const mockClient = createMockSlackClient();
-      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
-        ok: true,
-        files: [{
-          id: 'F123',
-          shares: { private: { 'C123': [{ ts: 'private-msg-ts' }] } },
-        }],
-      });
-
-      const result = await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', 'formatted');
-
-      expect(result).toEqual({ ts: 'private-msg-ts' });
+      // Should post full text (800 < 1000)
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: response,
+        })
+      );
     });
   });
 });

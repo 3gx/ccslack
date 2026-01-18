@@ -43,7 +43,7 @@ import {
   refreshModelCache,
   getModelInfo,
 } from './model-cache.js';
-import { postSplitResponse, uploadMarkdownAndPngWithResponse } from './streaming.js';
+import { uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining } from './utils.js';
 import { parseCommand } from './commands.js';
@@ -988,6 +988,7 @@ async function handleMessage(params: {
     lastUsage?: LastUsage;
     maxThinkingTokens?: number;  // Extended thinking budget
     updateRateSeconds?: number;  // Status update interval (1-10s)
+    threadCharLimit?: number;    // Thread char limit (100-3000, default 500)
   };
   let isNewFork = false;
   let forkedFromSessionId: string | null = null;
@@ -1024,6 +1025,7 @@ async function handleMessage(params: {
       lastUsage: threadResult.session.lastUsage,
       maxThinkingTokens: threadResult.session.maxThinkingTokens,
       updateRateSeconds: threadResult.session.updateRateSeconds,
+      threadCharLimit: threadResult.session.threadCharLimit,
     };
     isNewFork = threadResult.isNewFork;
     forkedFromSessionId = threadResult.session.forkedFrom;
@@ -2031,36 +2033,41 @@ async function handleMessage(params: {
     }
 
     // Post complete response (only if not aborted and we have content)
-    // Upload .md file with response as initial_comment so they appear as one message
+    // Upload .md/.png files and post text separately (initial_comment doesn't support mrkdwn)
     if (!isAborted(conversationKey) && fullResponse) {
       const slackResponse = markdownToSlack(fullResponse);
       let postedMessages: { ts: string }[] = [];
 
-      // Try to upload .md and .png files with response - files and text appear as one message
+      // Try to upload .md and .png files with response text posted separately
       const uploadResult = await uploadMarkdownAndPngWithResponse(
         client,
         channelId,
         fullResponse,
         slackResponse,
         threadTs,
-        userId
+        userId,
+        session.threadCharLimit
       );
 
       if (uploadResult) {
-        // Success - file with response posted as one message
-        // ts may be undefined if Slack didn't return it, but upload succeeded
-        if (uploadResult.ts) {
+        // Success - files uploaded and text posted with proper mrkdwn formatting
+        postedMessages = uploadResult.postedMessages ?? [];
+        // If no postedMessages but ts exists, use ts for mapping
+        if (postedMessages.length === 0 && uploadResult.ts) {
           postedMessages = [{ ts: uploadResult.ts }];
         }
-        // If no ts, skip message mapping but don't post duplicate response
       } else {
-        // Fallback - post response without .md file attachment
-        postedMessages = await postSplitResponse(
-          client,
-          channelId,
-          slackResponse,
-          threadTs
-        );
+        // Fallback - post response without file attachment
+        const fallbackResult = await withSlackRetry(() =>
+          client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: slackResponse,
+          })
+        ) as { ts?: string } | undefined;
+        if (fallbackResult?.ts) {
+          postedMessages = [{ ts: fallbackResult.ts }];
+        }
       }
 
       // Link assistant message ID to Slack timestamps for message mapping (main channel only)

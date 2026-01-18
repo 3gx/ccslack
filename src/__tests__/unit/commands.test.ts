@@ -734,4 +734,69 @@ describe('commands', () => {
       expect(result.response).toContain('1-10');
     });
   });
+
+  describe('/message-size', () => {
+    it('should show default value when not set', () => {
+      const result = parseCommand('/message-size', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('500');
+      expect(result.response).toContain('default');
+    });
+
+    it('should show current value when set', () => {
+      const sessionWithLimit: Session = { ...mockSession, threadCharLimit: 1000 };
+      const result = parseCommand('/message-size', sessionWithLimit);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('1000');
+      expect(result.response).not.toContain('default');
+    });
+
+    it('should accept minimum value (100)', () => {
+      const result = parseCommand('/message-size 100', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.threadCharLimit).toBe(100);
+      expect(result.response).toContain('100');
+    });
+
+    it('should accept maximum value (36000)', () => {
+      const result = parseCommand('/message-size 36000', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.threadCharLimit).toBe(36000);
+      expect(result.response).toContain('36000');
+    });
+
+    it('should accept value in valid range', () => {
+      const result = parseCommand('/message-size 800', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.threadCharLimit).toBe(800);
+      expect(result.response).toContain('800');
+    });
+
+    it('should reject values below minimum', () => {
+      const result = parseCommand('/message-size 50', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('between 100 and 36000');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should reject values above maximum', () => {
+      const result = parseCommand('/message-size 50000', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('between 100 and 36000');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should reject non-numeric input', () => {
+      const result = parseCommand('/message-size abc', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Invalid number');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should appear in /help output', () => {
+      const result = parseCommand('/help', mockSession);
+      expect(result.response).toContain('/message-size');
+      expect(result.response).toContain('100-36000');
+    });
+  });
 });

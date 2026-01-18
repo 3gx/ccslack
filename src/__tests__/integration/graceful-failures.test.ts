@@ -7,7 +7,6 @@ import {
   Errors,
 } from '../../errors.js';
 import { withRetry, withSlackRetry, sleep } from '../../retry.js';
-import { splitMessage } from '../../streaming.js';
 import { loadSessions } from '../../session-manager.js';
 import fs from 'fs';
 
@@ -187,69 +186,6 @@ describe('graceful failures - no crashes on invalid input', () => {
         1,
         expect.any(Number)
       );
-    });
-  });
-
-  describe('message splitting', () => {
-    it('should not split short messages', () => {
-      const text = 'Hello, world!';
-      const parts = splitMessage(text);
-
-      expect(parts).toHaveLength(1);
-      expect(parts[0]).toBe(text);
-    });
-
-    it('should split long messages at newlines', () => {
-      const line = 'A'.repeat(100) + '\n';
-      const text = line.repeat(50); // 5050 chars total
-
-      const parts = splitMessage(text, 1000);
-
-      expect(parts.length).toBeGreaterThan(1);
-      // Each part should end at a newline (except possibly the last)
-      for (let i = 0; i < parts.length - 1; i++) {
-        expect(parts[i].endsWith('\n')).toBe(true);
-      }
-    });
-
-    it('should split long messages at spaces when no newlines', () => {
-      const word = 'word ';
-      const text = word.repeat(1000); // 5000 chars
-
-      const parts = splitMessage(text, 1000);
-
-      expect(parts.length).toBeGreaterThan(1);
-      // Should not cut mid-word
-      for (const part of parts) {
-        expect(part).not.toMatch(/word$/); // Should not end with incomplete word
-      }
-    });
-
-    it('should handle very long input gracefully', () => {
-      // 100KB of text
-      const text = 'x'.repeat(100000);
-
-      const parts = splitMessage(text, 4000);
-
-      expect(parts.length).toBe(25); // 100000 / 4000 = 25
-      expect(parts.every(p => p.length <= 4000)).toBe(true);
-    });
-
-    it('should handle special characters in input gracefully', () => {
-      const text = '🎉 Hello 世界! ñoño 🚀\n'.repeat(100);
-
-      // Should not throw
-      const parts = splitMessage(text, 500);
-
-      expect(parts.length).toBeGreaterThan(1);
-      expect(parts.join('')).toBe(text);
-    });
-
-    it('should handle empty string gracefully', () => {
-      const parts = splitMessage('');
-
-      expect(parts).toHaveLength(1);
-      expect(parts[0]).toBe('');
     });
   });
 

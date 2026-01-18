@@ -24,6 +24,11 @@ const UPDATE_RATE_MIN = 1;
 const UPDATE_RATE_MAX = 10;
 const UPDATE_RATE_DEFAULT = 1;
 
+// Message size limit (characters before response is truncated)
+const MESSAGE_SIZE_MIN = 100;
+const MESSAGE_SIZE_MAX = 36000;  // 90% of Slack's 40000 char limit
+const MESSAGE_SIZE_DEFAULT = 500;
+
 export interface CommandResult {
   handled: boolean;
   response?: string;
@@ -96,6 +101,8 @@ export function parseCommand(
       return handleMaxThinkingTokens(argString, session);
     case 'update-rate':
       return handleUpdateRate(argString, session);
+    case 'message-size':
+      return handleMessageSize(argString, session);
     default:
       // Unknown command - return error
       return {
@@ -120,6 +127,7 @@ function handleHelp(): CommandResult {
 \`/model\` - Show model picker
 \`/max-thinking-tokens [n]\` - Set thinking budget (0=disable, 1024-128000, default=31999)
 \`/update-rate [n]\` - Set status update interval (1-10 seconds, default=1)
+\`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
 \`/continue\` - Get command to continue session in terminal
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
@@ -320,6 +328,7 @@ function handleStatus(session: Session): CommandResult {
       lastUsage: session.lastUsage,
       maxThinkingTokens: session.maxThinkingTokens,
       updateRateSeconds: session.updateRateSeconds,
+      messageSize: session.threadCharLimit,
     }),
   };
 }
@@ -637,5 +646,45 @@ function handleUpdateRate(args: string, session: Session): CommandResult {
     handled: true,
     response: `Update rate set to ${value}s.`,
     sessionUpdate: { updateRateSeconds: value },
+  };
+}
+
+/**
+ * /message-size [n] - Set or show message size limit
+ * - No args: Show current value
+ * - 100-36000: Set char limit before response is truncated
+ */
+function handleMessageSize(args: string, session: Session): CommandResult {
+  // No args - show current value
+  if (!args.trim()) {
+    const current = session.threadCharLimit;
+    if (current === undefined) {
+      return { handled: true, response: `Message size limit: ${MESSAGE_SIZE_DEFAULT} (default)` };
+    }
+    return { handled: true, response: `Message size limit: ${current}` };
+  }
+
+  // Parse value
+  const value = parseInt(args.trim(), 10);
+  if (isNaN(value)) {
+    return {
+      handled: true,
+      response: `Invalid number. Usage: /message-size <${MESSAGE_SIZE_MIN}-${MESSAGE_SIZE_MAX}> (default=${MESSAGE_SIZE_DEFAULT})`,
+    };
+  }
+
+  // Validate range
+  if (value < MESSAGE_SIZE_MIN || value > MESSAGE_SIZE_MAX) {
+    return {
+      handled: true,
+      response: `Value must be between ${MESSAGE_SIZE_MIN} and ${MESSAGE_SIZE_MAX}. Default is ${MESSAGE_SIZE_DEFAULT}.`,
+    };
+  }
+
+  // Set value
+  return {
+    handled: true,
+    response: `Message size limit set to ${value}.`,
+    sessionUpdate: { threadCharLimit: value },
   };
 }

@@ -80,6 +80,27 @@ describe('utils', () => {
       expect(markdownToSlack('**bold** and *italic*')).toBe('*bold* and _italic_');
     });
 
+    it('should convert bold __text__ (double underscore) to *text*', () => {
+      expect(markdownToSlack('__bold text__')).toBe('*bold text*');
+      expect(markdownToSlack('This is __bold__ here')).toBe('This is *bold* here');
+    });
+
+    it('should convert ***text*** (bold+italic) to _*text*_', () => {
+      expect(markdownToSlack('***bold and italic***')).toBe('_*bold and italic*_');
+      expect(markdownToSlack('This is ***emphasized*** text')).toBe('This is _*emphasized*_ text');
+    });
+
+    it('should convert ___text___ (bold+italic) to _*text*_', () => {
+      expect(markdownToSlack('___bold and italic___')).toBe('_*bold and italic*_');
+      expect(markdownToSlack('This is ___emphasized___ text')).toBe('This is _*emphasized*_ text');
+    });
+
+    it('should handle mixed bold/italic variants in same text', () => {
+      const input = '**bold** and __also bold__ with ***both*** styles';
+      const expected = '*bold* and *also bold* with _*both*_ styles';
+      expect(markdownToSlack(input)).toBe(expected);
+    });
+
     it('should convert strikethrough ~~text~~ to ~text~', () => {
       expect(markdownToSlack('~~strikethrough~~')).toBe('~strikethrough~');
     });

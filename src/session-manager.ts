@@ -46,6 +46,8 @@ export interface Session {
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
   // Status update rate configuration
   updateRateSeconds?: number;  // undefined = 1 (default), range 1-10
+  // Message size limit configuration
+  threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
 }
 
 /**
@@ -73,6 +75,8 @@ export interface ThreadSession {
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
   // Status update rate configuration (inherited from channel)
   updateRateSeconds?: number;  // undefined = 1 (default), range 1-10
+  // Message size limit configuration (inherited from channel)
+  threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
 }
 
 /**
@@ -293,6 +297,8 @@ export function saveThreadSession(
     lastUsage: existingThread?.lastUsage,  // Preserve usage data for /status and /context
     // Inherit thinking token config from channel
     maxThinkingTokens: existingThread?.maxThinkingTokens ?? store.channels[channelId].maxThinkingTokens,
+    // Inherit thread char limit config from channel
+    threadCharLimit: existingThread?.threadCharLimit ?? store.channels[channelId].threadCharLimit,
     ...session,
   };
 
@@ -355,6 +361,8 @@ export function getOrCreateThreadSession(
     resumeSessionAtMessageId: forkPoint?.messageId,
     // Inherit thinking token config from main session
     maxThinkingTokens: mainSession?.maxThinkingTokens,
+    // Inherit thread char limit config from main session
+    threadCharLimit: mainSession?.threadCharLimit,
   };
 
   // Save the new thread session

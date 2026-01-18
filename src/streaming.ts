@@ -6,8 +6,8 @@ import { markdownToPng } from './markdown-png.js';
 // Throttle interval for fallback mode (2 seconds = 30 updates/min, well under 50/min limit)
 const UPDATE_INTERVAL_MS = 2000;
 
-// Max message length for Slack (actual limit is 40K, but 4K is better for readability)
-const SLACK_MAX_LENGTH = 4000;
+// Default char limit for truncation (when to truncate long responses)
+const THREAD_CHAR_DEFAULT = 500;
 
 export interface StreamingOptions {
   channel: string;
@@ -236,102 +236,71 @@ export async function streamToSlack(
   }
 }
 
+
 // ============================================================================
-// Message Splitting for Long Responses
+// Text Truncation with Closed Formatting
 // ============================================================================
 
 /**
- * Split a long message into chunks that fit within Slack's limits.
- * Tries to split at natural boundaries (newlines, then spaces).
+ * Truncate text and close any open formatting markers.
+ * Handles: ``` code blocks, ` inline code, * bold, _ italic, ~ strikethrough
  */
-export function splitMessage(text: string, maxLength: number = SLACK_MAX_LENGTH): string[] {
-  if (text.length <= maxLength) {
-    return [text];
+export function truncateWithClosedFormatting(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+
+  // Reserve space for suffix and potential closing markers
+  const suffix = '\n\n_...truncated. Full response attached._';
+  const maxContent = limit - suffix.length - 10; // 10 chars buffer for closing markers
+
+  let truncated = text.substring(0, maxContent);
+
+  // Find good break point (newline or space)
+  const lastNewline = truncated.lastIndexOf('\n');
+  const lastSpace = truncated.lastIndexOf(' ');
+  const minBreak = Math.floor(maxContent * 0.8);
+  const breakPoint = Math.max(
+    lastNewline > minBreak ? lastNewline : -1,
+    lastSpace > minBreak ? lastSpace : -1,
+    minBreak
+  );
+  truncated = truncated.substring(0, breakPoint);
+
+  // Close open code blocks (```)
+  const codeBlockCount = (truncated.match(/```/g) || []).length;
+  const insideCodeBlock = codeBlockCount % 2 === 1;
+  if (insideCodeBlock) {
+    truncated += '\n```';
   }
 
-  const parts: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLength) {
-      parts.push(remaining);
-      break;
+  // Only check inline formatting if NOT inside a code block
+  // (inside code blocks, backticks/asterisks/etc are literal characters)
+  if (!insideCodeBlock) {
+    // Close open inline code (`) - count single backticks not part of ```
+    const inlineCodeCount = (truncated.match(/(?<!`)`(?!`)/g) || []).length;
+    if (inlineCodeCount % 2 === 1) {
+      truncated += '`';
     }
 
-    // Find a good split point
-    let splitAt = maxLength;
-
-    // Look for newline within last 500 chars of the limit
-    const lastNewline = remaining.lastIndexOf('\n', maxLength);
-    if (lastNewline > maxLength - 500 && lastNewline > 0) {
-      splitAt = lastNewline + 1;
-    } else {
-      // Look for space within last 200 chars
-      const lastSpace = remaining.lastIndexOf(' ', maxLength);
-      if (lastSpace > maxLength - 200 && lastSpace > 0) {
-        splitAt = lastSpace + 1;
-      }
-      // Otherwise just split at maxLength (may cut mid-word)
+    // Close open bold (*) - count single asterisks not part of ** or ***
+    const boldCount = (truncated.match(/(?<!\*)\*(?!\*)/g) || []).length;
+    if (boldCount % 2 === 1) {
+      truncated += '*';
     }
 
-    parts.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt);
-  }
-
-  return parts;
-}
-
-/**
- * Posted message info returned by postSplitResponse.
- */
-export interface PostedMessage {
-  ts: string;
-}
-
-/**
- * Post a potentially long response, splitting into multiple messages if needed.
- * Each part is posted with retry logic.
- *
- * @returns Array of posted message timestamps (for message mapping)
- */
-export async function postSplitResponse(
-  client: WebClient,
-  channelId: string,
-  text: string,
-  threadTs?: string
-): Promise<PostedMessage[]> {
-  const parts = splitMessage(text);
-  const postedMessages: PostedMessage[] = [];
-
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    const isLast = i === parts.length - 1;
-
-    // Add continuation indicator if split
-    const messageText = parts.length > 1 && !isLast
-      ? `${part}\n\n_... continued ..._`
-      : part;
-
-    const result = await withSlackRetry(() =>
-      client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: messageText,
-      })
-    );
-
-    // Capture the timestamp of the posted message
-    if (result && typeof result === 'object' && 'ts' in result) {
-      postedMessages.push({ ts: result.ts as string });
+    // Close open italic (_)
+    const italicCount = (truncated.match(/(?<!_)_(?!_)/g) || []).length;
+    if (italicCount % 2 === 1) {
+      truncated += '_';
     }
 
-    // Small delay between parts to maintain order
-    if (!isLast) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+    // Close open strikethrough (~)
+    const strikeCount = (truncated.match(/~/g) || []).length;
+    if (strikeCount % 2 === 1) {
+      truncated += '~';
     }
   }
 
-  return postedMessages;
+  return truncated + suffix;
 }
 
 // ============================================================================
@@ -339,9 +308,15 @@ export async function postSplitResponse(
 // ============================================================================
 
 /**
- * Upload markdown content as a .md file with response text as initial_comment.
- * This makes the file and response appear as a single message.
- * Returns the message timestamp on success (if available), null on failure.
+ * Upload markdown content as a .md file with properly formatted response text.
+ *
+ * Simplified behavior:
+ * - Short response (< limit): post full text, then upload file
+ * - Long response (> limit): post truncated text with closed formatting, then upload file
+ *
+ * No threading. No splitting. Just truncate and attach.
+ *
+ * Returns timestamps for message mapping, or null on complete failure.
  */
 export async function uploadMarkdownWithResponse(
   client: WebClient,
@@ -349,39 +324,52 @@ export async function uploadMarkdownWithResponse(
   markdown: string,
   slackFormattedResponse: string,
   threadTs?: string,
-  userId?: string  // For ephemeral failure notification
-): Promise<{ ts?: string } | null> {
+  userId?: string,
+  threadCharLimit?: number
+): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
+  const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
+
   try {
-    const result = await withSlackRetry(() =>
+    // Step 1: Post formatted text (truncated if needed)
+    const textToPost = slackFormattedResponse.length <= limit
+      ? slackFormattedResponse
+      : truncateWithClosedFormatting(slackFormattedResponse, limit);
+
+    const textResult = await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: textToPost,
+      })
+    );
+
+    const textTs = (textResult as any).ts;
+    const postedMessages: { ts: string }[] = textTs ? [{ ts: textTs }] : [];
+
+    // Step 2: Upload file (will appear after text message)
+    await withSlackRetry(() =>
       client.files.uploadV2({
         channel_id: channelId,
         thread_ts: threadTs,
         content: markdown,
         filename: `response-${Date.now()}.md`,
         filetype: 'markdown',
-        mimetype: 'text/markdown',
         title: 'Full Response (Markdown)',
-        initial_comment: slackFormattedResponse,
       } as any)
     );
-    // Check if upload succeeded
-    const file = (result as any).files?.[0];
-    if (!file) {
-      return null;  // Upload failed
-    }
-    // Try to get message timestamp (may not always be available)
-    const ts = file?.shares?.public?.[channelId]?.[0]?.ts ||
-               file?.shares?.private?.[channelId]?.[0]?.ts;
-    return { ts };  // Success - ts may be undefined but upload worked
+
+    return {
+      ts: textTs,
+      postedMessages,
+    };
   } catch (error) {
     console.error('Failed to upload markdown file:', error);
-    // Notify user of failure via ephemeral message
     if (userId) {
       try {
         await client.chat.postEphemeral({
           channel: channelId,
           user: userId,
-          text: '⚠️ Failed to attach .md file. The response will be posted without the attachment.',
+          text: `Failed to attach .md file: ${error instanceof Error ? error.message : 'Unknown error'}`,
         });
       } catch {
         // Ignore ephemeral failure
@@ -392,10 +380,17 @@ export async function uploadMarkdownWithResponse(
 }
 
 /**
- * Upload markdown content as both .md and .png files with response text as initial_comment.
+ * Upload markdown content as both .md and .png files with properly formatted response text.
  * The PNG provides a nicely rendered preview of the markdown.
  * Falls back gracefully if PNG generation fails.
- * Returns the message timestamp on success (if available), null on failure.
+ *
+ * Simplified behavior:
+ * - Short response (< limit): post full text, then upload files
+ * - Long response (> limit): post truncated text with closed formatting, then upload files
+ *
+ * No threading. No splitting. Just truncate and attach.
+ *
+ * Returns timestamps for message mapping, or null on complete failure.
  */
 export async function uploadMarkdownAndPngWithResponse(
   client: WebClient,
@@ -403,19 +398,37 @@ export async function uploadMarkdownAndPngWithResponse(
   markdown: string,
   slackFormattedResponse: string,
   threadTs?: string,
-  userId?: string  // For ephemeral failure notification
-): Promise<{ ts?: string } | null> {
+  userId?: string,
+  threadCharLimit?: number
+): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
+  const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
+
   try {
-    // Generate PNG from markdown (may return null on failure)
+    // Step 1: Post formatted text (truncated if needed)
+    const textToPost = slackFormattedResponse.length <= limit
+      ? slackFormattedResponse
+      : truncateWithClosedFormatting(slackFormattedResponse, limit);
+
+    const textResult = await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: textToPost,
+      })
+    );
+
+    const textTs = (textResult as any).ts;
+    const postedMessages: { ts: string }[] = textTs ? [{ ts: textTs }] : [];
+
+    // Step 2: Generate PNG from markdown (may return null on failure)
     const pngBuffer = await markdownToPng(markdown);
 
     // Prepare files array - always include markdown
     const timestamp = Date.now();
-    const files: Array<{ content: string | Buffer; filename: string; filetype: string; title: string }> = [
+    const files: Array<{ content: string | Buffer; filename: string; title: string }> = [
       {
         content: markdown,
         filename: `response-${timestamp}.md`,
-        filetype: 'markdown',
         title: 'Full Response (Markdown)',
       },
     ];
@@ -425,14 +438,12 @@ export async function uploadMarkdownAndPngWithResponse(
       files.push({
         content: pngBuffer,
         filename: `response-${timestamp}.png`,
-        filetype: 'png',
         title: 'Response Preview',
       });
     }
 
-    // Upload files with initial_comment
-    // Note: file_uploads requires Buffer for content, not raw strings
-    const result = await withSlackRetry(() =>
+    // Step 3: Upload files (will appear after text message)
+    await withSlackRetry(() =>
       client.files.uploadV2({
         channel_id: channelId,
         thread_ts: threadTs,
@@ -441,30 +452,21 @@ export async function uploadMarkdownAndPngWithResponse(
           filename: f.filename,
           title: f.title,
         })),
-        initial_comment: slackFormattedResponse,
       } as any)
     );
 
-    // Check if upload succeeded
-    const uploadedFiles = (result as any).files;
-    if (!uploadedFiles || uploadedFiles.length === 0) {
-      return null;  // Upload failed
-    }
-
-    // Try to get message timestamp from first file
-    const file = uploadedFiles[0];
-    const ts = file?.shares?.public?.[channelId]?.[0]?.ts ||
-               file?.shares?.private?.[channelId]?.[0]?.ts;
-    return { ts };  // Success - ts may be undefined but upload worked
+    return {
+      ts: textTs,
+      postedMessages,
+    };
   } catch (error) {
     console.error('Failed to upload markdown/png files:', error);
-    // Notify user of failure via ephemeral message
     if (userId) {
       try {
         await client.chat.postEphemeral({
           channel: channelId,
           user: userId,
-          text: '⚠️ Failed to attach files. The response will be posted without attachments.',
+          text: `Failed to attach files: ${error instanceof Error ? error.message : 'Unknown error'}`,
         });
       } catch {
         // Ignore ephemeral failure

@@ -77,8 +77,9 @@ export function normalizeTable(tableText: string): string {
  * Convert standard Markdown to Slack mrkdwn format.
  *
  * Differences:
- * - Bold: **text** → *text*
- * - Italic: *text* → _text_
+ * - Bold: **text** or __text__ → *text*
+ * - Italic: *text* or _text_ → _text_
+ * - Bold+Italic: ***text*** or ___text___ → *_text_*
  * - Strikethrough: ~~text~~ → ~text~
  * - Links: [text](url) → <url|text>
  * - Headers: # Header → *Header*
@@ -122,11 +123,21 @@ export function markdownToSlack(text: string): string {
   // Convert headers: # Header → temporary marker (will become bold)
   result = result.replace(/^#{1,6}\s+(.+)$/gm, '⟦B⟧$1⟦/B⟧');
 
-  // Convert bold: **text** → temporary marker
+  // Convert bold+italic combinations FIRST (before bold/italic separately)
+  // ***text*** → *_text_* (bold+italic with asterisks)
+  result = result.replace(/\*\*\*(.+?)\*\*\*/g, '⟦BI⟧$1⟦/BI⟧');
+  // ___text___ → *_text_* (bold+italic with underscores)
+  result = result.replace(/___(.+?)___/g, '⟦BI⟧$1⟦/BI⟧');
+
+  // Convert bold: **text** or __text__ → temporary marker
   result = result.replace(/\*\*(.+?)\*\*/g, '⟦B⟧$1⟦/B⟧');
+  result = result.replace(/__(.+?)__/g, '⟦B⟧$1⟦/B⟧');
 
   // Convert italic *text* → _text_ (safe now since bold/headers are marked)
   result = result.replace(/\*([^*\n]+)\*/g, '_$1_');
+
+  // Restore bold+italic markers to _*text*_ (italic wrapping bold)
+  result = result.replace(/⟦BI⟧/g, '_*').replace(/⟦\/BI⟧/g, '*_');
 
   // Restore bold markers to *text*
   result = result.replace(/⟦B⟧/g, '*').replace(/⟦\/B⟧/g, '*');

@@ -451,7 +451,7 @@ describe('slack-bot handlers', () => {
       expect(responseCall.text).toBe('Hello from Claude!');
     });
 
-    it('should upload .md file with response as initial_comment (one message)', async () => {
+    it('should upload .md file without initial_comment and post text separately', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
@@ -497,12 +497,11 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md and .png files with response as initial_comment
+      // Should upload .md and .png files WITHOUT initial_comment
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
           thread_ts: undefined,
-          initial_comment: expect.any(String),  // Slack-formatted response
           file_uploads: expect.arrayContaining([
             expect.objectContaining({
               file: expect.any(Buffer),  // Markdown as Buffer
@@ -512,9 +511,18 @@ describe('slack-bot handlers', () => {
           ]),
         })
       );
+      // Verify initial_comment is NOT present
+      const uploadCall = mockClient.files.uploadV2.mock.calls[0][0] as any;
+      expect(uploadCall.initial_comment).toBeUndefined();
+
+      // Text should be posted separately via chat.postMessage
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      // Response text should be posted (after status panel and activity log)
+      const responseCall = postCalls.find((call: any) => call[0].text?.includes('Hello'));
+      expect(responseCall).toBeDefined();
     });
 
-    it('should fall back to postSplitResponse when file upload fails', async () => {
+    it('should fall back to chat.postMessage when file upload fails', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
@@ -560,7 +568,7 @@ describe('slack-bot handlers', () => {
       expect(responseCall).toBeDefined();
     });
 
-    it('should upload .md file in thread when responding to thread', async () => {
+    it('should upload .md file in thread and post text separately', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
@@ -623,12 +631,11 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md and .png files to the thread
+      // Should upload .md and .png files to the thread WITHOUT initial_comment
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
           thread_ts: 'thread123',
-          initial_comment: expect.any(String),
           file_uploads: expect.arrayContaining([
             expect.objectContaining({
               file: expect.any(Buffer),  // Markdown as Buffer
@@ -638,6 +645,17 @@ describe('slack-bot handlers', () => {
           ]),
         })
       );
+      // Verify initial_comment is NOT present
+      const uploadCall = mockClient.files.uploadV2.mock.calls[0][0] as any;
+      expect(uploadCall.initial_comment).toBeUndefined();
+
+      // Text should be posted separately via chat.postMessage
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const responseCall = postCalls.find((call: any) =>
+        call[0].text?.includes('Thread response') &&
+        call[0].thread_ts === 'thread123'
+      );
+      expect(responseCall).toBeDefined();
     });
   });
 
