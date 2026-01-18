@@ -43,7 +43,7 @@ import {
   refreshModelCache,
   getModelInfo,
 } from './model-cache.js';
-import { postSplitResponse } from './streaming.js';
+import { postSplitResponse, uploadMarkdownWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining } from './utils.js';
 import { parseCommand } from './commands.js';
@@ -2031,14 +2031,37 @@ async function handleMessage(params: {
     }
 
     // Post complete response (only if not aborted and we have content)
-    // Use postSplitResponse to handle long messages that exceed Slack's limits
+    // Upload .md file with response as initial_comment so they appear as one message
     if (!isAborted(conversationKey) && fullResponse) {
-      const postedMessages = await postSplitResponse(
+      const slackResponse = markdownToSlack(fullResponse);
+      let postedMessages: { ts: string }[] = [];
+
+      // Try to upload .md file with response - file and text appear as one message
+      const uploadResult = await uploadMarkdownWithResponse(
         client,
         channelId,
-        markdownToSlack(fullResponse),
-        threadTs
+        fullResponse,
+        slackResponse,
+        threadTs,
+        userId
       );
+
+      if (uploadResult) {
+        // Success - file with response posted as one message
+        // ts may be undefined if Slack didn't return it, but upload succeeded
+        if (uploadResult.ts) {
+          postedMessages = [{ ts: uploadResult.ts }];
+        }
+        // If no ts, skip message mapping but don't post duplicate response
+      } else {
+        // Fallback - post response without .md file attachment
+        postedMessages = await postSplitResponse(
+          client,
+          channelId,
+          slackResponse,
+          threadTs
+        );
+      }
 
       // Link assistant message ID to Slack timestamps for message mapping (main channel only)
       // This enables point-in-time thread forking for future threads

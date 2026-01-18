@@ -1,4 +1,8 @@
-.PHONY: test test-watch test-coverage sdk-test all-test dev build start clean
+.PHONY: setup test test-watch test-coverage sdk-test all-test dev build start clean
+
+# Install all dependencies
+setup:
+	npm install
 
 # Run unit/mock tests (excludes live SDK tests)
 test:

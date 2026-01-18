@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { startStreamingSession, streamToSlack } from '../../streaming.js';
+import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse } from '../../streaming.js';
 import { createMockSlackClient } from '../__fixtures__/slack-messages.js';
 import { createMockClaudeStream, mockSystemInit, mockAssistantText, mockAssistantContentBlocks, mockResult } from '../__fixtures__/claude-messages.js';
 
@@ -253,6 +253,177 @@ describe('streaming', () => {
           text: 'Error: Claude API error',
         })
       );
+    });
+  });
+
+  describe('uploadMarkdownWithResponse', () => {
+    it('should upload .md file with response as initial_comment', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { public: { 'C123': [{ ts: 'msg123' }] } },
+        }],
+      });
+
+      const result = await uploadMarkdownWithResponse(
+        mockClient as any,
+        'C123',
+        '# Hello\n\nThis is **markdown**',
+        'Hello\n\nThis is *markdown*',  // Slack-formatted
+        'thread123'
+      );
+
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          thread_ts: 'thread123',
+          content: '# Hello\n\nThis is **markdown**',
+          initial_comment: 'Hello\n\nThis is *markdown*',
+          title: 'Full Response (Markdown)',
+        })
+      );
+      expect(result).toEqual({ ts: 'msg123' });
+    });
+
+    it('should generate unique .md filename with timestamp and markdown filetype', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ shares: { public: { 'C123': [{ ts: 'msg123' }] } } }],
+      });
+
+      await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw md', 'slack formatted');
+
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          filename: expect.stringMatching(/^response-\d+\.md$/),
+          filetype: 'markdown',
+        })
+      );
+    });
+
+    it('should work without threadTs (main channel)', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ shares: { public: { 'C123': [{ ts: 'msg123' }] } } }],
+      });
+
+      await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', 'formatted');
+
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          thread_ts: undefined,
+        })
+      );
+    });
+
+    it('should return null on upload failure', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+
+      const result = await uploadMarkdownWithResponse(
+        mockClient as any,
+        'C123',
+        'raw',
+        'formatted'
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it('should send ephemeral notification on failure when userId provided', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+
+      await uploadMarkdownWithResponse(
+        mockClient as any,
+        'C123',
+        'raw',
+        'formatted',
+        'thread123',
+        'U456'
+      );
+
+      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith({
+        channel: 'C123',
+        user: 'U456',
+        text: expect.stringContaining('Failed to attach .md file'),
+      });
+    });
+
+    it('should not send ephemeral notification when userId not provided', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+
+      await uploadMarkdownWithResponse(
+        mockClient as any,
+        'C123',
+        'raw',
+        'formatted',
+        'thread123'
+        // no userId
+      );
+
+      expect(mockClient.chat.postEphemeral).not.toHaveBeenCalled();
+    });
+
+    it('should ignore ephemeral failure silently', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+      mockClient.chat.postEphemeral = vi.fn().mockRejectedValue(new Error('Ephemeral failed'));
+
+      // Should not throw
+      const result = await uploadMarkdownWithResponse(
+        mockClient as any,
+        'C123',
+        'raw',
+        'formatted',
+        'thread123',
+        'U456'
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it('should return null when files array is empty', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({ ok: true, files: [] });
+
+      const result = await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', 'formatted');
+
+      expect(result).toBeNull();
+    });
+
+    it('should return success with undefined ts when shares not available', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }], // no shares - but upload succeeded
+      });
+
+      const result = await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', 'formatted');
+
+      // Should return success (not null) even without ts
+      expect(result).toEqual({ ts: undefined });
+    });
+
+    it('should handle private channel shares', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { private: { 'C123': [{ ts: 'private-msg-ts' }] } },
+        }],
+      });
+
+      const result = await uploadMarkdownWithResponse(mockClient as any, 'C123', 'raw', 'formatted');
+
+      expect(result).toEqual({ ts: 'private-msg-ts' });
     });
   });
 });

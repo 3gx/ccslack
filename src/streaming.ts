@@ -332,3 +332,60 @@ export async function postSplitResponse(
 
   return postedMessages;
 }
+
+// ============================================================================
+// Markdown File Attachment
+// ============================================================================
+
+/**
+ * Upload markdown content as a .md file with response text as initial_comment.
+ * This makes the file and response appear as a single message.
+ * Returns the message timestamp on success (if available), null on failure.
+ */
+export async function uploadMarkdownWithResponse(
+  client: WebClient,
+  channelId: string,
+  markdown: string,
+  slackFormattedResponse: string,
+  threadTs?: string,
+  userId?: string  // For ephemeral failure notification
+): Promise<{ ts?: string } | null> {
+  try {
+    const result = await withSlackRetry(() =>
+      client.files.uploadV2({
+        channel_id: channelId,
+        thread_ts: threadTs,
+        content: markdown,
+        filename: `response-${Date.now()}.md`,
+        filetype: 'markdown',
+        mimetype: 'text/markdown',
+        title: 'Full Response (Markdown)',
+        initial_comment: slackFormattedResponse,
+      } as any)
+    );
+    // Check if upload succeeded
+    const file = (result as any).files?.[0];
+    if (!file) {
+      return null;  // Upload failed
+    }
+    // Try to get message timestamp (may not always be available)
+    const ts = file?.shares?.public?.[channelId]?.[0]?.ts ||
+               file?.shares?.private?.[channelId]?.[0]?.ts;
+    return { ts };  // Success - ts may be undefined but upload worked
+  } catch (error) {
+    console.error('Failed to upload markdown file:', error);
+    // Notify user of failure via ephemeral message
+    if (userId) {
+      try {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: '⚠️ Failed to attach .md file. The response will be posted without the attachment.',
+        });
+      } catch {
+        // Ignore ephemeral failure
+      }
+    }
+    return null;
+  }
+}

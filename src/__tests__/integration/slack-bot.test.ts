@@ -450,6 +450,186 @@ describe('slack-bot handlers', () => {
       const responseCall = postCalls[2][0];
       expect(responseCall.text).toBe('Hello from Claude!');
     });
+
+    it('should upload .md file with response as initial_comment (one message)', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { public: { 'C123': [{ ts: 'file-msg-ts' }] } },
+        }],
+      });
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
+        { type: 'result', result: '# Hello\n\nThis is **markdown**' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> show table',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should upload .md file with response as initial_comment
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          thread_ts: undefined,
+          content: '# Hello\n\nThis is **markdown**',  // Raw markdown
+          initial_comment: expect.any(String),  // Slack-formatted response
+          filename: expect.stringMatching(/^response-\d+\.md$/),
+          filetype: 'markdown',
+        })
+      );
+    });
+
+    it('should fall back to postSplitResponse when file upload fails', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
+        { type: 'result', result: 'Fallback response' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> test',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should fall back to posting response via chat.postMessage
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const responseCall = postCalls.find((call: any) => call[0].text === 'Fallback response');
+      expect(responseCall).toBeDefined();
+    });
+
+    it('should upload .md file in thread when responding to thread', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { public: { 'C123': [{ ts: 'thread-file-ts' }] } },
+        }],
+      });
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'parent-session',
+        workingDir: '/test',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      vi.mocked(getOrCreateThreadSession).mockReturnValue({
+        session: {
+          sessionId: 'thread-session',
+          forkedFrom: 'parent-session',
+          workingDir: '/test',
+          mode: 'default',
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+          pathConfigured: true,
+          configuredPath: '/test/dir',
+          configuredBy: 'U123',
+          configuredAt: Date.now(),
+        },
+        isNewFork: false,
+      });
+
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'thread-session', model: 'claude-sonnet' },
+        { type: 'result', result: 'Thread response' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> reply in thread',
+          channel: 'C123',
+          ts: 'msg456',
+          thread_ts: 'thread123',
+        },
+        client: mockClient,
+      });
+
+      // Should upload .md file to the thread
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          thread_ts: 'thread123',
+          content: 'Thread response',
+          initial_comment: expect.any(String),
+          filename: expect.stringMatching(/^response-\d+\.md$/),
+        })
+      );
+    });
   });
 
   describe('button answer handler', () => {

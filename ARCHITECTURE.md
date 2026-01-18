@@ -2,51 +2,79 @@
 
 ## Overview
 
-The Slack bot enables interaction with Claude Code through Slack DMs, providing:
-- Streaming responses to Slack
-- Interactive questions via Block Kit
+The Slack bot enables interaction with Claude Code through Slack channels (via @mentions), providing:
+- Real-time status panel with activity log during processing
+- Interactive questions and tool approvals via Block Kit
 - Session management with terminal handoff
 - Thread-based session forking with point-in-time history
+- Extended thinking with configurable budget
+- Configurable update rate per session
+- Multiple permission modes (plan, default, bypassPermissions, acceptEdits)
 - Robust error handling with no crashes
 
 ## Architecture Diagram
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│              Slack Bot (Node.js + TypeScript)                │
-│                                                              │
-│  ┌──────────────────┐     ┌──────────────────────────────┐  │
-│  │  Slack Events    │────→│  Pre-Flight Checks           │  │
-│  │  (Socket Mode)   │     │  - Check ps for active       │  │
-│  │  message.im      │     │    claude process            │  │
-│  │  app_mention     │     │  - Show warning if found     │  │
-│  │  block_actions   │     └──────────────────────────────┘  │
-│  └──────────────────┘                ↓                       │
-│          ↓                                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  Session Manager                                     │   │
-│  │  - Simple DM/thread → sessionId mapping              │   │
-│  │  - Fork sessions for threads                         │   │
-│  │  - Persist to sessions.json                          │   │
-│  └──────────────────────────────────────────────────────┘   │
-│          ↓                                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  Claude Agent SDK                                    │   │
-│  │  - query() for agent execution                       │   │
-│  │  - Session resume/fork                               │   │
-│  │  - Claude Code preset                                │   │
-│  └──────────────────────────────────────────────────────┘   │
-│          ↓                             ↓                     │
-│  ┌─────────────────┐         ┌────────────────────────┐     │
-│  │ Slack Streaming │         │ MCP ask_user Tool      │     │
-│  │ API             │         │ Handler                │     │
-│  │ - startStream   │         │ - Block Kit UI         │     │
-│  │ - appendStream  │         │ - Abort detection      │     │
-│  │ - stopStream    │         │ - File-based answers   │     │
-│  └─────────────────┘         └────────────────────────┘     │
-│          ↓                                                   │
-│       ~/.claude/projects/ (SDK session storage)              │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Slack Bot (Node.js + TypeScript)                        │
+│                                                                             │
+│  ┌───────────────────┐                                                      │
+│  │   Slack Events    │     ┌────────────────────────────────────────────┐   │
+│  │   (Socket Mode)   │────→│  Event Handlers                            │   │
+│  │                   │     │  - app_mention: Channel @mentions          │   │
+│  │  - app_mention    │     │  - message: DM handling (disabled)         │   │
+│  │  - block_actions  │     │  - channel_deleted: Session cleanup        │   │
+│  │  - channel_deleted│     │  - block_actions: Button clicks            │   │
+│  └───────────────────┘     └────────────────────────────────────────────┘   │
+│                                          ↓                                   │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  Command Parser (commands.ts)                                        │   │
+│  │  /status, /mode, /model, /path, /context, /continue, /fork,          │   │
+│  │  /fork-thread, /clear, /compact, /thinking, /update-rate             │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                          ↓                                   │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  Session Manager (session-manager.ts)                                │   │
+│  │  - Channel → Session mapping (sessionId, mode, workingDir)           │   │
+│  │  - Thread sessions (forked from channel)                             │   │
+│  │  - Message mapping (Slack ts → SDK message ID)                       │   │
+│  │  - Activity log storage                                              │   │
+│  │  - Persist to sessions.json                                          │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                          ↓                                   │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  Claude Client (claude-client.ts)                                    │   │
+│  │  - query() wrapper for Claude Agent SDK                              │   │
+│  │  - Session resume/fork with resumeSessionAt                          │   │
+│  │  - Extended thinking (maxThinkingTokens)                             │   │
+│  │  - Model selection                                                   │   │
+│  │  - MCP server configuration                                          │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│            │                                       │                         │
+│            ▼                                       ▼                         │
+│  ┌────────────────────────┐          ┌───────────────────────────────────┐  │
+│  │  Real-Time UI          │          │  MCP Server (mcp-server.ts)       │  │
+│  │  (blocks.ts)           │          │  - ask_user tool                  │  │
+│  │                        │          │  - approve_action tool            │  │
+│  │  Message 1: Status     │          │  - File-based IPC                 │  │
+│  │  - Mode | Model        │          │  - 7-day expiry with reminders    │  │
+│  │  - Current activity    │          └───────────────────────────────────┘  │
+│  │  - Abort button        │                                                  │
+│  │  - Spinner animation   │                                                  │
+│  │                        │                                                  │
+│  │  Message 2: Activity   │                                                  │
+│  │  - Tool executions     │                                                  │
+│  │  - Thinking content    │                                                  │
+│  │  - Generating status   │                                                  │
+│  │                        │                                                  │
+│  │  Message 3: Response   │                                                  │
+│  │  - Claude's text       │                                                  │
+│  └────────────────────────┘                                                  │
+│                                                                             │
+│  Storage:                                                                   │
+│  └── sessions.json (bot state)                                              │
+│  └── ~/.claude/projects/<path>/<sessionId>.jsonl (SDK sessions)            │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Components
@@ -57,48 +85,64 @@ The Slack bot enables interaction with Claude Code through Slack DMs, providing:
 - Starts the bot
 
 ### Slack Bot (`src/slack-bot.ts`)
-- Handles `message.im` events for DM messages
-- Handles `app_mention` events for channel mentions
-- Handles `block_actions` for button clicks
-- Manages active queries and abort tracking
-- Posts streaming responses with header blocks
-- **Thread forking**: Detects `thread_ts` and auto-forks sessions
+- Handles `app_mention` events for channel @mentions
+- Handles `message.im` events for DM messages (currently limited)
+- Handles `block_actions` for button clicks (abort, tool approval, mode selection)
+- Handles `channel_deleted` for session cleanup
+- Manages active queries with abort capability via `ClaudeQuery.interrupt()`
+- Posts real-time status panel and activity log during processing
+- Coordinates tool approval flow in `default` permission mode
+- **Thread forking**: Detects `thread_ts` and auto-forks sessions with point-in-time history
 - **Error handling**: Top-level try/catch wraps all handlers
+- **Mutex locking**: Prevents race conditions during abort operations
 
 ### Claude Client (`src/claude-client.ts`)
 - Wraps Claude Code SDK `query()` function
-- Configures MCP server for ask_user tool
-- Maps modes to permission settings
-- Supports `forkSession` option for thread forking
+- Configures MCP server for `ask_user` and `approve_action` tools
+- Maps permission modes directly to SDK (`plan`, `default`, `bypassPermissions`, `acceptEdits`)
+- Supports `forkSession` and `resumeSessionAt` for point-in-time thread forking
+- Configures `maxThinkingTokens` for extended thinking budget
+- Enables `includePartialMessages` for real-time activity tracking
 
 ### MCP Server (`src/mcp-server.ts`)
-- Implements `ask_user` tool for Slack questions
-- Implements `approve_action` tool for approvals
-- Uses file-based communication with main process
-- Polls for answers in `/tmp/ccslack-answers/`
+- Standalone MCP server spawned by SDK as subprocess
+- Implements `ask_user` tool for interactive Slack questions
+- Implements `approve_action` tool for action approvals
+- Uses file-based IPC via `/tmp/ccslack-answers/` directory
+- Polls for answer files written by main process
+- 7-day expiry with 4-hour reminder intervals
+- Auto-abort after max reminders reached
 
 ### Session Manager (`src/session-manager.ts`)
 - Persists sessions to `sessions.json`
-- Maps users to sessions
-- Supports thread-based session forking
-- Handles corrupted session files gracefully
-- **Message mapping**: Maps Slack timestamps to SDK message IDs for point-in-time forking
+- **Session interface**: `sessionId`, `workingDir`, `mode`, `model`, `pathConfigured`, `lastUsage`, `maxThinkingTokens`, `updateRateSeconds`
+- **ThreadSession interface**: Inherits from Session, adds `forkedFrom`, `forkedFromThreadTs`, `resumeSessionAtMessageId`
+- **Message mapping**: `SlackMessageMapping` links Slack timestamps to SDK message IDs and session IDs
+- **Activity log storage**: Stores activity entries by conversation key for View Log modal
+- `previousSessionIds[]`: Tracks sessions before `/clear` for time-travel forking
+- Handles corrupted session files gracefully with migration support
 
 ### Streaming (`src/streaming.ts`)
-- Implements Slack native streaming API
-- Falls back to regular `chat.update` on errors
-- Handles rate limiting with throttling
-- **Message splitting**: Splits long responses (>4000 chars)
+- Implements Slack native streaming API (chat.startStream/appendStream/stopStream)
+- Falls back to throttled `chat.update` on errors (2-second interval)
+- **Message splitting**: Splits long responses (>4000 chars) at natural boundaries
+- `postSplitResponse()`: Posts multi-part messages with retry logic
 
 ### Blocks (`src/blocks.ts`)
 - Block Kit builders for all message types
-- Question blocks with buttons/dropdowns
-- Header blocks with status/stats
-- Approval and reminder blocks
+- **Status panel**: `buildStatusPanelBlocks()` - mode, model, current activity, spinner, abort button
+- **Activity log**: `buildActivityLogText()` - thinking, tool executions, generating status
+- **Collapsed activity**: `buildCollapsedActivityBlocks()` - summary with View Log/Download buttons
+- **Modal view**: `buildActivityLogModalView()` - paginated activity log with full thinking content
+- Question blocks with buttons/multi-select dropdowns
+- Tool approval blocks for manual approval mode
+- Plan approval blocks (proceed auto/manual, reject)
+- Mode and model selection blocks
+- Context usage display with visual progress bar
 
 ### Commands (`src/commands.ts`)
-- Parses @claude commands
-- Implements: mode, cwd, status, continue, fork, clear
+- Parses slash commands from user messages
+- Implements: `/status`, `/mode`, `/model`, `/path`, `/context`, `/continue`, `/fork`, `/fork-thread`, `/clear`, `/compact`, `/thinking`, `/update-rate`
 
 ### Error Handling (`src/errors.ts`)
 - `SlackBotError` class with typed error codes
@@ -112,45 +156,82 @@ The Slack bot enables interaction with Claude Code through Slack DMs, providing:
 - Exponential backoff with jitter
 - Respects `Retry-After` headers
 
+### Model Cache (`src/model-cache.ts`)
+- Caches available models from SDK
+- `getAvailableModels()`, `isModelAvailable()`, `refreshModelCache()`
+- Used for `/model` command and model selection UI
+
+### Abort Tracker (`src/abort-tracker.ts`)
+- Tracks aborted conversations to prevent race conditions
+- `markAborted()`, `isAborted()`, `clearAborted()`
+- Used during query interrupt flow
+
 ## Data Flow
 
 ```
-User DM → Slack Socket Mode → slack-bot.ts
-                                   │
-                          ┌────────┴────────┐
-                          │                 │
-                     Main DM?          Thread reply?
-                          │                 │
-                          ▼                 ▼
-                    Get Session      getOrCreateThreadSession()
-                          │                 │
-                          │            Is new fork?
-                          │                 │
-                          │          Yes ───┼─── No
-                          │           │     │     │
-                          │    Post fork    │  Use existing
-                          │    message      │  thread session
-                          │           │     │     │
-                          └─────┬─────┴─────┴─────┘
-                                │
-                                ▼
-                          Claude SDK Query
-                                │
-                    ┌───────────┴───────────┐
-                    ▼                       ▼
-            MCP ask_user tool        Streaming Response
-                    │                       │
-                    ▼                       ▼
-            Block Kit Question       postSplitResponse()
-                    │                       │
-                    ▼                       ▼
-            User clicks button        User sees response
+@mention in Channel → Slack Socket Mode → slack-bot.ts
+                                              │
+                                    ┌─────────┴──────────┐
+                                    │                    │
+                              Main channel?         Thread reply?
+                                    │                    │
+                                    ▼                    ▼
+                              Get Session      findForkPointMessageId()
+                                    │                    │
+                                    │           getOrCreateThreadSession(forkPoint)
+                                    │                    │
+                                    │              Is new fork?
+                                    │                    │
+                                    │             Yes ───┼─── No
+                                    │              │     │     │
+                                    │       Post fork    │  Use existing
+                                    │       notification │  thread session
+                                    │              │     │     │
+                                    └──────┬───────┴─────┴─────┘
+                                           │
+                                           ▼
+                              ┌─────────────────────────────┐
+                              │  Post Status Panel (Msg 1)  │
+                              │  Post Activity Log (Msg 2)  │
+                              └─────────────────────────────┘
+                                           │
+                                           ▼
+                              ┌─────────────────────────────┐
+                              │  Start Claude SDK Query     │
+                              │  - sessionId / forkSession  │
+                              │  - resumeSessionAt (fork)   │
+                              │  - maxThinkingTokens        │
+                              │  - canUseTool callback      │
+                              └─────────────────────────────┘
+                                           │
+                    ┌──────────────────────┼──────────────────────┐
+                    │                      │                      │
+                    ▼                      ▼                      ▼
+            SDK stream_event        MCP ask_user tool      canUseTool callback
+            (real-time updates)           │                (default mode)
+                    │                      │                      │
+                    ▼                      ▼                      ▼
+            Update Status Panel    Block Kit Question      Tool Approval UI
+            Update Activity Log           │                      │
+                    │                      │                      │
+                    │                      ▼                      ▼
+                    │              User clicks button      User approves/denies
+                    │                      │                      │
+                    │                      ▼                      ▼
+                    │              Write to /tmp file      Resolve Promise
+                    │                      │                      │
+                    │                      ▼                      │
+                    │              Claude continues ◄─────────────┘
                     │
                     ▼
-            Write answer to file
-                    │
-                    ▼
-            Claude continues
+            ┌───────────────────────────────┐
+            │  On result message:           │
+            │  - Update Status (complete)   │
+            │  - Collapse Activity Log      │
+            │  - Post Response (Msg 3)      │
+            │  - Save message mappings      │
+            │  - Save session/usage data    │
+            └───────────────────────────────┘
 ```
 
 ## Session Storage
@@ -160,33 +241,130 @@ Sessions are stored in `sessions.json`:
 ```json
 {
   "channels": {
-    "D123456": {
+    "C123456789": {
       "sessionId": "abc-123-def",
+      "previousSessionIds": ["old-session-1"],
       "workingDir": "/Users/you/project",
       "mode": "plan",
+      "model": "claude-sonnet-4-5-20250929",
       "createdAt": 1705123456789,
       "lastActiveAt": 1705234567890,
+      "pathConfigured": true,
+      "configuredPath": "/Users/you/project",
+      "configuredBy": "U12345678",
+      "configuredAt": 1705123456789,
+      "maxThinkingTokens": 31999,
+      "updateRateSeconds": 1,
+      "lastUsage": {
+        "inputTokens": 5000,
+        "outputTokens": 1200,
+        "cacheReadInputTokens": 3000,
+        "contextWindow": 200000,
+        "model": "claude-sonnet-4-5-20250929"
+      },
       "messageMap": {
-        "1234567890.001": { "sdkMessageId": "user_001", "type": "user" },
-        "1234567890.002": { "sdkMessageId": "msg_017pagAKz", "type": "assistant", "parentSlackTs": "1234567890.001" }
+        "1234567890.001": {
+          "sdkMessageId": "user_001",
+          "sessionId": "abc-123-def",
+          "type": "user"
+        },
+        "1234567890.002": {
+          "sdkMessageId": "msg_017pagAKz",
+          "sessionId": "abc-123-def",
+          "type": "assistant",
+          "parentSlackTs": "1234567890.001"
+        }
       },
       "threads": {
         "1234567890.002": {
           "sessionId": "ghi-456-jkl",
           "forkedFrom": "abc-123-def",
+          "forkedFromThreadTs": null,
           "resumeSessionAtMessageId": "msg_017pagAKz",
           "workingDir": "/Users/you/project",
           "mode": "plan",
+          "model": "claude-sonnet-4-5-20250929",
           "createdAt": 1705345678901,
-          "lastActiveAt": 1705456789012
+          "lastActiveAt": 1705456789012,
+          "pathConfigured": true,
+          "configuredPath": "/Users/you/project",
+          "configuredBy": "U12345678",
+          "configuredAt": 1705123456789,
+          "maxThinkingTokens": 31999,
+          "updateRateSeconds": 1
         }
+      },
+      "activityLogs": {
+        "C123456789_1234567890.001": [
+          { "timestamp": 1705123456789, "type": "starting" },
+          { "timestamp": 1705123457000, "type": "thinking", "thinkingContent": "..." },
+          { "timestamp": 1705123458000, "type": "tool_start", "tool": "Read" },
+          { "timestamp": 1705123459000, "type": "tool_complete", "tool": "Read", "durationMs": 1000 }
+        ]
       }
     }
   }
 }
 ```
 
-The `messageMap` links Slack message timestamps to SDK message IDs, enabling point-in-time forking. When a thread is created, `resumeSessionAtMessageId` stores the fork point.
+### Key Storage Concepts
+
+- **messageMap**: Links Slack message timestamps to SDK message IDs AND session IDs, enabling point-in-time forking even after `/clear`
+- **previousSessionIds**: Tracks old session IDs after `/clear` for time-travel forking
+- **resumeSessionAtMessageId**: SDK message ID to fork from (passed to `resumeSessionAt` in SDK query)
+- **activityLogs**: Preserved activity entries by conversation key for View Log modal
+- **pathConfigured**: Immutable after first set - prevents accidental working directory changes
+
+## Real-Time Updates Architecture
+
+During query processing, the bot maintains two Slack messages that are updated in real-time:
+
+### Message 1: Status Panel
+Updated every `updateRateSeconds` (configurable 1-10s, default 1s):
+- Header: "Claude is working..." with spinner animation
+- Mode and model display
+- Current activity (Thinking/Running: ToolName/Generating)
+- Tools completed count
+- Elapsed time
+- Abort button
+
+On completion:
+- Shows final stats: tokens in/out, context %, cost, duration
+- Removes abort button
+
+### Message 2: Activity Log
+Real-time log of processing activities:
+- **starting**: Initial "Analyzing request..." entry
+- **thinking**: Extended thinking content with rolling window (last 500 chars during processing)
+- **tool_start**: Tool name with "in progress" indicator
+- **tool_complete**: Checkmark with duration
+- **generating**: Text generation progress (chunks, chars)
+- **error**: Error messages
+
+On completion:
+- Collapses to summary: "X thinking + Y tools in Zs"
+- View Log button: Opens modal with paginated full log
+- Download .txt button: Exports full activity log
+
+### Activity Entry Types
+```typescript
+interface ActivityEntry {
+  timestamp: number;
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating';
+  tool?: string;
+  durationMs?: number;
+  message?: string;
+  thinkingContent?: string;     // Full content for modal
+  thinkingTruncated?: string;   // Last 500 chars for live display
+  thinkingInProgress?: boolean;
+  generatingChunks?: number;
+  generatingChars?: number;
+  generatingInProgress?: boolean;
+}
+```
+
+### Rolling Window Display
+When activity entries exceed MAX_LIVE_ENTRIES (300), switches to rolling window mode showing only the last ROLLING_WINDOW_SIZE (20) entries, with a notice about hidden earlier entries.
 
 ## Error Handling Philosophy
 
@@ -215,6 +393,7 @@ The `messageMap` links Slack message timestamps to SDK message IDs, enabling poi
 | Git conflicts | Warn but continue |
 | SDK error | Show user-friendly message |
 | Rate limited | Retry with backoff |
+| Corrupted sessions.json | Reset to empty, log warning |
 
 ## Thread Forking (Point-in-Time)
 
@@ -228,43 +407,129 @@ Thread context: A, B only (not C, D)
 
 ### How It Works
 
-1. **Message Mapping**: As messages flow, bot captures Slack timestamps → SDK message IDs
+1. **Message Mapping**: As messages flow, bot captures Slack timestamps → SDK message IDs (with session ID)
 2. **Fork Detection**: When user replies in thread, bot detects `thread_ts`
-3. **Fork Point Lookup**: `findForkPointMessageId()` finds the SDK message ID for the parent message
-4. **Point-in-Time Fork**: SDK `resumeSessionAt` parameter creates fork with history only up to that point
-5. **Notification**: Posts link to the exact message being forked from
+3. **Fork Point Lookup**: `findForkPointMessageId()` returns both SDK message ID AND session ID
+4. **Session Resolution**: Uses session ID from message mapping (not current main session) - enables "time travel" forking after `/clear`
+5. **Point-in-Time Fork**: SDK `resumeSessionAt` parameter creates fork with history only up to that point
+6. **Notification**: Posts link to the exact message being forked from
 
 ### Fork Flow
 
 1. Bot detects `thread_ts` in message event
-2. Checks if thread already has a session
-3. If new thread:
-   - Looks up `thread_ts` in `messageMap` to find SDK message ID
-   - Forks from parent session using `forkSession: true` and `resumeSessionAt`
+2. Calls `findForkPointMessageId(channelId, threadTs)` to get fork point
+3. Checks if thread already has a session via `getOrCreateThreadSession()`
+4. If new thread:
+   - Uses `forkPoint.sessionId` (NOT current main session) as parent
+   - Uses `forkPoint.messageId` for `resumeSessionAt`
+   - Forks from parent session using `forkSession: true`
    - Posts "Forked with conversation state through: [this message]" notification
-4. Creates new SDK session with limited history
-5. Saves thread session with `resumeSessionAtMessageId` to `sessions.json`
+5. Creates new SDK session with limited history
+6. Saves thread session with `resumeSessionAtMessageId` to `sessions.json`
+
+### Time Travel Forking
+
+After `/clear`, users can still fork from old messages:
+- `messageMap` entries include `sessionId` field
+- `findForkPointMessageId()` returns the session where the message lives
+- Thread forks from the OLD session, not the null current session
+- `previousSessionIds[]` tracks cleared sessions for reference
+
+### Thread-to-Thread Forking
+
+Users can fork from within a thread using `> fork: description` or `/fork-thread description`:
+1. Creates new top-level anchor message in channel
+2. Creates thread session pointing to source thread's session
+3. Posts link back to source thread's fork point
+4. New thread has its own independent history from fork point
 
 ### Graceful Degradation
 
 For older channels without message mappings:
-- Falls back to forking from latest state (current behavior)
-- New messages after deployment will have proper mappings
+- Falls back to forking from latest state
+- New messages after migration will have proper mappings
+- Migration adds `sessionId` to old entries using current session (best effort)
 
-## Testing
+## Permission Modes
+
+| Mode | SDK `permissionMode` | Tool Approval | Use Case |
+|------|---------------------|---------------|----------|
+| Plan | `plan` | SDK handles internally | Read-only exploration, planning |
+| Default | `default` | Uses `canUseTool` callback | Manual approval for each tool |
+| Bypass | `bypassPermissions` | No approval needed | Trusted automation |
+| AcceptEdits | `acceptEdits` | Accept code edits only | Allow edits, prompt for others |
+
+### canUseTool Callback (Default Mode)
+
+In `default` mode, SDK calls `canUseTool` for tool approval:
+- Must return `{ behavior: 'allow', updatedInput: {...} }` or `{ behavior: 'deny', message: '...' }`
+- 7-day timeout with 4-hour reminders
+- Auto-deny `mcp__ask-user__approve_action` to avoid double prompts
+- Tool approval UI shows tool name and input preview
+
+## Extended Thinking
+
+Configurable via `/thinking <tokens>` command:
+- `undefined`: Default (31,999 tokens)
+- `0`: Disabled (no thinking blocks)
+- `1-100000`: Custom budget
+
+Thinking content is:
+- Streamed in real-time to activity log (rolling window of last 500 chars)
+- Stored in full for View Log modal
+- Available for download via .txt export
+
+## MCP Server Integration
+
+The MCP server runs as a subprocess spawned by the SDK:
+
+```
+Main Process                    MCP Subprocess
+     │                               │
+     │  SDK spawns subprocess        │
+     │  ─────────────────────────────>
+     │                               │
+     │                   ask_user tool called
+     │                               │
+     │                   Posts to Slack
+     │                               │
+     │  User clicks button           │
+     │  ─────────────────>           │
+     │                               │
+     │  Writes /tmp/ccslack-answers/ │
+     │  ─────────────────────────────>
+     │                               │
+     │                   Polls for file
+     │                   Reads answer
+     │                   Returns to SDK
+```
+
+IPC mechanism:
+- Answer directory: `/tmp/ccslack-answers/`
+- File format: `{questionId}.json` containing `{ answer: string, timestamp: number }`
+- Main process writes, MCP subprocess polls and reads
+- File deleted after reading
+
+## Development Commands
 
 ```bash
-# Run all tests
-npm test
+# Setup
+make setup              # Install all dependencies
 
-# Run specific test file
-npm test -- src/__tests__/integration/graceful-failures.test.ts
-
-# Run with coverage
-npm test -- --coverage
+# Testing
+make test               # Run all tests
+make test-coverage      # Run with coverage
+make test-watch         # Watch mode
+npm test -- src/__tests__/unit/blocks.test.ts  # Run specific file
 
 # Type checking
 npx tsc --noEmit
+
+# Build & Run
+make build              # Compile TypeScript
+make dev                # Run dev server (auto-reload)
+make start              # Run production server
+make clean              # Remove dist/ and coverage/
 ```
 
 ## Environment Variables
@@ -273,15 +538,37 @@ npx tsc --noEmit
 |----------|-------------|
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (xoxb-...) |
 | `SLACK_APP_TOKEN` | App-Level Token for Socket Mode (xapp-...) |
+| `SLACK_SIGNING_SECRET` | Request signing secret |
 
 ## Commands
 
-| Command | Action |
-|---------|--------|
+| Command | Description |
+|---------|-------------|
 | `@claude <message>` | Send message to Claude |
-| `@claude /mode [plan\|auto\|ask]` | Set permission mode |
-| `@claude /cwd [path]` | Set working directory |
-| `@claude /status` | Show session status |
+| `@claude /status` | Show session status, context usage |
+| `@claude /mode` | Show mode selection buttons |
+| `@claude /model` | Show model selection buttons |
+| `@claude /path <dir>` | Set working directory (one-time) |
+| `@claude /context` | Show detailed context usage |
 | `@claude /continue` | Get terminal resume command |
 | `@claude /fork` | Get terminal fork command |
-| `@claude /clear` | Clear conversation context |
+| `@claude /fork-thread <desc>` | Fork current thread to new thread |
+| `@claude /clear` | Clear conversation history |
+| `@claude /compact` | Compact session to reduce context |
+| `@claude /thinking <tokens>` | Set extended thinking budget |
+| `@claude /update-rate <1-10>` | Set status update interval |
+| `> fork: <description>` | (In thread) Fork to new thread |
+
+## Session Cleanup
+
+Sessions are automatically cleaned up when a Slack channel is deleted (via `channel_deleted` event):
+
+**What gets deleted:**
+- Main channel session from `sessions.json`
+- All thread sessions from `sessions.json`
+- All previous sessions (from `/clear` operations)
+- All corresponding SDK `.jsonl` files from `~/.claude/projects/`
+
+**What is NOT deleted:**
+- Terminal forks created via `claude --resume <id> --fork-session`
+- These may be user's personal sessions and cannot be distinguished from bot-created forks
