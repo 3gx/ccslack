@@ -490,14 +490,14 @@ export interface StatusDisplayParams {
   configuredAt: number | null;
   lastUsage?: LastUsage;
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
-  updateRateSeconds?: number;  // undefined = 1 (default), range 1-10
+  updateRateSeconds?: number;  // undefined = 2 (default), range 1-10
   messageSize?: number;        // undefined = 500 (default), range 100-36000
 }
 
 // Default thinking tokens for display
 const THINKING_TOKENS_DEFAULT = 31999;
 // Default update rate for display
-const UPDATE_RATE_DEFAULT = 1;
+const UPDATE_RATE_DEFAULT = 2;
 // Default message size for display
 const MESSAGE_SIZE_DEFAULT = 500;
 

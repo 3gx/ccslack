@@ -11,7 +11,7 @@ const SKIP_LIVE = process.env.SKIP_SDK_TESTS === 'true';
  */
 describe.skipIf(SKIP_LIVE)('SDK Fork E2E', { timeout: 120000 }, () => {
 
-  describe('uuid field verification', () => {
+  describe.concurrent('uuid field verification', () => {
     it('assistant message has uuid field (not just message.id)', async () => {
       // This test ensures we're capturing the RIGHT field for forking
       const q = query({
@@ -49,7 +49,7 @@ describe.skipIf(SKIP_LIVE)('SDK Fork E2E', { timeout: 120000 }, () => {
     });
   });
 
-  describe('actual fork with resumeSessionAt', () => {
+  describe.concurrent('actual fork with resumeSessionAt', () => {
     it('fork using uuid succeeds and preserves context', async () => {
       // Step 1: Create session with memorable context
       const q1 = query({
@@ -163,7 +163,7 @@ describe.skipIf(SKIP_LIVE)('SDK Fork E2E', { timeout: 120000 }, () => {
     });
   });
 
-  describe('fork after /clear simulation', () => {
+  describe.concurrent('fork after /clear simulation', () => {
     it('can fork from OLD session after main session changes', async () => {
       // Simulates: user has session S1, runs /clear, then replies to old thread
 

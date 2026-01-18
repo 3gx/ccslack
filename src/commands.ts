@@ -22,7 +22,7 @@ const THINKING_TOKENS_DEFAULT = 31999;
 // Update rate limits (seconds)
 const UPDATE_RATE_MIN = 1;
 const UPDATE_RATE_MAX = 10;
-const UPDATE_RATE_DEFAULT = 1;
+const UPDATE_RATE_DEFAULT = 2;
 
 // Message size limit (characters before response is truncated)
 const MESSAGE_SIZE_MIN = 100;

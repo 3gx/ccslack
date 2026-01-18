@@ -1,5 +1,5 @@
 import { WebClient } from '@slack/web-api';
-import { markdownToSlack } from './utils.js';
+import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { markdownToPng } from './markdown-png.js';
 
@@ -329,6 +329,9 @@ export async function uploadMarkdownWithResponse(
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
   const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
 
+  // Strip markdown code fence wrapper if present (e.g., ```markdown ... ```)
+  const cleanMarkdown = stripMarkdownCodeFence(markdown);
+
   try {
     // Step 1: Post formatted text (truncated if needed)
     const textToPost = slackFormattedResponse.length <= limit
@@ -351,7 +354,7 @@ export async function uploadMarkdownWithResponse(
       client.files.uploadV2({
         channel_id: channelId,
         thread_ts: threadTs,
-        content: markdown,
+        content: cleanMarkdown,
         filename: `response-${Date.now()}.md`,
         filetype: 'markdown',
         title: 'Full Response (Markdown)',
@@ -403,6 +406,9 @@ export async function uploadMarkdownAndPngWithResponse(
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
   const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
 
+  // Strip markdown code fence wrapper if present (e.g., ```markdown ... ```)
+  const cleanMarkdown = stripMarkdownCodeFence(markdown);
+
   try {
     // Step 1: Post formatted text (truncated if needed)
     const textToPost = slackFormattedResponse.length <= limit
@@ -421,13 +427,13 @@ export async function uploadMarkdownAndPngWithResponse(
     const postedMessages: { ts: string }[] = textTs ? [{ ts: textTs }] : [];
 
     // Step 2: Generate PNG from markdown (may return null on failure)
-    const pngBuffer = await markdownToPng(markdown);
+    const pngBuffer = await markdownToPng(cleanMarkdown);
 
     // Prepare files array - always include markdown
     const timestamp = Date.now();
     const files: Array<{ content: string | Buffer; filename: string; title: string }> = [
       {
-        content: markdown,
+        content: cleanMarkdown,
         filename: `response-${timestamp}.md`,
         title: 'Full Response (Markdown)',
       },

@@ -178,3 +178,75 @@ export function formatTimeRemaining(ms: number): string {
 
   return parts.join(' ');
 }
+
+/**
+ * Strip markdown code fence wrapper if present.
+ *
+ * Strips when:
+ * - Explicit ```markdown or ```md tag
+ * - Empty ``` where SECOND fence (at line start) has a language tag
+ * - Empty ``` where second fence has no tag AND second-to-last has no tag
+ *
+ * Does NOT strip:
+ * - Code blocks with language tags (```python, etc.)
+ * - Empty ``` where second-to-last fence has a tag (unusual structure)
+ */
+export function stripMarkdownCodeFence(content: string): string {
+  // Must start with ``` and end with ``` on its own line
+  if (!content.startsWith('```')) return content;
+  if (!/\n```\s*$/.test(content)) return content;
+
+  // Find first newline
+  const firstNewline = content.indexOf('\n');
+  if (firstNewline === -1) return content;
+
+  // Extract first word as language tag (handles "js filename=x" info strings)
+  const tagLine = content.slice(3, firstNewline).trim();
+  const tag = tagLine.split(/\s/)[0].toLowerCase();
+
+  // Helper to extract inner content
+  const extractInner = (): string | null => {
+    const afterFirstLine = content.slice(firstNewline + 1);
+    const match = afterFirstLine.match(/^([\s\S]*)\n```\s*$/);
+    return match ? match[1].replace(/\r$/, '') : null;
+  };
+
+  // CASE A: Explicit markdown/md tag → strip
+  if (tag === 'markdown' || tag === 'md') {
+    return extractInner() ?? content;
+  }
+
+  // CASE B: Non-empty tag that isn't markdown/md → don't strip (it's code)
+  if (tag !== '') {
+    return content;
+  }
+
+  // CASE C: Empty tag → check fence structure
+  const afterFirstLine = content.slice(firstNewline + 1);
+
+  // Find all fences at line start (including closing fence)
+  const fenceMatches = [...afterFirstLine.matchAll(/^(```\w*)/gm)];
+
+  // 5.a: Check SECOND fence (first fence in afterFirstLine)
+  if (fenceMatches.length > 0) {
+    const secondFenceTag = fenceMatches[0][1].slice(3); // Remove ``` prefix
+    if (secondFenceTag) {
+      // Second fence has a tag → STRIP
+      return extractInner() ?? content;
+    }
+  }
+
+  // 5.b: Second fence has no tag (or doesn't exist)
+  // Check second-to-last fence (one before the closing fence)
+  if (fenceMatches.length >= 2) {
+    // Last fence is the closing ```, second-to-last is fenceMatches[length-2]
+    const secondToLastFenceTag = fenceMatches[fenceMatches.length - 2][1].slice(3);
+    if (secondToLastFenceTag) {
+      // Second-to-last has a tag → DON'T strip (unusual structure)
+      return content;
+    }
+  }
+
+  // Second-to-last has no tag (or doesn't exist) → STRIP
+  return extractInner() ?? content;
+}

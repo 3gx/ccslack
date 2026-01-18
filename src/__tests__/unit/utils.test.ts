@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatTimeRemaining, markdownToSlack, normalizeTable } from '../../utils.js';
+import { formatTimeRemaining, markdownToSlack, normalizeTable, stripMarkdownCodeFence } from '../../utils.js';
 
 describe('utils', () => {
   describe('formatTimeRemaining', () => {
@@ -392,6 +392,208 @@ Here are the findings:
       expect(result).toContain('After');
       expect(result).toContain('```');
       expect(result).not.toContain('**');
+    });
+  });
+
+  describe('stripMarkdownCodeFence', () => {
+    // === CASE A: Explicit markdown/md tags ===
+
+    it('strips ```markdown wrapper', () => {
+      const input = '```markdown\n# Header\n\nContent\n```';
+      expect(stripMarkdownCodeFence(input)).toBe('# Header\n\nContent');
+    });
+
+    it('strips ```md wrapper', () => {
+      const input = '```md\n# Header\n```';
+      expect(stripMarkdownCodeFence(input)).toBe('# Header');
+    });
+
+    it('strips case-insensitive (Markdown, MD)', () => {
+      expect(stripMarkdownCodeFence('```Markdown\nX\n```')).toBe('X');
+      expect(stripMarkdownCodeFence('```MD\nX\n```')).toBe('X');
+    });
+
+    it('strips markdown with info string', () => {
+      const input = '```markdown title="Doc"\n# Header\n```';
+      expect(stripMarkdownCodeFence(input)).toBe('# Header');
+    });
+
+    // === CASE B: Code language tags - DON'T strip ===
+
+    it('does NOT strip ```python blocks', () => {
+      const input = '```python\ndef foo(): pass\n```';
+      expect(stripMarkdownCodeFence(input)).toBe(input);
+    });
+
+    it('does NOT strip ```javascript blocks', () => {
+      const input = '```javascript\nconst x = 1;\n```';
+      expect(stripMarkdownCodeFence(input)).toBe(input);
+    });
+
+    it('does NOT strip ```bash blocks', () => {
+      const input = '```bash\necho hello\n```';
+      expect(stripMarkdownCodeFence(input)).toBe(input);
+    });
+
+    it('does NOT strip code blocks with info strings', () => {
+      const input = '```javascript filename="test.js"\ncode\n```';
+      expect(stripMarkdownCodeFence(input)).toBe(input);
+    });
+
+    // === CASE C.a: Empty first fence + nested fence has tag → STRIP ===
+
+    it('strips generic ``` when nested fence has python tag', () => {
+      const input = '```\n# Doc\n\n```python\ncode\n```\n\nEnd\n```';
+      const expected = '# Doc\n\n```python\ncode\n```\n\nEnd';
+      expect(stripMarkdownCodeFence(input)).toBe(expected);
+    });
+
+    it('strips generic ``` when nested fence has js tag', () => {
+      const input = '```\nIntro\n\n```js\nconst x=1;\n```\n```';
+      expect(stripMarkdownCodeFence(input)).toBe('Intro\n\n```js\nconst x=1;\n```');
+    });
+
+    it('strips when multiple nested code blocks with tags', () => {
+      const input = '```\n# Plan\n\n```python\na\n```\n\n```bash\nb\n```\n\nDone\n```';
+      const result = stripMarkdownCodeFence(input);
+      expect(result).toContain('```python');
+      expect(result).toContain('```bash');
+      expect(result).not.toMatch(/^```\n/);
+    });
+
+    // === CASE C.b: Empty first fence + only 2 fences → STRIP ===
+
+    it('strips generic ``` with no nested fences (simple wrapper)', () => {
+      const input = '```\n# Just markdown\nWith no code blocks\n```';
+      expect(stripMarkdownCodeFence(input)).toBe('# Just markdown\nWith no code blocks');
+    });
+
+    it('strips generic ``` wrapping plain text', () => {
+      const input = '```\nplain text content\n```';
+      expect(stripMarkdownCodeFence(input)).toBe('plain text content');
+    });
+
+    // === CASE C.c: Empty first fence + all nested fences empty → STRIP ===
+
+    it('strips when all nested fences are also empty', () => {
+      const input = '```\n# Markdown\n\n```\nnested text\n```\n\nMore\n```';
+      const expected = '# Markdown\n\n```\nnested text\n```\n\nMore';
+      expect(stripMarkdownCodeFence(input)).toBe(expected);
+    });
+
+    it('strips when multiple empty nested fences', () => {
+      const input = '```\ntext\n\n```\nblock1\n```\n\n```\nblock2\n```\n\nend\n```';
+      const result = stripMarkdownCodeFence(input);
+      expect(result.startsWith('text')).toBe(true);
+      expect(result).not.toMatch(/^```\n/);
+    });
+
+    // === Anchored regex - inline mentions DON'T trigger strip ===
+
+    it('strips even when inline ```python (not at line start)', () => {
+      // This is a simple wrapper with inline fence mention
+      const input = '```\nUse ```python to start a block\n```';
+      // Only 2 fences at line start, inline ```python doesn't count → STRIP
+      expect(stripMarkdownCodeFence(input)).toBe('Use ```python to start a block');
+    });
+
+    // === 5.b edge case: second-to-last has tag → DON'T strip ===
+
+    it('does NOT strip when second-to-last fence has tag (unusual structure)', () => {
+      // Fences: [```, ```, ```python, ```]
+      // Second fence (idx 1): ``` no tag → go to 5.b
+      // Second-to-last (idx 2): ```python HAS tag → DON'T strip
+      const input = '```\ntext\n\n```\nnested\n```python\n```';
+      expect(stripMarkdownCodeFence(input)).toBe(input);
+    });
+
+    // === Edge cases ===
+
+    it('returns unchanged when no opening fence', () => {
+      expect(stripMarkdownCodeFence('# Just markdown')).toBe('# Just markdown');
+    });
+
+    it('returns unchanged when no closing fence', () => {
+      expect(stripMarkdownCodeFence('```\nno close')).toBe('```\nno close');
+    });
+
+    it('returns unchanged when fence in middle of content', () => {
+      const input = 'before\n```markdown\n# X\n```\nafter';
+      expect(stripMarkdownCodeFence(input)).toBe(input);
+    });
+
+    it('handles CRLF line endings', () => {
+      const input = '```markdown\r\n# Header\r\n```';
+      expect(stripMarkdownCodeFence(input)).toBe('# Header');
+    });
+
+    it('handles trailing whitespace after closing fence', () => {
+      const input = '```markdown\n# X\n```   ';
+      expect(stripMarkdownCodeFence(input)).toBe('# X');
+    });
+
+    it('handles empty content', () => {
+      expect(stripMarkdownCodeFence('```markdown\n\n```')).toBe('');
+    });
+
+    // === Real-world example from user ===
+
+    it('strips SDK upgrade plan wrapped in generic ```', () => {
+      const input = '```\n# SDK Upgrade\n\n| Phase | Status |\n|---|---|\n| 1 | Done |\n\n```typescript\nconst x = 1;\n```\n\nEnd\n```';
+      const result = stripMarkdownCodeFence(input);
+      expect(result.startsWith('# SDK Upgrade')).toBe(true);
+      expect(result).toContain('```typescript');
+      expect(result).not.toMatch(/^```/);
+      expect(result).not.toMatch(/```\s*$/);
+    });
+  });
+
+  describe('stripMarkdownCodeFence + markdownToSlack integration', () => {
+    // This tests the correct workflow: strip fence FIRST, then convert to Slack format
+    // Bug fix: Previously markdownToSlack was called on raw response without stripping
+
+    it('workflow: strip then convert produces clean Slack output', () => {
+      // Claude wraps response in generic ```
+      const claudeResponse = '```\n# Summary\n\nHere is **bold** text and *italic* text.\n```';
+
+      // CORRECT workflow: strip first, then convert
+      const stripped = stripMarkdownCodeFence(claudeResponse);
+      const slackFormatted = markdownToSlack(stripped);
+
+      // Should NOT have fence wrapper
+      expect(slackFormatted).not.toMatch(/^```/);
+      expect(slackFormatted).not.toMatch(/```$/);
+
+      // Should have Slack formatting
+      expect(slackFormatted).toContain('*Summary*'); // Header converted to bold
+      expect(slackFormatted).toContain('*bold*');    // **bold** → *bold*
+      expect(slackFormatted).toContain('_italic_');  // *italic* → _italic_
+    });
+
+    it('workflow: preserves nested code blocks after stripping wrapper', () => {
+      const claudeResponse = '```\n# Code Example\n\n```python\ndef hello():\n    print("hi")\n```\n\nDone.\n```';
+
+      const stripped = stripMarkdownCodeFence(claudeResponse);
+      const slackFormatted = markdownToSlack(stripped);
+
+      // Outer wrapper stripped
+      expect(slackFormatted).not.toMatch(/^```\n#/);
+
+      // Inner code block preserved
+      expect(slackFormatted).toContain('```python');
+      expect(slackFormatted).toContain('def hello()');
+
+      // Header converted
+      expect(slackFormatted).toContain('*Code Example*');
+    });
+
+    it('workflow: handles markdown tag wrapper', () => {
+      const claudeResponse = '```markdown\n# Title\n\n**Important:** This is key.\n```';
+
+      const stripped = stripMarkdownCodeFence(claudeResponse);
+      const slackFormatted = markdownToSlack(stripped);
+
+      expect(slackFormatted).toBe('*Title*\n\n*Important:* This is key.');
     });
   });
 });

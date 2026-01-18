@@ -667,7 +667,7 @@ describe('commands', () => {
     it('should show default value when not set', () => {
       const result = parseCommand('/update-rate', mockSession);
       expect(result.handled).toBe(true);
-      expect(result.response).toContain('1s');
+      expect(result.response).toContain('2s');
       expect(result.response).toContain('default');
     });
 

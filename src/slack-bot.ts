@@ -36,6 +36,7 @@ import {
   buildActivityLogModalView,
   buildModelSelectionBlocks,
   buildModelDeprecatedBlocks,
+  buildStatusDisplayBlocks,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -45,7 +46,7 @@ import {
 } from './model-cache.js';
 import { uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
-import { markdownToSlack, formatTimeRemaining } from './utils.js';
+import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
 import { parseCommand } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { withSlackRetry } from './retry.js';
@@ -652,6 +653,7 @@ async function runClearSession(
       sessionId: null,  // Next message will start fresh without resuming
       previousSessionIds: previousIds,
       lastUsage: undefined,  // Clear stale usage data so /status and /context show fresh state
+      mode: 'default',  // Reset to safe default mode
     });
     console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
 
@@ -678,6 +680,29 @@ async function runClearSession(
       thread_ts: threadTs,
       text: `:wastebasket: *Session history cleared*\nStarting fresh. Your next message begins a new conversation.\nDuration: ${(elapsed / 1000).toFixed(1)}s`,
     });
+
+    // Show current configuration after clear
+    const updatedSession = getSession(channelId);
+    if (updatedSession) {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        blocks: buildStatusDisplayBlocks({
+          sessionId: updatedSession.sessionId,
+          mode: updatedSession.mode,
+          workingDir: updatedSession.workingDir,
+          lastActiveAt: updatedSession.lastActiveAt,
+          pathConfigured: updatedSession.pathConfigured,
+          configuredBy: updatedSession.configuredBy,
+          configuredAt: updatedSession.configuredAt,
+          lastUsage: updatedSession.lastUsage,
+          maxThinkingTokens: updatedSession.maxThinkingTokens,
+          updateRateSeconds: updatedSession.updateRateSeconds,
+          messageSize: updatedSession.threadCharLimit,
+        }),
+        text: 'Session status',
+      });
+    }
   }
 }
 
@@ -1750,8 +1775,8 @@ async function handleMessage(params: {
     };
 
     // Periodic timer to update spinner even when no events are firing
-    // Use session's configured update rate (default 1 second)
-    const updateIntervalMs = (session.updateRateSeconds ?? 1) * 1000;
+    // Use session's configured update rate (default 2 seconds)
+    const updateIntervalMs = (session.updateRateSeconds ?? 2) * 1000;
     const spinnerTimer = setInterval(() => {
       updateStatusMessages();
     }, updateIntervalMs);
@@ -1793,9 +1818,7 @@ async function handleMessage(params: {
           activeQuery.model = modelName;
         }
 
-        // Trigger immediate update with model name
-        processingState.lastUpdateTime = 0; // Force update
-        await updateStatusMessages();
+        // Model name updated in memory - timer will render at next interval
       }
 
       // Detect auto-compaction during regular queries
@@ -1834,7 +1857,7 @@ async function handleMessage(params: {
           processingState.currentThinkingContent = '';
           processingState.status = 'thinking';
           startThinkingEntry();
-          await updateStatusMessages();
+          // Timer will render updated status at next interval
         }
 
         // Thinking content streaming - update rolling window (last 500 chars)
@@ -1855,14 +1878,14 @@ async function handleMessage(params: {
           finalizeThinkingEntry(processingState.currentThinkingContent);
           processingState.currentThinkingContent = '';
           processingState.currentThinkingIndex = null;
-          await updateStatusMessages();
+          // Timer will render updated status at next interval
         }
 
         // Tool use started
         if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
           processingState.currentToolUseIndex = event.index;
           logToolStart(event.content_block.name);
-          await updateStatusMessages();
+          // Timer will render updated status at next interval
         }
 
         // Tool use completed (content_block_stop for tool_use block)
@@ -1871,14 +1894,14 @@ async function handleMessage(params: {
             processingState.currentTool) {
           logToolComplete();
           processingState.currentToolUseIndex = null;
-          await updateStatusMessages();
+          // Timer will render updated status at next interval
         }
 
         // Text block started - model is responding (no thinking/tools needed)
         if (event?.type === 'content_block_start' && event.content_block?.type === 'text') {
           if (processingState.status === 'starting') {
             processingState.status = 'thinking'; // Show as "thinking" even for direct text response
-            await updateStatusMessages();
+            // Timer will render updated status at next interval
           }
         }
       }
@@ -2035,14 +2058,17 @@ async function handleMessage(params: {
     // Post complete response (only if not aborted and we have content)
     // Upload .md/.png files and post text separately (initial_comment doesn't support mrkdwn)
     if (!isAborted(conversationKey) && fullResponse) {
-      const slackResponse = markdownToSlack(fullResponse);
+      // Strip markdown code fence wrapper BEFORE converting to Slack format
+      // Claude sometimes wraps output in ``` or ```markdown fences
+      const strippedResponse = stripMarkdownCodeFence(fullResponse);
+      const slackResponse = markdownToSlack(strippedResponse);
       let postedMessages: { ts: string }[] = [];
 
       // Try to upload .md and .png files with response text posted separately
       const uploadResult = await uploadMarkdownAndPngWithResponse(
         client,
         channelId,
-        fullResponse,
+        strippedResponse,
         slackResponse,
         threadTs,
         userId,
