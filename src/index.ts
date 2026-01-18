@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { startBot } from './slack-bot.js';
 import fs from 'fs';
+import { shutdownBrowser } from './markdown-png.js';
 
 // Answer directory for MCP <-> Slack communication
 export const ANSWER_DIR = '/tmp/ccslack-answers';
@@ -24,3 +25,16 @@ function initAnswerDirectory() {
 
 initAnswerDirectory();
 startBot();
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('Shutting down...');
+  await shutdownBrowser();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('Interrupted, shutting down...');
+  await shutdownBrowser();
+  process.exit(0);
+});

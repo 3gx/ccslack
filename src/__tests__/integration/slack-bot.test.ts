@@ -497,15 +497,19 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md file with response as initial_comment
+      // Should upload .md and .png files with response as initial_comment
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
           thread_ts: undefined,
-          content: '# Hello\n\nThis is **markdown**',  // Raw markdown
           initial_comment: expect.any(String),  // Slack-formatted response
-          filename: expect.stringMatching(/^response-\d+\.md$/),
-          filetype: 'markdown',
+          file_uploads: expect.arrayContaining([
+            expect.objectContaining({
+              file: expect.any(Buffer),  // Markdown as Buffer
+              filename: expect.stringMatching(/^response-\d+\.md$/),
+              title: 'Full Response (Markdown)',
+            }),
+          ]),
         })
       );
     });
@@ -619,14 +623,19 @@ describe('slack-bot handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md file to the thread
+      // Should upload .md and .png files to the thread
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
           thread_ts: 'thread123',
-          content: 'Thread response',
           initial_comment: expect.any(String),
-          filename: expect.stringMatching(/^response-\d+\.md$/),
+          file_uploads: expect.arrayContaining([
+            expect.objectContaining({
+              file: expect.any(Buffer),  // Markdown as Buffer
+              filename: expect.stringMatching(/^response-\d+\.md$/),
+              title: 'Full Response (Markdown)',
+            }),
+          ]),
         })
       );
     });

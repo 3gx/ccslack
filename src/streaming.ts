@@ -1,6 +1,7 @@
 import { WebClient } from '@slack/web-api';
 import { markdownToSlack } from './utils.js';
 import { withSlackRetry } from './retry.js';
+import { markdownToPng } from './markdown-png.js';
 
 // Throttle interval for fallback mode (2 seconds = 30 updates/min, well under 50/min limit)
 const UPDATE_INTERVAL_MS = 2000;
@@ -381,6 +382,89 @@ export async function uploadMarkdownWithResponse(
           channel: channelId,
           user: userId,
           text: '⚠️ Failed to attach .md file. The response will be posted without the attachment.',
+        });
+      } catch {
+        // Ignore ephemeral failure
+      }
+    }
+    return null;
+  }
+}
+
+/**
+ * Upload markdown content as both .md and .png files with response text as initial_comment.
+ * The PNG provides a nicely rendered preview of the markdown.
+ * Falls back gracefully if PNG generation fails.
+ * Returns the message timestamp on success (if available), null on failure.
+ */
+export async function uploadMarkdownAndPngWithResponse(
+  client: WebClient,
+  channelId: string,
+  markdown: string,
+  slackFormattedResponse: string,
+  threadTs?: string,
+  userId?: string  // For ephemeral failure notification
+): Promise<{ ts?: string } | null> {
+  try {
+    // Generate PNG from markdown (may return null on failure)
+    const pngBuffer = await markdownToPng(markdown);
+
+    // Prepare files array - always include markdown
+    const timestamp = Date.now();
+    const files: Array<{ content: string | Buffer; filename: string; filetype: string; title: string }> = [
+      {
+        content: markdown,
+        filename: `response-${timestamp}.md`,
+        filetype: 'markdown',
+        title: 'Full Response (Markdown)',
+      },
+    ];
+
+    // Add PNG if generation succeeded
+    if (pngBuffer) {
+      files.push({
+        content: pngBuffer,
+        filename: `response-${timestamp}.png`,
+        filetype: 'png',
+        title: 'Response Preview',
+      });
+    }
+
+    // Upload files with initial_comment
+    // Note: file_uploads requires Buffer for content, not raw strings
+    const result = await withSlackRetry(() =>
+      client.files.uploadV2({
+        channel_id: channelId,
+        thread_ts: threadTs,
+        file_uploads: files.map((f) => ({
+          file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
+          filename: f.filename,
+          title: f.title,
+        })),
+        initial_comment: slackFormattedResponse,
+      } as any)
+    );
+
+    // Check if upload succeeded
+    const uploadedFiles = (result as any).files;
+    if (!uploadedFiles || uploadedFiles.length === 0) {
+      return null;  // Upload failed
+    }
+
+    // Try to get message timestamp from first file
+    const file = uploadedFiles[0];
+    const ts = file?.shares?.public?.[channelId]?.[0]?.ts ||
+               file?.shares?.private?.[channelId]?.[0]?.ts;
+    return { ts };  // Success - ts may be undefined but upload worked
+  } catch (error) {
+    console.error('Failed to upload markdown/png files:', error);
+    // Notify user of failure via ephemeral message
+    if (userId) {
+      try {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: '⚠️ Failed to attach files. The response will be posted without attachments.',
         });
       } catch {
         // Ignore ephemeral failure

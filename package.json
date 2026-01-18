@@ -21,11 +21,15 @@
     "@slack/web-api": "^7.8.0",
     "async-mutex": "^0.5.0",
     "dotenv": "^16.4.0",
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.1.0",
+    "puppeteer": "^24.35.0",
     "remove-markdown": "^0.6.3",
     "table": "^6.9.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^4.0.17",
     "tsx": "^4.19.0",

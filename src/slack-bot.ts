@@ -43,7 +43,7 @@ import {
   refreshModelCache,
   getModelInfo,
 } from './model-cache.js';
-import { postSplitResponse, uploadMarkdownWithResponse } from './streaming.js';
+import { postSplitResponse, uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining } from './utils.js';
 import { parseCommand } from './commands.js';
@@ -2036,8 +2036,8 @@ async function handleMessage(params: {
       const slackResponse = markdownToSlack(fullResponse);
       let postedMessages: { ts: string }[] = [];
 
-      // Try to upload .md file with response - file and text appear as one message
-      const uploadResult = await uploadMarkdownWithResponse(
+      // Try to upload .md and .png files with response - files and text appear as one message
+      const uploadResult = await uploadMarkdownAndPngWithResponse(
         client,
         channelId,
         fullResponse,
