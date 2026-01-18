@@ -5,8 +5,9 @@ setup:
 	npm install
 
 # Run unit/mock tests (excludes live SDK tests)
+# Configure parallel workers with JOBS=n (default 8)
 test:
-	npm test
+	npx vitest run --exclude='src/__tests__/sdk-live/**' --maxWorkers=$(JOBS)
 
 # Run all tests (unit + live SDK)
 all-test:
