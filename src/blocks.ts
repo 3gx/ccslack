@@ -1257,6 +1257,7 @@ const THINKING_TRUNCATE_LENGTH = 500;
 const MAX_LIVE_ENTRIES = 300;
 const ROLLING_WINDOW_SIZE = 20;
 const MODAL_PAGE_SIZE = 15;
+export const ACTIVITY_LOG_MAX_CHARS = 2000; // 1000 char headroom from 3000 char block limit
 
 /**
  * Parameters for status panel blocks.
@@ -1520,10 +1521,77 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
 }
 
 /**
+ * Parameters for combined status blocks (activity log + status panel).
+ */
+export interface CombinedStatusParams extends StatusPanelParams {
+  activityLog: ActivityEntry[];
+  inProgress: boolean;
+}
+
+/**
+ * Build combined status blocks (activity log + status panel in single message).
+ * Activity log at top, status panel + abort button at bottom.
+ * This keeps the abort button always visible during long thinking sessions.
+ */
+export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[] {
+  const { activityLog, inProgress, ...statusParams } = params;
+  const blocks: Block[] = [];
+
+  // 1. Activity log section (top)
+  const activityText = buildActivityLogText(activityLog, inProgress, ACTIVITY_LOG_MAX_CHARS);
+  blocks.push({
+    type: 'section',
+    text: { type: 'mrkdwn', text: activityText },
+  });
+
+  // 2. Divider
+  blocks.push({ type: 'divider' });
+
+  // 3. Status panel blocks (bottom)
+  blocks.push(...buildStatusPanelBlocks(statusParams));
+
+  return blocks;
+}
+
+/**
+ * Parameters for combined completion blocks.
+ */
+export interface CombinedCompletionParams extends StatusPanelParams {
+  thinkingBlockCount: number;
+  durationMs: number;
+}
+
+/**
+ * Build combined completion blocks (collapsed activity summary + status panel).
+ * Shows summary with View Log/Download buttons + completion stats.
+ */
+export function buildCombinedCompletionBlocks(params: CombinedCompletionParams): Block[] {
+  const { thinkingBlockCount, durationMs, ...statusParams } = params;
+  const blocks: Block[] = [];
+
+  // 1. Collapsed activity summary with View Log / Download buttons
+  blocks.push(...buildCollapsedActivityBlocks(
+    thinkingBlockCount,
+    statusParams.toolsCompleted,
+    durationMs,
+    statusParams.conversationKey
+  ));
+
+  // 2. Divider
+  blocks.push({ type: 'divider' });
+
+  // 3. Status panel completion
+  blocks.push(...buildStatusPanelBlocks(statusParams));
+
+  return blocks;
+}
+
+/**
  * Build activity log text for live display (during processing).
  * Uses rolling window if too many entries.
+ * @param maxChars - Maximum characters for output (truncates from start if exceeded)
  */
-export function buildActivityLogText(entries: ActivityEntry[], inProgress: boolean): string {
+export function buildActivityLogText(entries: ActivityEntry[], inProgress: boolean, maxChars: number = Infinity): string {
   // Apply rolling window if too many entries
   const displayEntries = entries.length > MAX_LIVE_ENTRIES
     ? entries.slice(-ROLLING_WINDOW_SIZE)
@@ -1627,7 +1695,20 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
     lines.push(':brain: Analyzing request...');
   }
 
-  return lines.join('\n');
+  let result = lines.join('\n');
+
+  // Truncate from start if exceeds maxChars (keep most recent)
+  if (result.length > maxChars) {
+    const excess = result.length - maxChars + 50; // Room for "..." prefix
+    const breakPoint = result.indexOf('\n', excess);
+    if (breakPoint > 0) {
+      result = '...\n' + result.substring(breakPoint + 1);
+    } else {
+      result = '...' + result.substring(result.length - maxChars + 3);
+    }
+  }
+
+  return result;
 }
 
 /**

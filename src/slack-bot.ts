@@ -30,6 +30,8 @@ import {
   buildStatusPanelBlocks,
   buildActivityLogText,
   buildCollapsedActivityBlocks,
+  buildCombinedStatusBlocks,
+  buildCombinedCompletionBlocks,
   formatToolName,
   getToolEmoji,
   buildActivityLogModalView,
@@ -138,8 +140,7 @@ const busyConversations = new Set<string>();
 // Track active queries for abort capability
 interface ActiveQuery {
   query: ClaudeQuery;
-  statusMsgTs: string;           // Message 1: Status panel
-  activityLogMsgTs: string;      // Message 2: Activity log
+  statusMsgTs: string;           // Combined message: Activity log + Status panel
   mode: PermissionMode;
   model?: string;
   processingState: ProcessingState;
@@ -1776,14 +1777,17 @@ async function handleMessage(params: {
     planFilePath: session.planFilePath || null,
   };
 
-  // Post Message 1: Status panel (Block Kit with Abort)
+  // Post single combined message (activity log + status panel)
+  // Activity log at top, status panel with abort button at bottom
   let statusMsgTs: string | undefined;
   try {
-    const statusResult = await withSlackRetry(async () =>
+    const combinedResult = await withSlackRetry(async () =>
       client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
-        blocks: buildStatusPanelBlocks({
+        blocks: buildCombinedStatusBlocks({
+          activityLog: processingState.activityLog,
+          inProgress: true,
           status: 'starting',
           mode: session.mode,
           toolsCompleted: 0,
@@ -1794,25 +1798,9 @@ async function handleMessage(params: {
         text: 'Claude is starting...',
       })
     );
-    statusMsgTs = (statusResult as { ts?: string }).ts;
+    statusMsgTs = (combinedResult as { ts?: string }).ts;
   } catch (error) {
-    console.error('Error posting status panel message:', error);
-  }
-
-  // Post Message 2: Activity log (text)
-  let activityLogMsgTs: string | undefined;
-  try {
-    const activityResult = await withSlackRetry(async () =>
-      client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        // Use buildActivityLogText to render starting entry (not static placeholder)
-        text: buildActivityLogText(processingState.activityLog, true),
-      })
-    );
-    activityLogMsgTs = (activityResult as { ts?: string }).ts;
-  } catch (error) {
-    console.error('Error posting activity log message:', error);
+    console.error('Error posting combined status message:', error);
   }
 
   // Spinner timer - declared outside try block so it can be cleaned up in finally
@@ -1927,12 +1915,11 @@ async function handleMessage(params: {
       },
     });
 
-    // Track active query for abort capability (with both message timestamps)
-    if (statusMsgTs && activityLogMsgTs) {
+    // Track active query for abort capability
+    if (statusMsgTs) {
       activeQueries.set(conversationKey, {
         query: claudeQuery,
         statusMsgTs,
-        activityLogMsgTs,
         mode: session.mode,
         processingState,
       });
@@ -2130,7 +2117,7 @@ async function handleMessage(params: {
 
         const elapsedMs = now - processingState.startTime;
 
-        // Update Message 1: Status panel
+        // Update combined message (activity log + status panel)
         if (statusMsgTs) {
           try {
             await withSlackRetry(
@@ -2138,7 +2125,9 @@ async function handleMessage(params: {
                 client.chat.update({
                   channel: channelId,
                   ts: statusMsgTs,
-                  blocks: buildStatusPanelBlocks({
+                  blocks: buildCombinedStatusBlocks({
+                    activityLog: processingState.activityLog,
+                    inProgress: true,
                     status: processingState.status,
                     mode: session.mode,
                     model: processingState.model,
@@ -2154,24 +2143,7 @@ async function handleMessage(params: {
               { onRateLimit: handleRateLimit }
             );
           } catch (error) {
-            console.error('Error updating status panel:', error);
-          }
-        }
-
-        // Update Message 2: Activity log
-        if (activityLogMsgTs) {
-          try {
-            await withSlackRetry(
-              () =>
-                client.chat.update({
-                  channel: channelId,
-                  ts: activityLogMsgTs,
-                  text: buildActivityLogText(processingState.activityLog, true),
-                }),
-              { onRateLimit: handleRateLimit }
-            );
-          } catch (error) {
-            console.error('Error updating activity log:', error);
+            console.error('Error updating combined status:', error);
           }
         }
       });
@@ -2462,20 +2434,22 @@ async function handleMessage(params: {
     // Final elapsed time
     const finalDurationMs = processingState.durationMs ?? (Date.now() - processingState.startTime);
 
-    // Update both messages to completion state (only if not aborted)
+    // Update combined message to completion state (only if not aborted)
     if (!isAborted(conversationKey)) {
       const mutex = getUpdateMutex(conversationKey);
       await mutex.runExclusive(async () => {
         if (isAborted(conversationKey)) return;
 
-        // Update Message 1: Final status panel with stats
+        // Update combined message with collapsed activity summary + completion stats
         if (statusMsgTs) {
           try {
             await withSlackRetry(() =>
               client.chat.update({
                 channel: channelId,
                 ts: statusMsgTs,
-                blocks: buildStatusPanelBlocks({
+                blocks: buildCombinedCompletionBlocks({
+                  thinkingBlockCount: processingState.thinkingBlockCount,
+                  durationMs: finalDurationMs,
                   status: 'complete',
                   mode: session.mode,
                   model: processingState.model,
@@ -2486,35 +2460,14 @@ async function handleMessage(params: {
                   contextPercent,
                   compactPercent,
                   costUsd: processingState.costUsd,
-                  conversationKey,
+                  conversationKey: activityLogKey,  // Use activityLogKey for View Log/Download
                   rateLimitHits: processingState.rateLimitHits,
                 }),
                 text: 'Complete',
               })
             );
           } catch (error) {
-            console.error('Error updating status panel to complete:', error);
-          }
-        }
-
-        // Update Message 2: Collapse activity log to summary with buttons
-        if (activityLogMsgTs) {
-          try {
-            await withSlackRetry(() =>
-              client.chat.update({
-                channel: channelId,
-                ts: activityLogMsgTs,
-                blocks: buildCollapsedActivityBlocks(
-                  processingState.thinkingBlockCount,
-                  processingState.toolsCompleted,
-                  finalDurationMs,
-                  activityLogKey
-                ),
-                text: `Activity: ${processingState.thinkingBlockCount} thinking + ${processingState.toolsCompleted} tools`,
-              })
-            );
-          } catch (error) {
-            console.error('Error updating activity log to complete:', error);
+            console.error('Error updating to complete:', error);
           }
         }
       });
@@ -2699,19 +2652,28 @@ async function handleMessage(params: {
       return; // Exit early - don't show error to user
     }
 
-    // Update both messages to error state (only if not aborted)
+    // Update combined message to error state (only if not aborted)
     if (!isAborted(conversationKey)) {
       const mutex = getUpdateMutex(conversationKey);
       await mutex.runExclusive(async () => {
         if (isAborted(conversationKey)) return;
 
-        // Update status panel to error
+        // Add error to activity log
+        processingState.activityLog.push({
+          timestamp: Date.now(),
+          type: 'error',
+          message: error.message,
+        });
+
+        // Update combined message to error state
         if (statusMsgTs) {
           try {
             await client.chat.update({
               channel: channelId,
               ts: statusMsgTs,
-              blocks: buildStatusPanelBlocks({
+              blocks: buildCombinedStatusBlocks({
+                activityLog: processingState.activityLog,
+                inProgress: false,
                 status: 'error',
                 mode: session.mode,
                 toolsCompleted: processingState.toolsCompleted,
@@ -2722,25 +2684,7 @@ async function handleMessage(params: {
               text: `Error: ${error.message}`,
             });
           } catch (e) {
-            console.error('Error updating status panel to error:', e);
-          }
-        }
-
-        // Update activity log to show error
-        if (activityLogMsgTs) {
-          try {
-            processingState.activityLog.push({
-              timestamp: Date.now(),
-              type: 'error',
-              message: error.message,
-            });
-            await client.chat.update({
-              channel: channelId,
-              ts: activityLogMsgTs,
-              text: buildActivityLogText(processingState.activityLog, false),
-            });
-          } catch (e) {
-            console.error('Error updating activity log to error:', e);
+            console.error('Error updating to error:', e);
           }
         }
       });
@@ -2945,12 +2889,14 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
       await mutex.runExclusive(async () => {
         const elapsedMs = Date.now() - active.processingState.startTime;
 
-        // Update Message 1: Status panel to aborted
+        // Update combined message to aborted state
         try {
           await client.chat.update({
             channel: channelId,
             ts: active.statusMsgTs,
-            blocks: buildStatusPanelBlocks({
+            blocks: buildCombinedStatusBlocks({
+              activityLog: active.processingState.activityLog,
+              inProgress: false,
               status: 'aborted',
               mode: active.mode,
               model: active.model,
@@ -2961,18 +2907,7 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
             text: `${active.model || 'Claude'} | ${active.mode} | aborted`,
           });
         } catch (error) {
-          console.error('Error updating status panel to aborted:', error);
-        }
-
-        // Update Message 2: Activity log to aborted
-        try {
-          await client.chat.update({
-            channel: channelId,
-            ts: active.activityLogMsgTs,
-            text: buildActivityLogText(active.processingState.activityLog, false) + '\n:octagonal_sign: *Aborted by user*',
-          });
-        } catch (error) {
-          console.error('Error updating activity log to aborted:', error);
+          console.error('Error updating to aborted:', error);
         }
       });
     }

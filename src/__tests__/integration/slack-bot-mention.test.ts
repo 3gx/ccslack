@@ -298,39 +298,41 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Verify status panel message was posted
+      // Verify combined status message was posted
       const postMessageCalls = mockClient.chat.postMessage.mock.calls;
-      expect(postMessageCalls.length).toBeGreaterThanOrEqual(2); // Status panel + activity log + response
+      expect(postMessageCalls.length).toBeGreaterThanOrEqual(1); // Combined message + response
 
-      // First postMessage should be the status panel (Block Kit with Abort)
-      const statusPanelCall = postMessageCalls[0][0];
-      expect(statusPanelCall.channel).toBe('C123');
-      expect(statusPanelCall.text).toBe('Claude is starting...');
+      // First postMessage should be the combined status message (activity log + status panel)
+      const combinedCall = postMessageCalls[0][0];
+      expect(combinedCall.channel).toBe('C123');
+      expect(combinedCall.text).toBe('Claude is starting...');
 
-      // Verify status panel blocks: section (header), context (mode), actions (Abort)
-      const blocks = statusPanelCall.blocks;
+      // Verify combined blocks: activity section + divider + status panel (3 blocks)
+      const blocks = combinedCall.blocks;
       expect(blocks).toBeDefined();
-      expect(blocks.length).toBe(3);
+      expect(blocks.length).toBe(5); // activity section + divider + 3 status panel blocks
 
-      // First block: status header section
+      // First block: activity log section
       expect(blocks[0].type).toBe('section');
-      expect(blocks[0].text.text).toContain('Claude is working');
+      expect(blocks[0].text.text).toContain('Analyzing request');
 
-      // Second block: status context with mode
-      expect(blocks[1].type).toBe('context');
-      expect(blocks[1].elements[0].text).toContain('Plan');
+      // Second block: divider
+      expect(blocks[1].type).toBe('divider');
 
-      // Third block: Abort button
-      expect(blocks[2].type).toBe('actions');
-      expect(blocks[2].elements[0].type).toBe('button');
-      expect(blocks[2].elements[0].text.text).toBe('Abort');
-      expect(blocks[2].elements[0].style).toBe('danger');
-      expect(blocks[2].elements[0].action_id).toMatch(/^abort_query_/);
+      // Third block: status header section
+      expect(blocks[2].type).toBe('section');
+      expect(blocks[2].text.text).toContain('Claude is working');
 
-      // Second postMessage should be the activity log (text message)
-      const activityLogCall = postMessageCalls[1][0];
-      expect(activityLogCall.channel).toBe('C123');
-      expect(activityLogCall.text).toContain('Analyzing request');
+      // Fourth block: status context with mode
+      expect(blocks[3].type).toBe('context');
+      expect(blocks[3].elements[0].text).toContain('Plan');
+
+      // Fifth block: Abort button
+      expect(blocks[4].type).toBe('actions');
+      expect(blocks[4].elements[0].type).toBe('button');
+      expect(blocks[4].elements[0].text.text).toBe('Abort');
+      expect(blocks[4].elements[0].style).toBe('danger');
+      expect(blocks[4].elements[0].action_id).toMatch(/^abort_query_/);
     });
 
     it('should update header with stats on success', async () => {
@@ -447,12 +449,12 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should post: 1) status panel, 2) activity log, 3) response
+      // Should post: 1) combined status message, 2) response
       const postCalls = mockClient.chat.postMessage.mock.calls;
-      expect(postCalls.length).toBe(3);
+      expect(postCalls.length).toBe(2);
 
-      // Third call should be the response
-      const responseCall = postCalls[2][0];
+      // Second call should be the response
+      const responseCall = postCalls[1][0];
       expect(responseCall.text).toBe('Hello from Claude!');
     });
 

@@ -21,10 +21,13 @@ import {
   buildStatusPanelBlocks,
   buildActivityLogText,
   buildCollapsedActivityBlocks,
+  buildCombinedStatusBlocks,
+  buildCombinedCompletionBlocks,
   buildActivityLogModalView,
   getToolEmoji,
   formatToolName,
   ActivityEntry,
+  ACTIVITY_LOG_MAX_CHARS,
 } from '../../blocks.js';
 import type { ModelInfo } from '../../model-cache.js';
 import type { LastUsage } from '../../session-manager.js';
@@ -2747,6 +2750,257 @@ describe('blocks', () => {
 
       // 180000 / 200000 * 100 = 90
       expect(contextPercent).toBe(90);
+    });
+  });
+
+  describe('buildActivityLogText with maxChars', () => {
+    it('should return full text when under maxChars limit', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
+      ];
+      const text = buildActivityLogText(entries, true, 5000);
+      expect(text).toContain(':brain:');
+      expect(text).toContain(':white_check_mark: *Read*');
+      // Should NOT start with "..." (truncation indicator), but may contain "..." in content like "Analyzing request..."
+      expect(text.startsWith('...')).toBe(false);
+    });
+
+    it('should truncate from start when exceeds maxChars', () => {
+      const entries: ActivityEntry[] = [];
+      // Create enough entries to exceed 200 chars
+      for (let i = 0; i < 20; i++) {
+        entries.push({ timestamp: Date.now(), type: 'tool_complete', tool: `Tool${i}`, durationMs: 100 });
+      }
+      const text = buildActivityLogText(entries, true, 200);
+      // Should start with truncation indicator
+      expect(text.startsWith('...')).toBe(true);
+      // Should show most recent entries
+      expect(text).toContain('Tool19');
+    });
+
+    it('should truncate at newline boundary', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'FirstTool', durationMs: 100 },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'SecondTool', durationMs: 100 },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'ThirdTool', durationMs: 100 },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'FourthTool', durationMs: 100 },
+      ];
+      const text = buildActivityLogText(entries, true, 100);
+      // Should have "..." followed by newline when truncating at line boundary
+      expect(text.startsWith('...')).toBe(true);
+    });
+
+    it('should default to unlimited when maxChars not provided', () => {
+      const entries: ActivityEntry[] = [];
+      for (let i = 0; i < 50; i++) {
+        entries.push({ timestamp: Date.now(), type: 'tool_complete', tool: `Tool${i}`, durationMs: 100 });
+      }
+      const text = buildActivityLogText(entries, true);
+      // Should contain all entries without truncation
+      expect(text).toContain('Tool0');
+      expect(text).toContain('Tool49');
+      expect(text.startsWith('...')).toBe(false);
+    });
+
+    it('should respect ACTIVITY_LOG_MAX_CHARS constant', () => {
+      // Verify the constant is exported and has expected value
+      expect(ACTIVITY_LOG_MAX_CHARS).toBe(2000);
+    });
+  });
+
+  describe('buildCombinedStatusBlocks', () => {
+    const baseParams = {
+      status: 'starting' as const,
+      mode: 'bypassPermissions' as const,
+      toolsCompleted: 0,
+      elapsedMs: 0,
+      conversationKey: 'C123_thread456',
+      spinner: '|',
+    };
+
+    it('should return activity section + divider + status panel', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+      ];
+      const blocks = buildCombinedStatusBlocks({
+        ...baseParams,
+        activityLog: entries,
+        inProgress: true,
+      });
+
+      // Should have at least 4 blocks: activity section, divider, and status panel blocks
+      expect(blocks.length).toBeGreaterThanOrEqual(4);
+      // First block should be activity log section
+      expect(blocks[0].type).toBe('section');
+      expect((blocks[0] as any).text.text).toContain(':brain:');
+      // Second should be divider
+      expect(blocks[1].type).toBe('divider');
+      // Status panel blocks follow
+      expect(blocks.some(b => b.type === 'actions')).toBe(true);
+    });
+
+    it('should include abort button during processing', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+      ];
+      const blocks = buildCombinedStatusBlocks({
+        ...baseParams,
+        activityLog: entries,
+        inProgress: true,
+      });
+
+      const actionsBlock = blocks.find(b => b.type === 'actions');
+      expect(actionsBlock).toBeDefined();
+      const abortButton = (actionsBlock as any).elements.find(
+        (e: any) => e.action_id.startsWith('abort_query_')
+      );
+      expect(abortButton).toBeDefined();
+      expect(abortButton.style).toBe('danger');
+    });
+
+    it('should truncate activity log to maxChars', () => {
+      // Create entries that would exceed ACTIVITY_LOG_MAX_CHARS
+      const entries: ActivityEntry[] = [];
+      for (let i = 0; i < 100; i++) {
+        entries.push({
+          timestamp: Date.now(),
+          type: 'tool_complete',
+          tool: `VeryLongToolNameThatTakesUpSpace${i}`,
+          durationMs: 100,
+        });
+      }
+      const blocks = buildCombinedStatusBlocks({
+        ...baseParams,
+        activityLog: entries,
+        inProgress: true,
+      });
+
+      // Activity log section should have text under the limit
+      const activitySection = blocks[0];
+      expect((activitySection as any).text.text.length).toBeLessThanOrEqual(ACTIVITY_LOG_MAX_CHARS + 100); // Allow some margin
+    });
+
+    it('should show correct status during thinking', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'thinking', thinkingContent: 'Analyzing...', thinkingInProgress: true },
+      ];
+      const blocks = buildCombinedStatusBlocks({
+        ...baseParams,
+        status: 'thinking',
+        activityLog: entries,
+        inProgress: true,
+      });
+
+      // Activity section should show thinking
+      expect((blocks[0] as any).text.text).toContain(':brain:');
+      expect((blocks[0] as any).text.text).toContain('Thinking');
+    });
+  });
+
+  describe('buildCombinedCompletionBlocks', () => {
+    const baseParams = {
+      status: 'complete' as const,
+      mode: 'bypassPermissions' as const,
+      toolsCompleted: 5,
+      elapsedMs: 10000,
+      conversationKey: 'C123_thread456',
+    };
+
+    it('should return collapsed summary + divider + completion status', () => {
+      const blocks = buildCombinedCompletionBlocks({
+        ...baseParams,
+        thinkingBlockCount: 2,
+        durationMs: 10000,
+      });
+
+      // Should have collapsed activity blocks + divider + status panel blocks
+      expect(blocks.length).toBeGreaterThanOrEqual(4);
+      // First block should be collapsed summary
+      expect(blocks[0].type).toBe('section');
+      expect((blocks[0] as any).text.text).toContain(':clipboard:');
+      // Should have divider
+      expect(blocks.some(b => b.type === 'divider')).toBe(true);
+    });
+
+    it('should not include abort button on completion', () => {
+      const blocks = buildCombinedCompletionBlocks({
+        ...baseParams,
+        thinkingBlockCount: 1,
+        durationMs: 5000,
+      });
+
+      // Find all action blocks
+      const actionBlocks = blocks.filter(b => b.type === 'actions');
+      // Should have actions block for View Log/Download
+      expect(actionBlocks.length).toBeGreaterThan(0);
+      // But none should have abort button
+      for (const block of actionBlocks) {
+        const elements = (block as any).elements || [];
+        const abortButton = elements.find((e: any) => e.action_id?.startsWith('abort_'));
+        expect(abortButton).toBeUndefined();
+      }
+    });
+
+    it('should include View Log and Download buttons', () => {
+      const blocks = buildCombinedCompletionBlocks({
+        ...baseParams,
+        thinkingBlockCount: 1,
+        durationMs: 5000,
+      });
+
+      const actionsBlock = blocks.find(b =>
+        b.type === 'actions' && (b as any).elements?.some((e: any) =>
+          e.action_id?.includes('view_activity_log_')
+        )
+      );
+      expect(actionsBlock).toBeDefined();
+
+      const elements = (actionsBlock as any).elements;
+      const viewLogButton = elements.find((e: any) => e.action_id?.includes('view_activity_log_'));
+      const downloadButton = elements.find((e: any) => e.action_id?.includes('download_activity_log_'));
+
+      expect(viewLogButton).toBeDefined();
+      expect(viewLogButton.text.text).toBe('View Log');
+      expect(downloadButton).toBeDefined();
+      expect(downloadButton.text.text).toBe('Download .txt');
+    });
+
+    it('should show thinking + tools summary in collapsed block', () => {
+      const blocks = buildCombinedCompletionBlocks({
+        ...baseParams,
+        thinkingBlockCount: 3,
+        durationMs: 15000,
+      });
+
+      const summaryText = (blocks[0] as any).text.text;
+      expect(summaryText).toContain('3 thinking');
+      expect(summaryText).toContain('5 tool');
+      expect(summaryText).toContain('15.0s');
+    });
+
+    it('should show completion stats in status panel', () => {
+      const blocks = buildCombinedCompletionBlocks({
+        ...baseParams,
+        thinkingBlockCount: 1,
+        durationMs: 5000,
+        inputTokens: 1000,
+        outputTokens: 500,
+        contextPercent: 25,
+        costUsd: 0.05,
+      });
+
+      // Find context block with stats
+      const statsBlock = blocks.find(b =>
+        b.type === 'context' && (b as any).elements?.[0]?.text?.includes('in / ')
+      );
+      expect(statsBlock).toBeDefined();
+      expect((statsBlock as any).elements[0].text).toContain('1,000 in');
+      expect((statsBlock as any).elements[0].text).toContain('500 out');
+      expect((statsBlock as any).elements[0].text).toContain('25% ctx');
+      expect((statsBlock as any).elements[0].text).toContain('$0.0500');
     });
   });
 });
