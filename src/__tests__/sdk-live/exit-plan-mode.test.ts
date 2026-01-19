@@ -20,11 +20,12 @@ describe.skipIf(SKIP_LIVE)('ExitPlanMode stream events (live)', { timeout: 12000
     let accumulatedJson = '';
 
     const result = query({
-      prompt: 'Create a simple plan to run tests in a project. When done, call ExitPlanMode with allowedPrompts requesting permission to run tests.',
+      // Be very explicit: do NOT do any work, just create a text plan and call ExitPlanMode
+      prompt: 'Write a brief 2-sentence plan (do NOT execute anything) then immediately call ExitPlanMode with allowedPrompts containing one entry: {tool: "Bash", prompt: "run tests"}. Do not use any other tools.',
       options: {
         permissionMode: 'plan',
         includePartialMessages: true,  // REQUIRED for stream_event
-        maxTurns: 2,
+        maxTurns: 3,  // Give more turns in case model needs them
       },
     });
 

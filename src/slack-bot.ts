@@ -1282,11 +1282,42 @@ async function handleMessage(params: {
       }
       saveSession(channelId, commandResult.sessionUpdate);
 
-      // Live update: If a query is running, update its processingState immediately
-      // This allows /update-rate to take effect without waiting for next query
-      if (commandResult.sessionUpdate.updateRateSeconds !== undefined) {
-        const activeQuery = activeQueries.get(conversationKey);
-        if (activeQuery) {
+      // Live update: If a query is running, update its processingState and SDK settings immediately
+      // This allows config commands to take effect without waiting for next query
+      const activeQuery = activeQueries.get(conversationKey);
+      if (activeQuery) {
+        // Live mode update via SDK
+        if (commandResult.sessionUpdate.mode !== undefined) {
+          try {
+            await activeQuery.query.setPermissionMode(commandResult.sessionUpdate.mode);
+            activeQuery.mode = commandResult.sessionUpdate.mode;
+            console.log(`[LiveConfig] Updated active query mode to ${commandResult.sessionUpdate.mode}`);
+          } catch (err) {
+            console.error('[LiveConfig] Failed to update mode:', err);
+          }
+        }
+
+        // NOTE: Model changes (setModel) don't take effect mid-turn - they only apply
+        // to subsequent turns. Model selection is blocked while busy to avoid confusion.
+
+        // Live thinking tokens update via SDK
+        if (commandResult.sessionUpdate.maxThinkingTokens !== undefined) {
+          try {
+            // SDK expects null to clear limit, but 0 means disabled
+            // Pass 0 as 0 (which the SDK may treat as "no thinking")
+            // Pass undefined would mean "default", but we store explicit values
+            const tokens = commandResult.sessionUpdate.maxThinkingTokens === 0
+              ? null  // 0 means disabled → pass null to SDK to use default (then thinking happens but no extended budget)
+              : commandResult.sessionUpdate.maxThinkingTokens;
+            await activeQuery.query.setMaxThinkingTokens(tokens);
+            console.log(`[LiveConfig] Updated active query maxThinkingTokens to ${tokens}`);
+          } catch (err) {
+            console.error('[LiveConfig] Failed to update maxThinkingTokens:', err);
+          }
+        }
+
+        // updateRateSeconds - update ProcessingState directly
+        if (commandResult.sessionUpdate.updateRateSeconds !== undefined) {
           activeQuery.processingState.updateRateSeconds = commandResult.sessionUpdate.updateRateSeconds;
           console.log(`[LiveConfig] Updated active query updateRateSeconds to ${commandResult.sessionUpdate.updateRateSeconds}`);
         }
@@ -2627,6 +2658,19 @@ app.action(/^mode_(plan|default|bypassPermissions|acceptEdits)$/, async ({ actio
     // Update session with new mode
     saveSession(channelId, { mode });
 
+    // Live update: If a query is running, update SDK mode immediately
+    const conversationKey = getConversationKey(channelId, bodyWithChannel.message?.thread_ts);
+    const activeQuery = activeQueries.get(conversationKey);
+    if (activeQuery) {
+      try {
+        await activeQuery.query.setPermissionMode(mode);
+        activeQuery.mode = mode;
+        console.log(`[LiveConfig] Updated active query mode to ${mode} via button`);
+      } catch (err) {
+        console.error('[LiveConfig] Failed to update mode via button:', err);
+      }
+    }
+
     // Update the message to confirm selection
     if (bodyWithChannel.message?.ts) {
       try {
@@ -2650,11 +2694,39 @@ app.action(/^model_select_(.+)$/, async ({ action, ack, body, client }) => {
   const actionId = 'action_id' in action ? action.action_id : '';
   const modelId = actionId.replace('model_select_', '');
 
-  const bodyWithChannel = body as typeof body & { channel?: { id: string }; message?: { ts: string } };
+  const bodyWithChannel = body as typeof body & { channel?: { id: string }; message?: { ts: string; thread_ts?: string } };
   const channelId = bodyWithChannel.channel?.id;
   if (!channelId) return;
 
   console.log(`Model button clicked: ${modelId} for channel: ${channelId}`);
+
+  // Check if conversation is busy - model changes don't take effect mid-turn
+  // so we block them while a query is running to avoid confusion
+  const conversationKey = getConversationKey(channelId, bodyWithChannel.message?.thread_ts);
+  if (busyConversations.has(conversationKey)) {
+    // Update message to show busy error
+    if (bodyWithChannel.message?.ts) {
+      try {
+        await client.chat.update({
+          channel: channelId,
+          ts: bodyWithChannel.message.ts,
+          text: 'Cannot change model while processing',
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: ':warning: Cannot change model while a query is running. Please wait for it to complete or click Abort.',
+              },
+            },
+          ],
+        });
+      } catch (error) {
+        console.error('Error updating model selection message:', error);
+      }
+    }
+    return;
+  }
 
   // Get model display name for confirmation
   const modelInfo = await getModelInfo(modelId);

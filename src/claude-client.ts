@@ -34,9 +34,12 @@ export interface StreamOptions {
   };
 }
 
-// Query type with interrupt method (from SDK)
+// Query type with control methods (from SDK)
 export interface ClaudeQuery extends AsyncGenerator<SDKMessage, void, unknown> {
   interrupt(): Promise<void>;
+  setPermissionMode(mode: PermissionMode): Promise<void>;
+  setModel(model?: string): Promise<void>;
+  setMaxThinkingTokens(maxThinkingTokens: number | null): Promise<void>;
 }
 
 /**

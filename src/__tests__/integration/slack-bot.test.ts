@@ -66,6 +66,16 @@ vi.mock('../../concurrent-check.js', () => ({
   getContinueCommand: vi.fn().mockReturnValue('claude --resume test-session'),
 }));
 
+vi.mock('../../model-cache.js', () => ({
+  getAvailableModels: vi.fn().mockResolvedValue([
+    { value: 'claude-sonnet-4-20250514', displayName: 'Claude Sonnet 4', description: 'Fast' },
+    { value: 'claude-opus-4-20250514', displayName: 'Claude Opus 4', description: 'Smart' },
+  ]),
+  isModelAvailable: vi.fn().mockResolvedValue(true),
+  refreshModelCache: vi.fn().mockResolvedValue(undefined),
+  getModelInfo: vi.fn().mockResolvedValue({ value: 'claude-opus-4-20250514', displayName: 'Claude Opus 4' }),
+}));
+
 vi.mock('fs', () => ({
   default: {
     existsSync: vi.fn(),
@@ -3527,6 +3537,266 @@ describe('slack-bot handlers', () => {
         (call: any[]) => call[0].text?.includes('Update rate set to 5s')
       );
       expect(rateCalls.length).toBeGreaterThanOrEqual(1);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should call query.setPermissionMode when mode button clicked while busy', async () => {
+      const messageHandler = registeredHandlers['event_app_mention'];
+      const modeButtonHandler = registeredHandlers['action_^mode_(plan|default|bypassPermissions|acceptEdits)$'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery with setPermissionMode method
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      const mockSetPermissionMode = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+        setPermissionMode: mockSetPermissionMode,
+        setModel: vi.fn(),
+        setMaxThinkingTokens: vi.fn(),
+      } as any);
+
+      // Start a query (this marks conversation as busy and populates activeQueries)
+      const queryPromise = messageHandler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Wait for activeQueries to be populated (after status messages are posted)
+      await new Promise(r => setTimeout(r, 50));
+
+      // Click mode button while busy - should call SDK control method
+      await modeButtonHandler({
+        action: { action_id: 'mode_bypassPermissions' },
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      // Verify setPermissionMode was called with 'bypassPermissions'
+      expect(mockSetPermissionMode).toHaveBeenCalledWith('bypassPermissions');
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should block model selection while busy (model changes only apply next turn)', async () => {
+      const messageHandler = registeredHandlers['event_app_mention'];
+      const modelButtonHandler = registeredHandlers['action_^model_select_(.+)$'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'bypassPermissions',
+        model: 'claude-sonnet-4-20250514',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+        setPermissionMode: vi.fn(),
+        setModel: vi.fn(),
+        setMaxThinkingTokens: vi.fn(),
+      } as any);
+
+      // Start a query (this marks conversation as busy)
+      const queryPromise = messageHandler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Wait for busy state to be set
+      await new Promise(r => setTimeout(r, 50));
+
+      // Click model button while busy - should be blocked
+      await modelButtonHandler({
+        action: { action_id: 'model_select_claude-opus-4-20250514' },
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      // Verify session was NOT updated (blocked while busy)
+      expect(saveSession).not.toHaveBeenCalledWith('C123', expect.objectContaining({
+        model: 'claude-opus-4-20250514',
+      }));
+
+      // Verify warning message was shown
+      expect(mockClient.chat.update).toHaveBeenCalledWith(expect.objectContaining({
+        channel: 'C123',
+        ts: 'msg123',
+        blocks: expect.arrayContaining([
+          expect.objectContaining({
+            type: 'section',
+            text: expect.objectContaining({
+              text: expect.stringContaining('Cannot change model while a query is running'),
+            }),
+          }),
+        ]),
+      }));
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should call query.setMaxThinkingTokens when /max-thinking-tokens sent while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'bypassPermissions',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        maxThinkingTokens: undefined, // default
+      });
+
+      // Mock startClaudeQuery with setMaxThinkingTokens method
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      const mockSetMaxThinkingTokens = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+        setPermissionMode: vi.fn(),
+        setModel: vi.fn(),
+        setMaxThinkingTokens: mockSetMaxThinkingTokens,
+      } as any);
+
+      // Start a query (this marks conversation as busy and populates activeQueries)
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Wait for activeQueries to be populated (after status messages are posted)
+      await new Promise(r => setTimeout(r, 50));
+
+      // Send /max-thinking-tokens 5000 while busy - should call SDK control method
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /max-thinking-tokens 5000', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Verify setMaxThinkingTokens was called with 5000
+      expect(mockSetMaxThinkingTokens).toHaveBeenCalledWith(5000);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should handle SDK control method errors gracefully', async () => {
+      const messageHandler = registeredHandlers['event_app_mention'];
+      const modeButtonHandler = registeredHandlers['action_^mode_(plan|default|bypassPermissions|acceptEdits)$'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery with setPermissionMode that throws
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      const mockSetPermissionMode = vi.fn().mockRejectedValue(new Error('SDK error'));
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+        setPermissionMode: mockSetPermissionMode,
+        setModel: vi.fn(),
+        setMaxThinkingTokens: vi.fn(),
+      } as any);
+
+      // Start a query
+      const queryPromise = messageHandler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Wait for activeQueries to be populated
+      await new Promise(r => setTimeout(r, 50));
+
+      // Click mode button while busy - SDK method should fail but session should still update
+      await modeButtonHandler({
+        action: { action_id: 'mode_bypassPermissions' },
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      // Verify setPermissionMode was called (even though it throws)
+      expect(mockSetPermissionMode).toHaveBeenCalledWith('bypassPermissions');
+
+      // Session should still be updated (for next query)
+      expect(saveSession).toHaveBeenCalledWith('C123', expect.objectContaining({
+        mode: 'bypassPermissions',
+      }));
 
       // Cleanup
       resolveQuery!();
