@@ -327,12 +327,17 @@ describe('slack-bot mention handlers', () => {
       expect(blocks[3].type).toBe('context');
       expect(blocks[3].elements[0].text).toContain('Plan');
 
-      // Fifth block: Abort button
+      // Fifth block: View Log and Abort buttons
       expect(blocks[4].type).toBe('actions');
+      // View Log button is first
       expect(blocks[4].elements[0].type).toBe('button');
-      expect(blocks[4].elements[0].text.text).toBe('Abort');
-      expect(blocks[4].elements[0].style).toBe('danger');
-      expect(blocks[4].elements[0].action_id).toMatch(/^abort_query_/);
+      expect(blocks[4].elements[0].text.text).toBe('View Log');
+      expect(blocks[4].elements[0].action_id).toMatch(/^view_activity_log_/);
+      // Abort button is second
+      expect(blocks[4].elements[1].type).toBe('button');
+      expect(blocks[4].elements[1].text.text).toBe('Abort');
+      expect(blocks[4].elements[1].style).toBe('danger');
+      expect(blocks[4].elements[1].action_id).toMatch(/^abort_query_/);
     });
 
     it('should update header with stats on success', async () => {

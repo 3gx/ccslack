@@ -3675,8 +3675,19 @@ app.action(/^view_activity_log_(.+)$/, async ({ action, ack, body, client }) => 
     return;
   }
 
-  // Get activity log from storage
-  const activityLog = await getActivityLog(conversationKey);
+  // Check if query is active (log is in memory, not yet persisted)
+  const activeQuery = activeQueries.get(conversationKey);
+  let activityLog: ActivityEntry[] | null;
+
+  if (activeQuery) {
+    // Read from in-memory processingState
+    activityLog = activeQuery.processingState.activityLog;
+    console.log(`[ViewLog] Reading from active query: ${activityLog.length} entries`);
+  } else {
+    // Read from persisted storage (completed sessions)
+    activityLog = await getActivityLog(conversationKey);
+    console.log(`[ViewLog] Reading from storage: ${activityLog?.length ?? 0} entries`);
+  }
 
   if (!activityLog) {
     // Log not found - session was cleared or bot restarted
@@ -3763,8 +3774,18 @@ app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) =>
 
   const { conversationKey } = metadata;
 
-  // Get activity log from storage
-  const activityLog = await getActivityLog(conversationKey);
+  // Check if query is active (log is in memory, not yet persisted)
+  const activeQuery = activeQueries.get(conversationKey);
+  let activityLog: ActivityEntry[] | null;
+
+  if (activeQuery) {
+    // Read from in-memory processingState
+    activityLog = activeQuery.processingState.activityLog;
+  } else {
+    // Read from persisted storage (completed sessions)
+    activityLog = await getActivityLog(conversationKey);
+  }
+
   if (!activityLog) {
     console.error('Activity log not found for pagination');
     return;

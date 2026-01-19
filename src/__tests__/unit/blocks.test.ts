@@ -1375,17 +1375,22 @@ describe('blocks', () => {
         expect((blocks[1] as any).elements[0].text).toContain('Starting');
       });
 
-      it('should include Abort button', () => {
+      it('should include View Log and Abort buttons', () => {
         const blocks = buildStatusPanelBlocks({
           ...baseParams,
           status: 'starting',
         });
 
         expect(blocks[2].type).toBe('actions');
-        const button = (blocks[2] as any).elements[0];
-        expect(button.text.text).toBe('Abort');
-        expect(button.style).toBe('danger');
-        expect(button.action_id).toContain('abort_query_');
+        // View Log button is first
+        const viewLogButton = (blocks[2] as any).elements[0];
+        expect(viewLogButton.text.text).toBe('View Log');
+        expect(viewLogButton.action_id).toContain('view_activity_log_');
+        // Abort button is second
+        const abortButton = (blocks[2] as any).elements[1];
+        expect(abortButton.text.text).toBe('Abort');
+        expect(abortButton.style).toBe('danger');
+        expect(abortButton.action_id).toContain('abort_query_');
       });
     });
 

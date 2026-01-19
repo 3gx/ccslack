@@ -1362,16 +1362,24 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
           text: `_${modeLabel} | Starting..._`,
         }],
       });
-      // Abort button
+      // View Log and Abort buttons
       blocks.push({
         type: 'actions',
         block_id: `status_panel_${conversationKey}`,
-        elements: [{
-          type: 'button',
-          text: { type: 'plain_text', text: 'Abort' },
-          style: 'danger',
-          action_id: `abort_query_${conversationKey}`,
-        }],
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'View Log' },
+            action_id: `view_activity_log_${conversationKey}`,
+            value: conversationKey,
+          },
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Abort' },
+            style: 'danger',
+            action_id: `abort_query_${conversationKey}`,
+          },
+        ],
       });
       break;
 
@@ -1413,16 +1421,24 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
           text: `_${activityParts.join(' | ')}_`,
         }],
       });
-      // Abort button
+      // View Log and Abort buttons
       blocks.push({
         type: 'actions',
         block_id: `status_panel_${conversationKey}`,
-        elements: [{
-          type: 'button',
-          text: { type: 'plain_text', text: 'Abort' },
-          style: 'danger',
-          action_id: `abort_query_${conversationKey}`,
-        }],
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'View Log' },
+            action_id: `view_activity_log_${conversationKey}`,
+            value: conversationKey,
+          },
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Abort' },
+            style: 'danger',
+            action_id: `abort_query_${conversationKey}`,
+          },
+        ],
       });
       break;
 
