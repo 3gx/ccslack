@@ -733,6 +733,11 @@ describe('commands', () => {
       expect(result.response).toContain('/update-rate');
       expect(result.response).toContain('1-10');
     });
+
+    it('should show default=2 in help text', () => {
+      const result = parseCommand('/help', mockSession);
+      expect(result.response).toContain('default=2');
+    });
   });
 
   describe('/message-size', () => {

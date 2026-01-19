@@ -20,9 +20,9 @@ const THINKING_TOKENS_MAX = 128000;
 const THINKING_TOKENS_DEFAULT = 31999;
 
 // Update rate limits (seconds)
-const UPDATE_RATE_MIN = 1;
-const UPDATE_RATE_MAX = 10;
-const UPDATE_RATE_DEFAULT = 2;
+export const UPDATE_RATE_MIN = 1;
+export const UPDATE_RATE_MAX = 10;
+export const UPDATE_RATE_DEFAULT = 2;
 
 // Message size limit (characters before response is truncated)
 const MESSAGE_SIZE_MIN = 100;
@@ -128,7 +128,7 @@ function handleHelp(): CommandResult {
 \`/mode\` - Show mode picker
 \`/model\` - Show model picker
 \`/max-thinking-tokens [n]\` - Set thinking budget (0=disable, 1024-128000, default=31999)
-\`/update-rate [n]\` - Set status update interval (1-10 seconds, default=1)
+\`/update-rate [n]\` - Set status update interval (1-10 seconds, default=2)
 \`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
 \`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
 \`/continue\` - Get command to continue session in terminal

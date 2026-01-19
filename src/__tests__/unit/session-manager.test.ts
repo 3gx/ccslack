@@ -1510,6 +1510,60 @@ describe('session-manager', () => {
       expect(result.session.forkedFrom).toBe('main-session-123');
     });
 
+    it('should inherit updateRateSeconds from main session', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            updateRateSeconds: 5,  // Custom rate set on main session
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getOrCreateThreadSession('C123', '1234.002', null);
+
+      expect(result.isNewFork).toBe(true);
+      expect(result.session.updateRateSeconds).toBe(5);  // Should inherit from parent
+    });
+
+    it('should inherit undefined updateRateSeconds from main session (uses default)', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            // updateRateSeconds not set - should be undefined
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getOrCreateThreadSession('C123', '1234.002', null);
+
+      expect(result.isNewFork).toBe(true);
+      expect(result.session.updateRateSeconds).toBeUndefined();  // Should inherit undefined
+    });
+
     it('should return existing thread session with stored resumeSessionAtMessageId', () => {
       const mockStore = {
         channels: {

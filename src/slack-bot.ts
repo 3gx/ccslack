@@ -48,7 +48,7 @@ import {
 import { uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
-import { parseCommand } from './commands.js';
+import { parseCommand, UPDATE_RATE_DEFAULT } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { withSlackRetry } from './retry.js';
 import fs from 'fs';
@@ -201,7 +201,7 @@ function getLiveSessionConfig(channelId: string, threadTs?: string) {
     ? getThreadSession(channelId, threadTs)
     : getSession(channelId);
   return {
-    updateRateSeconds: session?.updateRateSeconds ?? 1,
+    updateRateSeconds: session?.updateRateSeconds ?? UPDATE_RATE_DEFAULT,
     threadCharLimit: session?.threadCharLimit ?? 500,
     stripEmptyTag: session?.stripEmptyTag ?? false,
   };
@@ -1625,7 +1625,7 @@ async function handleMessage(params: {
     thinkingBlockCount: 0,
     startTime,
     lastUpdateTime: 0,
-    updateRateSeconds: session.updateRateSeconds ?? 1,
+    updateRateSeconds: session.updateRateSeconds ?? UPDATE_RATE_DEFAULT,
     activityLog: [
       // Add starting entry so it persists in the log (not a fallback that disappears)
       { timestamp: startTime, type: 'starting' },

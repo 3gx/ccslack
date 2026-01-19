@@ -370,6 +370,8 @@ export function getOrCreateThreadSession(
     resumeSessionAtMessageId: forkPoint?.messageId,
     // Inherit thinking token config from main session
     maxThinkingTokens: mainSession?.maxThinkingTokens,
+    // Inherit update rate config from main session
+    updateRateSeconds: mainSession?.updateRateSeconds,
     // Inherit thread char limit config from main session
     threadCharLimit: mainSession?.threadCharLimit,
     // Inherit strip empty tag config from main session
