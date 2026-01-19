@@ -956,12 +956,39 @@ async function handleAskUserQuestion(
   toolInput: Record<string, unknown>,
   channelId: string,
   threadTs: string | undefined,
-  client: any
+  client: any,
+  getAccumulatedResponse: () => string,
+  clearAccumulatedResponse: () => void,
+  isStillStreaming: () => boolean
 ): Promise<PermissionResult> {
   const input = toolInput as unknown as AskUserQuestionInput;
   const answers: Record<string, string> = {};
 
   console.log(`AskUserQuestion received with ${input.questions.length} question(s)`);
+
+  // Post accumulated response BEFORE showing question (only if still actively streaming)
+  // This ensures any explanation Claude generated is visible before the question
+  const accumulatedContent = getAccumulatedResponse();
+  if (isStillStreaming() && accumulatedContent.trim()) {
+    console.log(`Posting accumulated response (${accumulatedContent.length} chars) before AskUserQuestion`);
+
+    const strippedResponse = stripMarkdownCodeFence(accumulatedContent);
+    const slackResponse = markdownToSlack(strippedResponse);
+
+    await uploadMarkdownAndPngWithResponse(
+      client,
+      channelId,
+      strippedResponse,
+      slackResponse,
+      threadTs,
+      undefined,  // userId
+      500,        // threadCharLimit
+      false       // stripEmptyTag
+    );
+
+    // Clear accumulated response so it's not posted again at the end
+    clearAccumulatedResponse();
+  }
 
   // Process each question sequentially
   for (const q of input.questions) {
@@ -1668,7 +1695,15 @@ async function handleMessage(params: {
     const canUseTool = async (toolName: string, toolInput: Record<string, unknown>, _options: { signal: AbortSignal }): Promise<PermissionResult> => {
       // Handle AskUserQuestion in ALL modes for CLI fidelity
       if (toolName === 'AskUserQuestion') {
-        return handleAskUserQuestion(toolInput, channelId, threadTs, client);
+        return handleAskUserQuestion(
+          toolInput,
+          channelId,
+          threadTs,
+          client,
+          () => fullResponse,           // Getter for accumulated response
+          () => { fullResponse = ''; },  // Clear after posting
+          () => isActivelyStreaming      // Check if still in middle of streaming
+        );
       }
 
       // Auto-deny MCP approve_action tool - we handle approvals directly via canUseTool
@@ -1681,6 +1716,29 @@ async function handleMessage(params: {
       // For non-AskUserQuestion tools, only prompt in 'default' mode
       if (session.mode !== 'default') {
         return { behavior: 'allow', updatedInput: toolInput };
+      }
+
+      // Post accumulated response BEFORE showing approval prompt (only if still actively streaming)
+      // This ensures any explanation Claude generated is visible before the tool approval
+      if (isActivelyStreaming && fullResponse.trim()) {
+        console.log(`Posting accumulated response (${fullResponse.length} chars) before tool approval`);
+
+        const strippedResponse = stripMarkdownCodeFence(fullResponse);
+        const slackResponse = markdownToSlack(strippedResponse);
+
+        await uploadMarkdownAndPngWithResponse(
+          client,
+          channelId,
+          strippedResponse,
+          slackResponse,
+          threadTs,
+          undefined,  // userId
+          500,        // threadCharLimit
+          false       // stripEmptyTag
+        );
+
+        // Clear accumulated response so it's not posted again at the end
+        fullResponse = '';
       }
 
       // Generate unique approval ID
@@ -1751,6 +1809,7 @@ async function handleMessage(params: {
 
     // Collect complete response from SDK (no streaming placeholder needed)
     let fullResponse = '';
+    let isActivelyStreaming = true;  // Flag to track if we're in middle of streaming (before result)
     let newSessionId: string | null = null;
     let modelName: string | undefined;
     let currentAssistantMessageId: string | null = null;  // For message mapping
@@ -2202,6 +2261,7 @@ async function handleMessage(params: {
       // Handle result messages (final response with stats)
       if (msg.type === 'result') {
         const resultMsg = msg as any;
+        isActivelyStreaming = false;  // No longer in middle of streaming
 
         if (resultMsg.result) {
           fullResponse = resultMsg.result;
