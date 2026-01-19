@@ -23,7 +23,7 @@ test-coverage:
 
 # Run SDK live tests in parallel (default 8 workers, configure with JOBS=n)
 # Uses --silent to suppress console.log, 90s timeout
-JOBS ?= 8
+JOBS ?= 4
 sdk-test:
 	npx vitest run src/__tests__/sdk-live/ --silent --testTimeout=90000 --maxWorkers=$(JOBS)
 
