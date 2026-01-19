@@ -1538,11 +1538,13 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
   const blocks: Block[] = [];
 
   // 1. Activity log section (top)
+  // Use expand: true to prevent Slack's "see more" collapse on long text
   const activityText = buildActivityLogText(activityLog, inProgress, ACTIVITY_LOG_MAX_CHARS);
   blocks.push({
     type: 'section',
     text: { type: 'mrkdwn', text: activityText },
-  });
+    expand: true,
+  } as Block);
 
   // 2. Divider
   blocks.push({ type: 'divider' });
