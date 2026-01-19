@@ -36,6 +36,8 @@ import {
   buildModelSelectionBlocks,
   buildModelDeprecatedBlocks,
   buildStatusDisplayBlocks,
+  buildSdkQuestionBlocks,
+  buildAnsweredBlocks,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -174,6 +176,19 @@ const pendingToolApprovals = new Map<string, PendingToolApproval>();
 const toolApprovalReminderIntervals = new Map<string, NodeJS.Timeout>();
 const toolApprovalReminderCounts = new Map<string, number>();
 const toolApprovalReminderStartTimes = new Map<string, number>();
+
+// Track pending SDK AskUserQuestion prompts
+interface PendingSdkQuestion {
+  resolve: (answer: string) => void;
+  messageTs: string;
+  channelId: string;
+  threadTs?: string;
+  question: string;  // For showing in answered state
+}
+const pendingSdkQuestions = new Map<string, PendingSdkQuestion>();
+
+// Track pending multi-select selections for SDK questions
+const pendingSdkMultiSelections = new Map<string, string[]>();
 
 // Helper to get unique conversation key (channel + thread)
 function getConversationKey(channelId: string, threadTs?: string): string {
@@ -902,6 +917,98 @@ function clearToolApprovalReminder(approvalId: string): void {
   toolApprovalReminderStartTimes.delete(approvalId);
 }
 
+// SDK AskUserQuestion type (matches SDK schema)
+interface AskUserQuestionInput {
+  questions: Array<{
+    question: string;
+    header: string;
+    options: Array<{ label: string; description: string }>;
+    multiSelect: boolean;
+  }>;
+  answers?: Record<string, string>;
+  metadata?: { source?: string };
+}
+
+// Wait for user answer to SDK question
+function waitForSdkQuestionAnswer(
+  questionId: string,
+  messageTs: string,
+  channelId: string,
+  threadTs: string | undefined,
+  question: string,
+  client: any
+): Promise<string> {
+  return new Promise((resolve) => {
+    pendingSdkQuestions.set(questionId, {
+      resolve,
+      messageTs,
+      channelId,
+      threadTs,
+      question,
+    });
+    // Start reminder (reuses tool approval reminder pattern)
+    startToolApprovalReminder(questionId, 'AskUserQuestion', channelId, client, threadTs);
+  });
+}
+
+// Handle SDK AskUserQuestion tool - works in ALL modes for CLI fidelity
+async function handleAskUserQuestion(
+  toolInput: Record<string, unknown>,
+  channelId: string,
+  threadTs: string | undefined,
+  client: any
+): Promise<PermissionResult> {
+  const input = toolInput as unknown as AskUserQuestionInput;
+  const answers: Record<string, string> = {};
+
+  console.log(`AskUserQuestion received with ${input.questions.length} question(s)`);
+
+  // Process each question sequentially
+  for (const q of input.questions) {
+    const questionId = `askuserq_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+    // Build Slack blocks with SDK format (options have label+description)
+    const blocks = buildSdkQuestionBlocks({
+      question: q.question,
+      header: q.header,
+      options: q.options,
+      questionId,
+      multiSelect: q.multiSelect,
+    });
+
+    // Post to Slack
+    const result = await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        blocks,
+        text: `[${q.header}] ${q.question}`,
+      })
+    );
+
+    // Wait for user answer
+    const answer = await waitForSdkQuestionAnswer(
+      questionId,
+      (result as { ts?: string }).ts!,
+      channelId,
+      threadTs,
+      q.question,
+      client
+    );
+
+    // Check for abort
+    if (answer === '__ABORTED__') {
+      console.log(`AskUserQuestion aborted by user`);
+      return { behavior: 'deny', message: 'User aborted the question', interrupt: true };
+    }
+
+    answers[q.question] = answer;
+    console.log(`AskUserQuestion answered: ${q.header} = ${answer}`);
+  }
+
+  return { behavior: 'allow', updatedInput: { ...input, answers } };
+}
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   appToken: process.env.SLACK_APP_TOKEN,
@@ -1555,49 +1662,57 @@ async function handleMessage(params: {
 
   // Stream Claude response to Slack with real-time updates
   try {
-    // Create canUseTool callback for manual approval mode (default mode)
-    // This callback is called by the SDK when it needs to approve a tool use
+    // Create canUseTool callback - ALWAYS defined for AskUserQuestion support in all modes
+    // For other tools, only prompts in 'default' mode (manual approval)
     // Uses 7-day timeout with 4-hour reminders (matches MCP ask_user behavior)
-    const canUseTool = session.mode === 'default'
-      ? async (toolName: string, toolInput: Record<string, unknown>, _options: { signal: AbortSignal }): Promise<PermissionResult> => {
-          // Auto-deny MCP approve_action tool - we handle approvals directly via canUseTool
-          // Without this, we'd get double approval: canUseTool for approve_action, then MCP's own UI
-          if (toolName === 'mcp__ask-user__approve_action') {
-            console.log(`Auto-denying ${toolName} - approvals handled via canUseTool`);
-            return { behavior: 'deny', message: 'Tool approvals are handled directly via Slack buttons, not via MCP approve_action.' };
-          }
+    const canUseTool = async (toolName: string, toolInput: Record<string, unknown>, _options: { signal: AbortSignal }): Promise<PermissionResult> => {
+      // Handle AskUserQuestion in ALL modes for CLI fidelity
+      if (toolName === 'AskUserQuestion') {
+        return handleAskUserQuestion(toolInput, channelId, threadTs, client);
+      }
 
-          // Generate unique approval ID
-          const approvalId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      // Auto-deny MCP approve_action tool - we handle approvals directly via canUseTool
+      // Without this, we'd get double approval: canUseTool for approve_action, then MCP's own UI
+      if (toolName === 'mcp__ask-user__approve_action') {
+        console.log(`Auto-denying ${toolName} - approvals handled via canUseTool`);
+        return { behavior: 'deny', message: 'Tool approvals are handled directly via Slack buttons, not via MCP approve_action.' };
+      }
 
-          console.log(`Tool approval requested: ${toolName} (${approvalId})`);
+      // For non-AskUserQuestion tools, only prompt in 'default' mode
+      if (session.mode !== 'default') {
+        return { behavior: 'allow', updatedInput: toolInput };
+      }
 
-          // Post approval request to Slack with buttons
-          const result = await withSlackRetry(() =>
-            client.chat.postMessage({
-              channel: channelId,
-              thread_ts: threadTs,
-              blocks: buildToolApprovalBlocks({ approvalId, toolName, toolInput }),
-              text: `Claude wants to use ${toolName}. Approve?`,
-            })
-          );
+      // Generate unique approval ID
+      const approvalId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-          // Wait for user response (7-day timeout with 4-hour reminders)
-          return new Promise((resolve) => {
-            pendingToolApprovals.set(approvalId, {
-              toolName,
-              toolInput,
-              resolve,
-              messageTs: (result as { ts?: string }).ts!,
-              channelId,
-              threadTs,
-            });
+      console.log(`Tool approval requested: ${toolName} (${approvalId})`);
 
-            // Start reminder interval (4 hours) with 7-day expiry
-            startToolApprovalReminder(approvalId, toolName, channelId, client, threadTs);
-          });
-        }
-      : undefined;
+      // Post approval request to Slack with buttons
+      const result = await withSlackRetry(() =>
+        client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          blocks: buildToolApprovalBlocks({ approvalId, toolName, toolInput }),
+          text: `Claude wants to use ${toolName}. Approve?`,
+        })
+      );
+
+      // Wait for user response (7-day timeout with 4-hour reminders)
+      return new Promise((resolve) => {
+        pendingToolApprovals.set(approvalId, {
+          toolName,
+          toolInput,
+          resolve,
+          messageTs: (result as { ts?: string }).ts!,
+          channelId,
+          threadTs,
+        });
+
+        // Start reminder interval (4 hours) with 7-day expiry
+        startToolApprovalReminder(approvalId, toolName, channelId, client, threadTs);
+      });
+    };
 
     // Start Claude query (returns Query object with interrupt() method)
     // For new thread forks, use forkSession flag with parent session ID
@@ -3063,6 +3178,222 @@ app.action(/^tool_deny_(.+)$/, async ({ action, ack, body, client }) => {
     pending.resolve({ behavior: 'deny', message: 'User denied this tool use' });
   } else {
     console.log(`No pending approval found for: ${approvalId}`);
+  }
+});
+
+// Handle SDK AskUserQuestion option button click
+app.action(/^sdkq_([^_]+)_(\d+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^sdkq_([^_]+)_(\d+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`SDK question option clicked for: ${questionId}`);
+
+  const pending = pendingSdkQuestions.get(questionId);
+  if (pending) {
+    const answer = 'value' in action ? (action.value as string) : '';
+
+    // Clear reminder
+    clearToolApprovalReminder(questionId);
+    pendingSdkQuestions.delete(questionId);
+
+    // Update message to show answered state
+    try {
+      await client.chat.update({
+        channel: pending.channelId,
+        ts: pending.messageTs,
+        text: `Answered: ${answer}`,
+        blocks: buildAnsweredBlocks(pending.question, answer),
+      });
+    } catch (error) {
+      console.error('Error updating SDK question message:', error);
+    }
+
+    pending.resolve(answer);
+  } else {
+    console.log(`No pending SDK question found for: ${questionId}`);
+  }
+});
+
+// Handle SDK AskUserQuestion multi-select change
+app.action(/^sdkq_multi_(.+)$/, async ({ action, ack }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^sdkq_multi_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  // Store selected options for later submission
+  if ('selected_options' in action && Array.isArray((action as any).selected_options)) {
+    const selections = (action as any).selected_options.map((opt: any) => opt.value as string);
+    pendingSdkMultiSelections.set(questionId, selections);
+    console.log(`SDK question multi-select updated for ${questionId}: ${selections.join(', ')}`);
+  }
+});
+
+// Handle SDK AskUserQuestion multi-select submit
+app.action(/^sdkq_submit_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^sdkq_submit_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`SDK question submit clicked for: ${questionId}`);
+
+  const pending = pendingSdkQuestions.get(questionId);
+  if (pending) {
+    // Get selections from pending map
+    const selections = pendingSdkMultiSelections.get(questionId) || [];
+    const answer = selections.join(', ') || '(no selection)';
+
+    // Clean up
+    clearToolApprovalReminder(questionId);
+    pendingSdkQuestions.delete(questionId);
+    pendingSdkMultiSelections.delete(questionId);
+
+    // Update message to show answered state
+    try {
+      await client.chat.update({
+        channel: pending.channelId,
+        ts: pending.messageTs,
+        text: `Answered: ${answer}`,
+        blocks: buildAnsweredBlocks(pending.question, answer),
+      });
+    } catch (error) {
+      console.error('Error updating SDK question message:', error);
+    }
+
+    pending.resolve(answer);
+  } else {
+    console.log(`No pending SDK question found for: ${questionId}`);
+  }
+});
+
+// Handle SDK AskUserQuestion abort button
+app.action(/^sdkq_abort_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^sdkq_abort_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`SDK question abort clicked for: ${questionId}`);
+
+  const pending = pendingSdkQuestions.get(questionId);
+  if (pending) {
+    // Clean up
+    clearToolApprovalReminder(questionId);
+    pendingSdkQuestions.delete(questionId);
+    pendingSdkMultiSelections.delete(questionId);
+
+    // Update message to show aborted
+    try {
+      await client.chat.update({
+        channel: pending.channelId,
+        ts: pending.messageTs,
+        text: 'Question aborted',
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Question:* ${pending.question}\n*Status:* _Aborted_`,
+            },
+          },
+        ],
+      });
+    } catch (error) {
+      console.error('Error updating aborted SDK question message:', error);
+    }
+
+    pending.resolve('__ABORTED__');
+  } else {
+    console.log(`No pending SDK question found for: ${questionId}`);
+  }
+});
+
+// Handle SDK AskUserQuestion "Other" button (free-text input)
+app.action(/^sdkq_other_(.+)$/, async ({ ack, body, client }) => {
+  await ack();
+
+  const bodyWithTrigger = body as any;
+  const actionId = bodyWithTrigger.actions?.[0]?.action_id || '';
+  const match = actionId.match(/^sdkq_other_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`SDK question other clicked for: ${questionId}`);
+
+  const pending = pendingSdkQuestions.get(questionId);
+  if (pending && bodyWithTrigger.trigger_id) {
+    // Open modal for free-text input
+    try {
+      await client.views.open({
+        trigger_id: bodyWithTrigger.trigger_id,
+        view: {
+          type: 'modal',
+          callback_id: `sdkq_freetext_modal_${questionId}`,
+          title: { type: 'plain_text', text: 'Your Answer' },
+          submit: { type: 'plain_text', text: 'Submit' },
+          close: { type: 'plain_text', text: 'Cancel' },
+          blocks: [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: `*Question:* ${pending.question}` },
+            },
+            {
+              type: 'input',
+              block_id: 'answer_block',
+              element: {
+                type: 'plain_text_input',
+                action_id: 'answer_input',
+                multiline: true,
+                placeholder: { type: 'plain_text', text: 'Type your answer...' },
+              },
+              label: { type: 'plain_text', text: 'Your answer' },
+            },
+          ],
+        },
+      });
+    } catch (error) {
+      console.error('Error opening free-text modal:', error);
+    }
+  }
+});
+
+// Handle SDK AskUserQuestion free-text modal submission
+app.view(/^sdkq_freetext_modal_(.+)$/, async ({ ack, body, view, client }) => {
+  await ack();
+
+  const callbackId = view.callback_id;
+  const match = callbackId.match(/^sdkq_freetext_modal_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`SDK question free-text submitted for: ${questionId}`);
+
+  const pending = pendingSdkQuestions.get(questionId);
+  if (pending) {
+    const answer = view.state.values.answer_block?.answer_input?.value || '';
+
+    // Clean up
+    clearToolApprovalReminder(questionId);
+    pendingSdkQuestions.delete(questionId);
+
+    // Update original message to show answered state
+    try {
+      await client.chat.update({
+        channel: pending.channelId,
+        ts: pending.messageTs,
+        text: `Answered: ${answer}`,
+        blocks: buildAnsweredBlocks(pending.question, answer),
+      });
+    } catch (error) {
+      console.error('Error updating SDK question message:', error);
+    }
+
+    pending.resolve(answer);
   }
 });
 

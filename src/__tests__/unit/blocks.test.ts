@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildQuestionBlocks,
+  buildSdkQuestionBlocks,
   buildApprovalBlocks,
   buildReminderBlocks,
   buildStatusBlocks,
@@ -107,6 +108,129 @@ describe('blocks', () => {
       expect(blocks[1].type).toBe('section');
       expect(blocks[1].text?.text).toContain('```');
       expect(blocks[1].text?.text).toContain('function hello()');
+    });
+  });
+
+  describe('buildSdkQuestionBlocks', () => {
+    it('should build SDK question with header and options', () => {
+      const blocks = buildSdkQuestionBlocks({
+        question: 'Which auth method should we use?',
+        header: 'Auth method',
+        options: [
+          { label: 'OAuth', description: 'Use OAuth 2.0 for third-party auth' },
+          { label: 'JWT', description: 'Use JSON Web Tokens for stateless auth' },
+        ],
+        questionId: 'askuserq_123',
+        multiSelect: false,
+      });
+
+      // Header + 2 option sections + divider + actions (Other/Abort)
+      expect(blocks.length).toBeGreaterThanOrEqual(5);
+      expect(blocks[0].type).toBe('section');
+      expect(blocks[0].text?.text).toContain('[Auth method]');
+      expect(blocks[0].text?.text).toContain('Which auth method should we use?');
+
+      // First option section
+      expect(blocks[1].type).toBe('section');
+      expect(blocks[1].text?.text).toContain('OAuth');
+      expect(blocks[1].text?.text).toContain('Use OAuth 2.0');
+      expect(blocks[1].accessory?.action_id).toBe('sdkq_askuserq_123_0');
+      expect(blocks[1].accessory?.value).toBe('OAuth');
+
+      // Second option section
+      expect(blocks[2].type).toBe('section');
+      expect(blocks[2].text?.text).toContain('JWT');
+      expect(blocks[2].accessory?.action_id).toBe('sdkq_askuserq_123_1');
+    });
+
+    it('should use multi-select dropdown when multiSelect is true', () => {
+      const blocks = buildSdkQuestionBlocks({
+        question: 'Select features:',
+        header: 'Features',
+        options: [
+          { label: 'Auth', description: 'Authentication' },
+          { label: 'DB', description: 'Database' },
+          { label: 'Cache', description: 'Caching layer' },
+        ],
+        questionId: 'askuserq_456',
+        multiSelect: true,
+      });
+
+      // Should have multi-select dropdown
+      const multiSelectBlock = blocks.find(b => b.accessory?.type === 'multi_static_select');
+      expect(multiSelectBlock).toBeDefined();
+      expect(multiSelectBlock?.accessory?.action_id).toBe('sdkq_multi_askuserq_456');
+
+      // Should have submit button
+      const actionsBlock = blocks.find(b =>
+        b.elements?.some((e: any) => e.action_id === 'sdkq_submit_askuserq_456')
+      );
+      expect(actionsBlock).toBeDefined();
+    });
+
+    it('should use multi-select when more than 5 options', () => {
+      const blocks = buildSdkQuestionBlocks({
+        question: 'Choose language:',
+        header: 'Language',
+        options: [
+          { label: 'JS', description: 'JavaScript' },
+          { label: 'TS', description: 'TypeScript' },
+          { label: 'PY', description: 'Python' },
+          { label: 'GO', description: 'Go' },
+          { label: 'RS', description: 'Rust' },
+          { label: 'RB', description: 'Ruby' },
+        ],
+        questionId: 'askuserq_789',
+        multiSelect: false,  // Should still use multi-select due to count
+      });
+
+      // Should have multi-select dropdown due to >5 options
+      const multiSelectBlock = blocks.find(b => b.accessory?.type === 'multi_static_select');
+      expect(multiSelectBlock).toBeDefined();
+    });
+
+    it('should include Other and Abort buttons for regular options', () => {
+      const blocks = buildSdkQuestionBlocks({
+        question: 'Pick one:',
+        header: 'Choice',
+        options: [
+          { label: 'A', description: 'Option A' },
+          { label: 'B', description: 'Option B' },
+        ],
+        questionId: 'askuserq_abc',
+        multiSelect: false,
+      });
+
+      // Find actions block with Other and Abort
+      const actionsBlock = blocks.find(b =>
+        b.elements?.some((e: any) => e.action_id === 'sdkq_other_askuserq_abc')
+      );
+      expect(actionsBlock).toBeDefined();
+
+      const abortButton = actionsBlock?.elements?.find((e: any) =>
+        e.action_id === 'sdkq_abort_askuserq_abc'
+      );
+      expect(abortButton).toBeDefined();
+      expect(abortButton?.style).toBe('danger');
+    });
+
+    it('should handle empty options with abort only', () => {
+      const blocks = buildSdkQuestionBlocks({
+        question: 'What should we do?',
+        header: 'Action',
+        options: [],
+        questionId: 'askuserq_empty',
+        multiSelect: false,
+      });
+
+      // Should have header, context hint, and abort button
+      expect(blocks[0].text?.text).toContain('What should we do?');
+
+      // Should have abort button
+      const actionsBlock = blocks.find(b =>
+        b.elements?.some((e: any) => e.action_id === 'sdkq_abort_askuserq_empty')
+      );
+      expect(actionsBlock).toBeDefined();
     });
   });
 

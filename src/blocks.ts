@@ -194,6 +194,151 @@ export function buildQuestionBlocks(params: QuestionBlockParams): Block[] {
 }
 
 /**
+ * Parameters for SDK AskUserQuestion tool blocks.
+ * SDK uses {label, description} objects for options (vs simple strings in MCP ask_user).
+ */
+export interface SdkQuestionBlockParams {
+  question: string;
+  header: string;  // Short label (max 12 chars), e.g., "Auth method"
+  options: Array<{ label: string; description: string }>;
+  questionId: string;
+  multiSelect: boolean;
+}
+
+/**
+ * Build blocks for SDK AskUserQuestion tool.
+ * Displays questions with label+description options, matching CLI fidelity.
+ */
+export function buildSdkQuestionBlocks(params: SdkQuestionBlockParams): Block[] {
+  const { question, header, options, questionId, multiSelect } = params;
+  const blocks: Block[] = [];
+
+  // Header chip + question
+  blocks.push({
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: `*[${header}]* ${question}`,
+    },
+  });
+
+  if (options && options.length > 0) {
+    const useMultiSelect = multiSelect || options.length > 5;
+
+    if (useMultiSelect) {
+      // Show descriptions as context above the dropdown
+      const descriptions = options.map(opt => `*${opt.label}:* ${opt.description}`).join('\n');
+      blocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: descriptions,
+        },
+      });
+
+      // Multi-select dropdown
+      blocks.push({
+        type: "section",
+        block_id: `sdkq_multiselect_${questionId}`,
+        text: { type: "mrkdwn", text: "_Select one or more options:_" },
+        accessory: {
+          type: "multi_static_select",
+          action_id: `sdkq_multi_${questionId}`,
+          placeholder: { type: "plain_text", text: "Select options..." },
+          options: options.map(opt => ({
+            text: { type: "plain_text", text: opt.label },
+            value: opt.label,
+          })),
+        },
+      });
+
+      // Submit + Abort buttons
+      blocks.push({
+        type: "actions",
+        block_id: `sdkq_actions_${questionId}`,
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Submit" },
+            action_id: `sdkq_submit_${questionId}`,
+            style: "primary",
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Abort" },
+            action_id: `sdkq_abort_${questionId}`,
+            style: "danger",
+          },
+        ],
+      });
+    } else {
+      // Option buttons with descriptions shown in section text
+      for (let i = 0; i < options.length; i++) {
+        blocks.push({
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*${options[i].label}*\n${options[i].description}`,
+          },
+          accessory: {
+            type: "button",
+            text: { type: "plain_text", text: "Select" },
+            action_id: `sdkq_${questionId}_${i}`,
+            value: options[i].label,
+          },
+        });
+      }
+
+      // "Other" + Abort buttons
+      blocks.push({ type: "divider" });
+      blocks.push({
+        type: "actions",
+        block_id: `sdkq_extra_${questionId}`,
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Other..." },
+            action_id: `sdkq_other_${questionId}`,
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Abort" },
+            action_id: `sdkq_abort_${questionId}`,
+            style: "danger",
+          },
+        ],
+      });
+    }
+  } else {
+    // No options - show text input hint and abort
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "_Reply to this message with your answer_",
+        },
+      ],
+    });
+
+    blocks.push({
+      type: "actions",
+      block_id: `sdkq_extra_${questionId}`,
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Abort" },
+          style: "danger",
+          action_id: `sdkq_abort_${questionId}`,
+        },
+      ],
+    });
+  }
+
+  return blocks;
+}
+
+/**
  * Build blocks for approval requests.
  */
 export function buildApprovalBlocks(params: ApprovalBlockParams): Block[] {
