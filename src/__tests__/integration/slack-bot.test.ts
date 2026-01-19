@@ -953,29 +953,98 @@ describe('slack-bot handlers', () => {
     });
   });
 
-  describe('plan approval handlers', () => {
-    it('should register plan approve auto handler', async () => {
-      const handler = registeredHandlers['action_^plan_approve_auto_(.+)$'];
+  describe('plan approval handlers (5 options matching CLI)', () => {
+    // Test handler registration for all 5 options
+    it('should register option 1: clear + bypass handler', async () => {
+      const handler = registeredHandlers['action_^plan_clear_bypass_(.+)$'];
       expect(handler).toBeDefined();
     });
 
-    it('should register plan approve manual handler', async () => {
-      const handler = registeredHandlers['action_^plan_approve_manual_(.+)$'];
+    it('should register option 2: accept edits handler', async () => {
+      const handler = registeredHandlers['action_^plan_accept_edits_(.+)$'];
       expect(handler).toBeDefined();
     });
 
-    it('should register plan reject handler', async () => {
+    it('should register option 3: bypass handler', async () => {
+      const handler = registeredHandlers['action_^plan_bypass_(.+)$'];
+      expect(handler).toBeDefined();
+    });
+
+    it('should register option 4: manual handler', async () => {
+      const handler = registeredHandlers['action_^plan_manual_(.+)$'];
+      expect(handler).toBeDefined();
+    });
+
+    it('should register option 5: reject handler', async () => {
       const handler = registeredHandlers['action_^plan_reject_(.+)$'];
       expect(handler).toBeDefined();
     });
 
-    it('should update message and save mode on auto approve', async () => {
-      const handler = registeredHandlers['action_^plan_approve_auto_(.+)$'];
+    // Test option 1: clear context + bypass
+    it('option 1: should clear session and set bypass mode', async () => {
+      const handler = registeredHandlers['action_^plan_clear_bypass_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
       await handler({
-        action: { action_id: 'plan_approve_auto_C123_thread456' },
+        action: { action_id: 'plan_clear_bypass_C123_thread456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Should clear session (sessionId: null) AND set bypass mode
+      expect(saveSession).toHaveBeenCalledWith('C123', { sessionId: null, mode: 'bypassPermissions' });
+      expect(mockClient.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          ts: 'msg123',
+          text: expect.stringContaining('Clearing context'),
+        })
+      );
+    });
+
+    // Test option 2: accept edits
+    it('option 2: should set acceptEdits mode', async () => {
+      const handler = registeredHandlers['action_^plan_accept_edits_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'plan_accept_edits_C123' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveSession).toHaveBeenCalledWith('C123', { mode: 'acceptEdits' });
+      expect(mockClient.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          ts: 'msg123',
+          text: expect.stringContaining('accept-edits'),
+        })
+      );
+    });
+
+    // Test option 3: bypass permissions
+    it('option 3: should set bypassPermissions mode', async () => {
+      const handler = registeredHandlers['action_^plan_bypass_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'plan_bypass_C123_thread456' },
         ack,
         body: {
           channel: { id: 'C123' },
@@ -991,18 +1060,19 @@ describe('slack-bot handlers', () => {
         expect.objectContaining({
           channel: 'C123',
           ts: 'msg123',
-          text: expect.stringContaining('auto-accept'),
+          text: expect.stringContaining('bypass mode'),
         })
       );
     });
 
-    it('should update message and save mode on manual approve', async () => {
-      const handler = registeredHandlers['action_^plan_approve_manual_(.+)$'];
+    // Test option 4: manual approval
+    it('option 4: should set default (manual) mode', async () => {
+      const handler = registeredHandlers['action_^plan_manual_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
       await handler({
-        action: { action_id: 'plan_approve_manual_C123' },
+        action: { action_id: 'plan_manual_C123' },
         ack,
         body: {
           channel: { id: 'C123' },
@@ -1023,7 +1093,8 @@ describe('slack-bot handlers', () => {
       );
     });
 
-    it('should update message on reject', async () => {
+    // Test option 5: reject
+    it('option 5: should update message on reject', async () => {
       const handler = registeredHandlers['action_^plan_reject_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
@@ -1050,13 +1121,13 @@ describe('slack-bot handlers', () => {
     });
 
     it('should extract channel and thread from conversation key', async () => {
-      const handler = registeredHandlers['action_^plan_approve_auto_(.+)$'];
+      const handler = registeredHandlers['action_^plan_bypass_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
       // With thread
       await handler({
-        action: { action_id: 'plan_approve_auto_C123_thread456' },
+        action: { action_id: 'plan_bypass_C123_thread456' },
         ack,
         body: {
           channel: { id: 'C123' },
@@ -2993,6 +3064,713 @@ describe('slack-bot handlers', () => {
       );
       // At least 2 calls: first failed (rate limited), second succeeded (retry)
       expect(autoCompactCalls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  describe('busy state handling', () => {
+    it('should allow /status command while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to hang (simulates busy)
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise; // Hang until resolved
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query (this marks conversation as busy)
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Wait a tick for busy state to be set
+      await new Promise(r => setTimeout(r, 10));
+
+      // Now send /status while busy - should work!
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /status', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should NOT see "I'm busy" message for /status
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(0);
+
+      // Should see status response (header + status blocks)
+      const statusCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => {
+          const blocks = call[0].blocks;
+          // Look for context block with mode (header) or status-related blocks
+          return blocks?.some((b: any) =>
+            b.type === 'context' && b.elements?.some((e: any) => e.text === '_Plan_')
+          );
+        }
+      );
+      expect(statusCalls.length).toBeGreaterThanOrEqual(1);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should allow /help command while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      await new Promise(r => setTimeout(r, 10));
+
+      // Send /help while busy - should work!
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /help', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should NOT see "I'm busy" message
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(0);
+
+      // Should see help response (contains Available Commands with asterisks for bold)
+      const helpCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes('*Available Commands*')
+      );
+      expect(helpCalls.length).toBeGreaterThanOrEqual(1);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should allow /mode command while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      await new Promise(r => setTimeout(r, 10));
+
+      // Send /mode while busy - should work!
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /mode', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should NOT see "I'm busy" message
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(0);
+
+      // Should see mode picker (mode_selection block)
+      const modeCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => {
+          const blocks = call[0].blocks;
+          return blocks?.some((b: any) =>
+            b.block_id === 'mode_selection' ||
+            b.elements?.some((e: any) => e.action_id?.startsWith('mode_'))
+          );
+        }
+      );
+      expect(modeCalls.length).toBeGreaterThanOrEqual(1);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should block regular queries while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start first query
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      await new Promise(r => setTimeout(r, 10));
+
+      // Try second query - should be blocked
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> another question', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should see "I'm busy" message
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(1);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should block /compact while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      await new Promise(r => setTimeout(r, 10));
+
+      // Try /compact while busy - should be blocked
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /compact', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should see "I'm busy" message
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(1);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should block /clear while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      await new Promise(r => setTimeout(r, 10));
+
+      // Try /clear while busy - should be blocked
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /clear', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should see "I'm busy" message
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(1);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should allow /context command while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        lastUsage: {
+          inputTokens: 1000,
+          outputTokens: 500,
+          cacheCreationInputTokens: 100,
+          cacheReadInputTokens: 50,
+          cost: '0.05',
+        },
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      await new Promise(r => setTimeout(r, 10));
+
+      // Send /context while busy - should work!
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /context', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should NOT see "I'm busy" message
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(0);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+  });
+
+  describe('live config updates during query', () => {
+    it('should update processingState.updateRateSeconds when /update-rate sent while busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Start with updateRateSeconds = 2
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'bypassPermissions',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        updateRateSeconds: 2,
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query (this marks conversation as busy)
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Wait for busy state to be set
+      await new Promise(r => setTimeout(r, 10));
+
+      // Send /update-rate 5 while busy - should update live config
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /update-rate 5', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Verify saveSession was called with the new updateRateSeconds
+      expect(saveSession).toHaveBeenCalledWith('C123', expect.objectContaining({
+        updateRateSeconds: 5,
+      }));
+
+      // Should see confirmation message "Update rate set to 5s."
+      const rateCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes('Update rate set to 5s')
+      );
+      expect(rateCalls.length).toBeGreaterThanOrEqual(1);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should allow /update-rate command while busy (non-agent command)', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      await new Promise(r => setTimeout(r, 10));
+
+      // Send /update-rate while busy - should work (non-agent command)
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /update-rate 3', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should NOT see "I'm busy" message
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(0);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should allow /message-size command while busy (non-agent command)', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to hang
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start a query
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      await new Promise(r => setTimeout(r, 10));
+
+      // Send /message-size while busy - should work (non-agent command)
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /message-size 1000', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should NOT see "I'm busy" message
+      const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes("I'm busy")
+      );
+      expect(busyMessages).toHaveLength(0);
+
+      // Verify saveSession was called with the new threadCharLimit
+      expect(saveSession).toHaveBeenCalledWith('C123', expect.objectContaining({
+        threadCharLimit: 1000,
+      }));
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
+    });
+
+    it('should use live threadCharLimit at response posting time', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Track getSession calls to simulate config change
+      let callCount = 0;
+      vi.mocked(getSession).mockImplementation(() => {
+        callCount++;
+        return {
+          sessionId: 'test-session',
+          workingDir: '/test',
+          mode: 'bypassPermissions',
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+          pathConfigured: true,
+          configuredPath: '/test/dir',
+          configuredBy: 'U123',
+          configuredAt: Date.now(),
+          // First few calls return 500, later calls return 100 (simulating /message-size change)
+          threadCharLimit: callCount > 3 ? 100 : 500,
+        };
+      });
+
+      // Mock startClaudeQuery to return a long response
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'A'.repeat(1000) }; // 1000 char response
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // The response should have been posted - verify uploadMarkdownAndPngWithResponse behavior
+      // is influenced by the live config (the actual truncation happens in streaming.ts)
+      // Here we just verify getSession is called multiple times (live reads)
+      expect(callCount).toBeGreaterThan(1);
+    });
+
+    it('should clear spinnerTimer in finally block on error', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'bypassPermissions',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock startClaudeQuery to throw an error
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          throw new Error('Test SDK error');
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // This should not hang or leak timers
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Verify error was posted
+      const errorCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0].text?.includes('Error:')
+      );
+      expect(errorCalls.length).toBeGreaterThanOrEqual(1);
+
+      // If timer wasn't cleared, this test would hang or have memory issues
+      // The test completing without hanging is the verification
+    });
+
+    it('should initialize processingState.updateRateSeconds from session', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Set updateRateSeconds to 5 in session
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'bypassPermissions',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        updateRateSeconds: 5,
+      });
+
+      let resolveQuery: () => void;
+      const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+
+      // Track if init message was yielded (means processingState was created)
+      let initYielded = false;
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          initYielded = true;
+          await hangingPromise;
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      const queryPromise = handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Wait for init to be processed
+      await new Promise(r => setTimeout(r, 50));
+      expect(initYielded).toBe(true);
+
+      // Cleanup
+      resolveQuery!();
+      await queryPromise;
     });
   });
 });

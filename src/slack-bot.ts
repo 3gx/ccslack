@@ -24,7 +24,6 @@ import {
   buildStatusBlocks,
   buildHeaderBlocks,
   buildPlanApprovalBlocks,
-  isPlanApprovalPrompt,
   buildToolApprovalBlocks,
   buildForkAnchorBlocks,
   buildPathSetupBlocks,
@@ -70,6 +69,8 @@ interface ProcessingState {
   thinkingBlockCount: number;
   startTime: number;
   lastUpdateTime: number;
+  // Live config values (can be updated mid-query via commands)
+  updateRateSeconds: number;
   // Activity log entries (preserved for modal)
   activityLog: ActivityEntry[];
   // Temporary state for accumulating thinking content
@@ -91,6 +92,18 @@ interface ProcessingState {
   rateLimitNotified: boolean;
   // Auto-compact tracking
   autoCompactNotified: boolean;
+  // ExitPlanMode tool tracking (for CLI-fidelity plan approval)
+  exitPlanModeIndex: number | null;
+  exitPlanModeInputJson: string;
+  exitPlanModeInput: ExitPlanModeInput | null;
+}
+
+/**
+ * ExitPlanMode tool input structure.
+ * Mirrors the allowedPrompts field from the SDK.
+ */
+interface ExitPlanModeInput {
+  allowedPrompts?: { tool: string; prompt: string }[];
 }
 
 // Spinner frames for visual "alive" indicator during processing
@@ -161,6 +174,36 @@ const toolApprovalReminderStartTimes = new Map<string, number>();
 // Helper to get unique conversation key (channel + thread)
 function getConversationKey(channelId: string, threadTs?: string): string {
   return threadTs ? `${channelId}_${threadTs}` : channelId;
+}
+
+// Centralized session config reading - always gets fresh values for live updates
+function getLiveSessionConfig(channelId: string, threadTs?: string) {
+  const session = threadTs
+    ? getThreadSession(channelId, threadTs)
+    : getSession(channelId);
+  return {
+    updateRateSeconds: session?.updateRateSeconds ?? 1,
+    threadCharLimit: session?.threadCharLimit ?? 500,
+  };
+}
+
+// Helper to check if conversation is busy and respond if so
+// Returns true if busy (caller should return early), false if not busy
+async function checkBusyAndRespond(
+  client: any,
+  channelId: string,
+  threadTs: string | undefined,
+  conversationKey: string
+): Promise<boolean> {
+  if (busyConversations.has(conversationKey)) {
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: "I'm busy with the current request. Please wait for it to complete, or click Abort.",
+    });
+    return true; // Was busy
+  }
+  return false; // Not busy
 }
 
 /**
@@ -988,16 +1031,6 @@ async function handleMessage(params: {
   // For threads: threadTs is unique; for main channel: use originalTs
   const activityLogKey = threadTs ? `${channelId}_${threadTs}` : `${channelId}_${originalTs}`;
 
-  // Check if conversation is busy
-  if (busyConversations.has(conversationKey)) {
-    await client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: "I'm busy with the current request. Please wait for it to complete, or click Abort.",
-    });
-    return;
-  }
-
   // Get or create session (handle threads differently)
   let session: {
     sessionId: string | null;
@@ -1210,6 +1243,9 @@ async function handleMessage(params: {
 
   // Handle /compact command (session compaction)
   if (commandResult.compactSession) {
+    if (await checkBusyAndRespond(client, channelId, threadTs, conversationKey)) {
+      return;
+    }
     await runCompactSession(
       client,
       channelId,
@@ -1222,6 +1258,9 @@ async function handleMessage(params: {
 
   // Handle /clear command (clear session history)
   if (commandResult.clearSession) {
+    if (await checkBusyAndRespond(client, channelId, threadTs, conversationKey)) {
+      return;
+    }
     await runClearSession(
       client,
       channelId,
@@ -1242,6 +1281,16 @@ async function handleMessage(params: {
         commandResult.sessionUpdate.configuredBy = userId ?? null;
       }
       saveSession(channelId, commandResult.sessionUpdate);
+
+      // Live update: If a query is running, update its processingState immediately
+      // This allows /update-rate to take effect without waiting for next query
+      if (commandResult.sessionUpdate.updateRateSeconds !== undefined) {
+        const activeQuery = activeQueries.get(conversationKey);
+        if (activeQuery) {
+          activeQuery.processingState.updateRateSeconds = commandResult.sessionUpdate.updateRateSeconds;
+          console.log(`[LiveConfig] Updated active query updateRateSeconds to ${commandResult.sessionUpdate.updateRateSeconds}`);
+        }
+      }
     }
 
     // Post header showing mode (so user always sees current mode)
@@ -1390,6 +1439,11 @@ async function handleMessage(params: {
     console.log(`[Mapping] Saved user message mapping for ${originalTs} in session ${session.sessionId}`);
   }
 
+  // Check if conversation is busy before starting query
+  if (await checkBusyAndRespond(client, channelId, threadTs, conversationKey)) {
+    return;
+  }
+
   // Mark conversation as busy
   busyConversations.add(conversationKey);
 
@@ -1401,6 +1455,7 @@ async function handleMessage(params: {
     thinkingBlockCount: 0,
     startTime,
     lastUpdateTime: 0,
+    updateRateSeconds: session.updateRateSeconds ?? 1,
     activityLog: [
       // Add starting entry so it persists in the log (not a fallback that disappears)
       { timestamp: startTime, type: 'starting' },
@@ -1412,6 +1467,9 @@ async function handleMessage(params: {
     rateLimitHits: 0,
     rateLimitNotified: false,
     autoCompactNotified: false,
+    exitPlanModeIndex: null,
+    exitPlanModeInputJson: '',
+    exitPlanModeInput: null,
   };
 
   // Post Message 1: Status panel (Block Kit with Abort)
@@ -1452,6 +1510,9 @@ async function handleMessage(params: {
   } catch (error) {
     console.error('Error posting activity log message:', error);
   }
+
+  // Spinner timer - declared outside try block so it can be cleaned up in finally
+  let spinnerTimer: NodeJS.Timeout | undefined;
 
   // Stream Claude response to Slack with real-time updates
   try {
@@ -1775,11 +1836,16 @@ async function handleMessage(params: {
     };
 
     // Periodic timer to update spinner even when no events are firing
-    // Use session's configured update rate (default 2 seconds)
-    const updateIntervalMs = (session.updateRateSeconds ?? 2) * 1000;
-    const spinnerTimer = setInterval(() => {
-      updateStatusMessages();
-    }, updateIntervalMs);
+    // Uses setTimeout pattern to re-read rate from processingState each tick
+    // This allows /update-rate commands to take effect immediately
+    const scheduleUpdate = () => {
+      const intervalMs = processingState.updateRateSeconds * 1000;
+      spinnerTimer = setTimeout(() => {
+        updateStatusMessages();
+        scheduleUpdate();  // Reschedule with potentially new rate
+      }, intervalMs);
+    };
+    scheduleUpdate();
 
     for await (const msg of claudeQuery) {
       // Capture assistant message UUID for message mapping (point-in-time forking)
@@ -1885,7 +1951,23 @@ async function handleMessage(params: {
         if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
           processingState.currentToolUseIndex = event.index;
           logToolStart(event.content_block.name);
+
+          // Track ExitPlanMode for input accumulation (CLI-fidelity plan approval)
+          if (event.content_block.name === 'ExitPlanMode') {
+            processingState.exitPlanModeIndex = event.index;
+            processingState.exitPlanModeInputJson = '';
+            console.log('[ExitPlanMode] Tool started at index:', event.index);
+          }
+
           // Timer will render updated status at next interval
+        }
+
+        // Accumulate JSON input for ExitPlanMode tool
+        // Field is 'partial_json' (confirmed in plans/native-limit-vs-rate-summary.md:877)
+        if (event?.type === 'content_block_delta' &&
+            event.delta?.type === 'input_json_delta' &&
+            processingState.exitPlanModeIndex === event.index) {
+          processingState.exitPlanModeInputJson += event.delta.partial_json || '';
         }
 
         // Tool use completed (content_block_stop for tool_use block)
@@ -1893,6 +1975,21 @@ async function handleMessage(params: {
             processingState.currentToolUseIndex === event.index &&
             processingState.currentTool) {
           logToolComplete();
+
+          // Parse ExitPlanMode input when tool completes
+          if (processingState.exitPlanModeIndex === event.index) {
+            try {
+              processingState.exitPlanModeInput = JSON.parse(processingState.exitPlanModeInputJson || '{}');
+              console.log('[ExitPlanMode] Parsed input:', JSON.stringify(processingState.exitPlanModeInput));
+            } catch (e) {
+              // Set to null on parse failure (not {} which is truthy and would trigger UI)
+              console.error('[ExitPlanMode] JSON parse failed:', e);
+              processingState.exitPlanModeInput = null;
+            }
+            processingState.exitPlanModeIndex = null;
+            processingState.exitPlanModeInputJson = '';
+          }
+
           processingState.currentToolUseIndex = null;
           // Timer will render updated status at next interval
         }
@@ -1956,7 +2053,7 @@ async function handleMessage(params: {
     }
 
     // Stop the spinner timer now that processing is complete
-    clearInterval(spinnerTimer);
+    clearTimeout(spinnerTimer);
 
     // Calculate context percentage using input tokens + cache read tokens
     // This gives accurate context utilization since cached tokens are in the context window
@@ -2064,6 +2161,9 @@ async function handleMessage(params: {
       const slackResponse = markdownToSlack(strippedResponse);
       let postedMessages: { ts: string }[] = [];
 
+      // Get live config values (allows /message-size to take effect mid-query)
+      const liveConfig = getLiveSessionConfig(channelId, threadTs);
+
       // Try to upload .md and .png files with response text posted separately
       const uploadResult = await uploadMarkdownAndPngWithResponse(
         client,
@@ -2072,7 +2172,7 @@ async function handleMessage(params: {
         slackResponse,
         threadTs,
         userId,
-        session.threadCharLimit
+        liveConfig.threadCharLimit
       );
 
       if (uploadResult) {
@@ -2118,16 +2218,19 @@ async function handleMessage(params: {
         });
       }
 
-      // Check if in plan mode and Claude is asking to proceed
-      // If so, add plan approval buttons
-      if (session.mode === 'plan' && isPlanApprovalPrompt(fullResponse)) {
+      // Check if in plan mode and Claude called ExitPlanMode tool
+      // If so, add CLI-style plan approval buttons with permissions display
+      if (session.mode === 'plan' && processingState.exitPlanModeInput !== null) {
         try {
           await withSlackRetry(() =>
             client.chat.postMessage({
               channel: channelId,
               thread_ts: threadTs,
-              blocks: buildPlanApprovalBlocks({ conversationKey }),
-              text: 'Ready to proceed? Choose how to execute the plan.',
+              blocks: buildPlanApprovalBlocks({
+                conversationKey,
+                allowedPrompts: processingState.exitPlanModeInput?.allowedPrompts,
+              }),
+              text: 'Would you like to proceed? Choose how to execute the plan.',
             })
           );
         } catch (error) {
@@ -2221,6 +2324,10 @@ async function handleMessage(params: {
       text: `Error: ${error.message}`,
     });
   } finally {
+    // Clear spinner timer to prevent memory leak (important if error occurs before normal cleanup)
+    if (spinnerTimer) {
+      clearTimeout(spinnerTimer);
+    }
     // Always clean up busy state, active queries, and mutex
     busyConversations.delete(conversationKey);
     activeQueries.delete(conversationKey);
@@ -2579,138 +2686,166 @@ app.action(/^model_select_(.+)$/, async ({ action, ack, body, client }) => {
   }
 });
 
-// Handle plan approval "Proceed (auto-accept)" button
-app.action(/^plan_approve_auto_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+// ============================================================================
+// Plan Approval Handlers (5 options matching CLI)
+// ============================================================================
 
+// Helper to extract conversation key from action_id
+function extractPlanApprovalConversationKey(action: any, pattern: RegExp): string {
   const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^plan_approve_auto_(.+)$/);
-  const conversationKey = match ? match[1] : '';
+  const match = actionId.match(pattern);
+  return match ? match[1] : '';
+}
 
-  // Extract channel and thread from conversation key
-  const [channelId, threadTs] = conversationKey.includes('_')
-    ? conversationKey.split('_')
-    : [conversationKey, undefined];
-
-  console.log(`Plan approve (auto) clicked for: ${conversationKey}`);
-
+// Helper to update approval message
+async function updateApprovalMessage(body: any, client: any, text: string): Promise<void> {
   const bodyWithChannel = body as any;
-
-  // Update approval message to show selection
   if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
     try {
       await client.chat.update({
         channel: bodyWithChannel.channel.id,
         ts: bodyWithChannel.message.ts,
-        text: `✅ Proceeding with auto-accept mode...`,
+        text,
         blocks: [],
       });
     } catch (error) {
       console.error('Error updating plan approval message:', error);
     }
   }
+}
 
-  // Update session mode to bypassPermissions
+// Option 1: Clear context and bypass permissions
+app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const conversationKey = extractPlanApprovalConversationKey(action, /^plan_clear_bypass_(.+)$/);
+  const [channelId, threadTs] = conversationKey.includes('_')
+    ? conversationKey.split('_')
+    : [conversationKey, undefined];
+
+  console.log(`Plan option 1 (clear + bypass) clicked for: ${conversationKey}`);
+
+  await updateApprovalMessage(body, client, '✅ Clearing context and proceeding with bypass mode...');
+
+  // Clear session (set sessionId to null) and set bypass mode
+  saveSession(channelId, { sessionId: null, mode: 'bypassPermissions' });
+
+  const bodyWithChannel = body as any;
+  await handleMessage({
+    channelId,
+    userId: bodyWithChannel.user?.id,
+    userText: 'Yes, proceed with the plan.',
+    originalTs: threadTs,
+    threadTs,
+    client,
+    skipConcurrentCheck: true,
+  });
+});
+
+// Option 2: Accept edits (auto-accept code edits only)
+app.action(/^plan_accept_edits_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const conversationKey = extractPlanApprovalConversationKey(action, /^plan_accept_edits_(.+)$/);
+  const [channelId, threadTs] = conversationKey.includes('_')
+    ? conversationKey.split('_')
+    : [conversationKey, undefined];
+
+  console.log(`Plan option 2 (accept edits) clicked for: ${conversationKey}`);
+
+  await updateApprovalMessage(body, client, '✅ Proceeding with accept-edits mode...');
+
+  // Set acceptEdits mode
+  saveSession(channelId, { mode: 'acceptEdits' });
+
+  const bodyWithChannel = body as any;
+  await handleMessage({
+    channelId,
+    userId: bodyWithChannel.user?.id,
+    userText: 'Yes, proceed with the plan.',
+    originalTs: threadTs,
+    threadTs,
+    client,
+    skipConcurrentCheck: true,
+  });
+});
+
+// Option 3: Bypass permissions (auto-accept all)
+app.action(/^plan_bypass_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const conversationKey = extractPlanApprovalConversationKey(action, /^plan_bypass_(.+)$/);
+  const [channelId, threadTs] = conversationKey.includes('_')
+    ? conversationKey.split('_')
+    : [conversationKey, undefined];
+
+  console.log(`Plan option 3 (bypass) clicked for: ${conversationKey}`);
+
+  await updateApprovalMessage(body, client, '✅ Proceeding with bypass mode...');
+
+  // Set bypassPermissions mode
   saveSession(channelId, { mode: 'bypassPermissions' });
 
-  // Send "proceed" message to Claude
-  // Use threadTs as originalTs so eyes reaction is managed on the thread
+  const bodyWithChannel = body as any;
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
     userText: 'Yes, proceed with the plan.',
-    originalTs: threadTs,  // Add eyes to thread parent
+    originalTs: threadTs,
     threadTs,
     client,
     skipConcurrentCheck: true,
   });
 });
 
-// Handle plan approval "Proceed (manual approve)" button
-app.action(/^plan_approve_manual_(.+)$/, async ({ action, ack, body, client }) => {
+// Option 4: Manual approve (ask for each tool)
+app.action(/^plan_manual_(.+)$/, async ({ action, ack, body, client }) => {
   await ack();
 
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^plan_approve_manual_(.+)$/);
-  const conversationKey = match ? match[1] : '';
-
-  // Extract channel and thread from conversation key
+  const conversationKey = extractPlanApprovalConversationKey(action, /^plan_manual_(.+)$/);
   const [channelId, threadTs] = conversationKey.includes('_')
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
-  console.log(`Plan approve (manual) clicked for: ${conversationKey}`);
+  console.log(`Plan option 4 (manual) clicked for: ${conversationKey}`);
 
-  const bodyWithChannel = body as any;
+  await updateApprovalMessage(body, client, '✅ Proceeding with manual approval mode...');
 
-  // Update approval message to show selection
-  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
-    try {
-      await client.chat.update({
-        channel: bodyWithChannel.channel.id,
-        ts: bodyWithChannel.message.ts,
-        text: `✅ Proceeding with manual approval mode...`,
-        blocks: [],
-      });
-    } catch (error) {
-      console.error('Error updating plan approval message:', error);
-    }
-  }
-
-  // Update session mode to default (ask)
+  // Set default (ask) mode
   saveSession(channelId, { mode: 'default' });
 
-  // Send "proceed" message to Claude
-  // Use threadTs as originalTs so eyes reaction is managed on the thread
+  const bodyWithChannel = body as any;
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
     userText: 'Yes, proceed with the plan.',
-    originalTs: threadTs,  // Add eyes to thread parent
+    originalTs: threadTs,
     threadTs,
     client,
     skipConcurrentCheck: true,
   });
 });
 
-// Handle plan approval "Reject" button
+// Option 5: Reject/Change the plan
 app.action(/^plan_reject_(.+)$/, async ({ action, ack, body, client }) => {
   await ack();
 
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^plan_reject_(.+)$/);
-  const conversationKey = match ? match[1] : '';
-
-  // Extract channel and thread from conversation key
+  const conversationKey = extractPlanApprovalConversationKey(action, /^plan_reject_(.+)$/);
   const [channelId, threadTs] = conversationKey.includes('_')
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
-  console.log(`Plan reject clicked for: ${conversationKey}`);
+  console.log(`Plan option 5 (reject/change) clicked for: ${conversationKey}`);
 
-  const bodyWithChannel = body as any;
-
-  // Update approval message to show rejection
-  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
-    try {
-      await client.chat.update({
-        channel: bodyWithChannel.channel.id,
-        ts: bodyWithChannel.message.ts,
-        text: `❌ Plan rejected. Tell Claude what to change.`,
-        blocks: [],
-      });
-    } catch (error) {
-      console.error('Error updating plan rejection message:', error);
-    }
-  }
+  await updateApprovalMessage(body, client, '❌ Plan rejected. Tell Claude what to change.');
 
   // Keep mode as plan, send rejection message to Claude
-  // Use threadTs as originalTs so eyes reaction is managed on the thread
+  const bodyWithChannel = body as any;
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
     userText: 'No, I want to change the plan. Please wait for my feedback.',
-    originalTs: threadTs,  // Add eyes to thread parent
+    originalTs: threadTs,
     threadTs,
     client,
     skipConcurrentCheck: true,

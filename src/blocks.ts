@@ -711,102 +711,102 @@ export function buildTerminalCommandBlocks(params: TerminalCommandParams): Block
 }
 
 /**
- * Check if a message from Claude looks like a plan approval prompt.
- * Used to detect when Claude in plan mode is asking to proceed.
- */
-export function isPlanApprovalPrompt(message: string): boolean {
-  const lowerMessage = message.toLowerCase();
-
-  // Common phrases Claude uses when asking to proceed with a plan
-  const approvalPhrases = [
-    'would you like me to proceed',
-    'would you like to proceed',
-    'shall i proceed',
-    'ready to proceed',
-    'want me to proceed',
-    'like me to execute',
-    'shall i execute',
-    'want me to execute',
-    'would you like me to implement',
-    'shall i implement',
-    'ready to implement',
-    'would you like me to go ahead',
-    'shall i go ahead',
-    'want me to go ahead',
-    'should i proceed',
-    'should i go ahead',
-    'should i execute',
-    'should i implement',
-    'let me know if you\'d like me to proceed',
-    'let me know when you\'re ready',
-    'approve this plan',
-    'confirm you want',
-    'confirm to proceed',
-  ];
-
-  return approvalPhrases.some(phrase => lowerMessage.includes(phrase));
-}
-
-/**
  * Parameters for plan approval blocks.
  */
 export interface PlanApprovalBlockParams {
   conversationKey: string;  // Used to identify the conversation for the response
+  allowedPrompts?: { tool: string; prompt: string }[];  // Requested permissions from ExitPlanMode
 }
 
 /**
  * Build blocks for plan approval prompt.
- * Shown when Claude is in plan mode and asks to proceed.
+ * Shows CLI-fidelity 5-option approval UI matching the CLI behavior.
+ * Displays requested permissions if provided.
  */
 export function buildPlanApprovalBlocks(params: PlanApprovalBlockParams): Block[] {
-  const { conversationKey } = params;
+  const { conversationKey, allowedPrompts } = params;
+  const blocks: Block[] = [{ type: "divider" }];
 
-  return [
-    {
-      type: "divider",
-    },
-    {
+  // Show requested permissions (matches CLI)
+  if (allowedPrompts && allowedPrompts.length > 0) {
+    const permList = allowedPrompts
+      .map(p => `  · ${p.tool}(prompt: ${p.prompt})`)
+      .join('\n');
+    blocks.push({
       type: "section",
-      text: {
-        type: "mrkdwn",
-        text: "*Ready to proceed?* Choose how to execute the plan:",
+      text: { type: "mrkdwn", text: `*Requested permissions:*\n\`\`\`\n${permList}\n\`\`\`` },
+    });
+  }
+
+  blocks.push({
+    type: "section",
+    text: { type: "mrkdwn", text: "*Would you like to proceed?*" },
+  });
+
+  // 5 options matching CLI:
+  // 1. Yes, clear context and bypass permissions
+  // 2. Yes, and manually approve edits
+  // 3. Yes, and bypass permissions
+  // 4. Yes, manually approve edits
+  // 5. Type here to tell Claude what to change
+  blocks.push({
+    type: "actions",
+    block_id: `plan_approval_1_${conversationKey}`,
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "1. Clear context & bypass" },
+        action_id: `plan_clear_bypass_${conversationKey}`,
+        style: "primary",
       },
-    },
-    {
-      type: "actions",
-      block_id: `plan_approval_${conversationKey}`,
-      elements: [
-        {
-          type: "button",
-          text: { type: "plain_text", text: ":rocket: Proceed (auto-accept)" },
-          action_id: `plan_approve_auto_${conversationKey}`,
-          value: "bypassPermissions",
-          style: "primary",
-        },
-        {
-          type: "button",
-          text: { type: "plain_text", text: ":question: Proceed (manual approve)" },
-          action_id: `plan_approve_manual_${conversationKey}`,
-          value: "default",
-          style: "primary",
-        },
-        {
-          type: "button",
-          text: { type: "plain_text", text: ":x: Reject" },
-          action_id: `plan_reject_${conversationKey}`,
-          value: "reject",
-          style: "danger",
-        },
-      ],
-    },
-    {
-      type: "context",
-      elements: [{
-        type: "mrkdwn",
-        text: "_Auto-accept runs tools without prompting. Manual approve asks for each tool use._",
-      }],
-    },
-  ];
+      {
+        type: "button",
+        text: { type: "plain_text", text: "2. Accept edits" },
+        action_id: `plan_accept_edits_${conversationKey}`,
+        style: "primary",
+      },
+    ],
+  });
+
+  blocks.push({
+    type: "actions",
+    block_id: `plan_approval_2_${conversationKey}`,
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "3. Bypass permissions" },
+        action_id: `plan_bypass_${conversationKey}`,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "4. Manual approve" },
+        action_id: `plan_manual_${conversationKey}`,
+      },
+    ],
+  });
+
+  blocks.push({
+    type: "actions",
+    block_id: `plan_approval_3_${conversationKey}`,
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "5. Change the plan" },
+        action_id: `plan_reject_${conversationKey}`,
+        style: "danger",
+      },
+    ],
+  });
+
+  blocks.push({
+    type: "context",
+    elements: [{
+      type: "mrkdwn",
+      text: "_1: Fresh start + auto. 2: Auto-accept edits only. 3: Auto-accept all. 4: Ask for each. 5: Revise plan._",
+    }],
+  });
+
+  return blocks;
 }
 
 /**

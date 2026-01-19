@@ -14,7 +14,6 @@ import {
   buildModelSelectionBlocks,
   buildModelDeprecatedBlocks,
   buildPlanApprovalBlocks,
-  isPlanApprovalPrompt,
   buildToolApprovalBlocks,
   formatToolInput,
   buildForkAnchorBlocks,
@@ -851,112 +850,114 @@ describe('blocks', () => {
     });
   });
 
-  describe('isPlanApprovalPrompt', () => {
-    it('should detect "would you like me to proceed"', () => {
-      expect(isPlanApprovalPrompt('Here is my plan. Would you like me to proceed?')).toBe(true);
-    });
-
-    it('should detect "would you like to proceed"', () => {
-      expect(isPlanApprovalPrompt('Would you like to proceed with this plan?')).toBe(true);
-    });
-
-    it('should detect "shall i proceed"', () => {
-      expect(isPlanApprovalPrompt('Shall I proceed with the implementation?')).toBe(true);
-    });
-
-    it('should detect "ready to proceed"', () => {
-      expect(isPlanApprovalPrompt("I'm ready to proceed when you are.")); // Note: this won't match because it says "I'm ready" not "ready to proceed"
-    });
-
-    it('should detect "should i proceed"', () => {
-      expect(isPlanApprovalPrompt('Should I proceed with the plan?')).toBe(true);
-    });
-
-    it('should detect "let me know when you\'re ready"', () => {
-      expect(isPlanApprovalPrompt("Let me know when you're ready to start.")).toBe(true);
-    });
-
-    it('should be case insensitive', () => {
-      expect(isPlanApprovalPrompt('WOULD YOU LIKE ME TO PROCEED?')).toBe(true);
-      expect(isPlanApprovalPrompt('Shall I Proceed?')).toBe(true);
-    });
-
-    it('should return false for regular messages', () => {
-      expect(isPlanApprovalPrompt('Here is the file content.')).toBe(false);
-      expect(isPlanApprovalPrompt('I created the test file.')).toBe(false);
-      expect(isPlanApprovalPrompt('The implementation is complete.')).toBe(false);
-    });
-
-    it('should return false for empty string', () => {
-      expect(isPlanApprovalPrompt('')).toBe(false);
-    });
-  });
-
-  describe('buildPlanApprovalBlocks', () => {
-    it('should include all three action buttons', () => {
-      const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123_thread456' });
-
-      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      expect(actionsBlock).toBeDefined();
-      expect(actionsBlock.elements).toHaveLength(3);
-    });
-
-    it('should have correct action IDs with conversation key', () => {
-      const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123_thread456' });
-
-      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      const actionIds = actionsBlock.elements.map((e: any) => e.action_id);
-
-      expect(actionIds).toContain('plan_approve_auto_C123_thread456');
-      expect(actionIds).toContain('plan_approve_manual_C123_thread456');
-      expect(actionIds).toContain('plan_reject_C123_thread456');
-    });
-
-    it('should have correct button values', () => {
+  describe('buildPlanApprovalBlocks (CLI fidelity)', () => {
+    it('should show 5 action buttons across 3 actions blocks', () => {
       const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123' });
+      const actionsBlocks = blocks.filter((b: any) => b.type === 'actions');
+      const allButtons = actionsBlocks.flatMap((b: any) => b.elements || []);
 
-      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      const values = actionsBlock.elements.map((e: any) => e.value);
-
-      expect(values).toContain('bypassPermissions');
-      expect(values).toContain('default');
-      expect(values).toContain('reject');
+      expect(actionsBlocks).toHaveLength(3);
+      expect(allButtons).toHaveLength(5);
     });
 
-    it('should have primary style for proceed buttons and danger for reject', () => {
+    it('should have correct action IDs matching CLI options', () => {
+      const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123_T456' });
+      const actionsBlocks = blocks.filter((b: any) => b.type === 'actions');
+      const actionIds = actionsBlocks.flatMap((b: any) =>
+        (b.elements || []).map((e: any) => e.action_id)
+      );
+
+      // 5 CLI options
+      expect(actionIds).toContain('plan_clear_bypass_C123_T456');  // Option 1
+      expect(actionIds).toContain('plan_accept_edits_C123_T456'); // Option 2
+      expect(actionIds).toContain('plan_bypass_C123_T456');       // Option 3
+      expect(actionIds).toContain('plan_manual_C123_T456');       // Option 4
+      expect(actionIds).toContain('plan_reject_C123_T456');       // Option 5
+    });
+
+    it('should display requested permissions when provided', () => {
+      const blocks = buildPlanApprovalBlocks({
+        conversationKey: 'C123',
+        allowedPrompts: [
+          { tool: 'Bash', prompt: 'run tests' },
+          { tool: 'Bash', prompt: 'build the project' },
+        ],
+      });
+
+      const text = JSON.stringify(blocks);
+      expect(text).toContain('Requested permissions');
+      expect(text).toContain('Bash(prompt: run tests)');
+      expect(text).toContain('Bash(prompt: build the project)');
+    });
+
+    it('should omit permissions section when allowedPrompts is empty', () => {
       const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123' });
+      const text = JSON.stringify(blocks);
+      expect(text).not.toContain('Requested permissions');
+    });
 
-      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      const autoBtn = actionsBlock.elements.find((e: any) => e.value === 'bypassPermissions');
-      const manualBtn = actionsBlock.elements.find((e: any) => e.value === 'default');
-      const rejectBtn = actionsBlock.elements.find((e: any) => e.value === 'reject');
+    it('should omit permissions section when allowedPrompts is undefined', () => {
+      const blocks = buildPlanApprovalBlocks({
+        conversationKey: 'C123',
+        allowedPrompts: undefined,
+      });
+      const text = JSON.stringify(blocks);
+      expect(text).not.toContain('Requested permissions');
+    });
 
-      expect(autoBtn.style).toBe('primary');
-      expect(manualBtn.style).toBe('primary');
+    it('should have primary style for options 1 and 2, danger for option 5', () => {
+      const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123' });
+      const actionsBlocks = blocks.filter((b: any) => b.type === 'actions');
+      const allButtons = actionsBlocks.flatMap((b: any) => b.elements || []);
+
+      const clearBypassBtn = allButtons.find((e: any) => e.action_id.includes('plan_clear_bypass'));
+      const acceptEditsBtn = allButtons.find((e: any) => e.action_id.includes('plan_accept_edits'));
+      const rejectBtn = allButtons.find((e: any) => e.action_id.includes('plan_reject'));
+
+      expect(clearBypassBtn.style).toBe('primary');
+      expect(acceptEditsBtn.style).toBe('primary');
       expect(rejectBtn.style).toBe('danger');
+    });
+
+    it('should have no style (default) for options 3 and 4', () => {
+      const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123' });
+      const actionsBlocks = blocks.filter((b: any) => b.type === 'actions');
+      const allButtons = actionsBlocks.flatMap((b: any) => b.elements || []);
+
+      const bypassBtn = allButtons.find((e: any) => e.action_id.includes('plan_bypass_'));
+      const manualBtn = allButtons.find((e: any) => e.action_id.includes('plan_manual_'));
+
+      expect(bypassBtn.style).toBeUndefined();
+      expect(manualBtn.style).toBeUndefined();
     });
 
     it('should include a divider at the start', () => {
       const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123' });
-
       expect(blocks[0].type).toBe('divider');
     });
 
-    it('should include context hint about modes', () => {
+    it('should include context hint explaining all 5 options', () => {
       const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123' });
-
       const contextBlock = blocks.find((b: any) => b.type === 'context');
+
       expect(contextBlock).toBeDefined();
-      expect(contextBlock.elements[0].text).toContain('Auto-accept');
-      expect(contextBlock.elements[0].text).toContain('Manual approve');
+      const contextText = contextBlock.elements[0].text;
+      expect(contextText).toContain('Fresh start');
+      expect(contextText).toContain('Auto-accept edits');
+      expect(contextText).toContain('Auto-accept all');
+      expect(contextText).toContain('Ask for each');
+      expect(contextText).toContain('Revise plan');
     });
 
-    it('should include header section with prompt', () => {
+    it('should include header section asking to proceed', () => {
       const blocks = buildPlanApprovalBlocks({ conversationKey: 'C123' });
+      const sectionBlocks = blocks.filter((b: any) => b.type === 'section');
 
-      const sectionBlock = blocks.find((b: any) => b.type === 'section');
-      expect(sectionBlock).toBeDefined();
-      expect(sectionBlock.text.text).toContain('Ready to proceed');
+      // First section (after divider) asks if user wants to proceed
+      const promptSection = sectionBlocks.find((b: any) =>
+        b.text?.text?.includes('Would you like to proceed')
+      );
+      expect(promptSection).toBeDefined();
     });
   });
 
