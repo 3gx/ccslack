@@ -25,7 +25,9 @@ A Slack bot that integrates the Claude Code SDK for AI-powered coding assistance
 | `/mode` | Show mode picker (plan, default, bypassPermissions, acceptEdits) |
 | `/model` | Show model picker |
 | `/max-thinking-tokens [n]` | Set thinking budget (0=disable, 1024-128000, default=31999) |
-| `/update-rate [n]` | Set status update interval (1-10 seconds, default=1) |
+| `/update-rate [n]` | Set status update interval (1-10 seconds, default=2) |
+| `/message-size [n]` | Set message size limit before truncation (100-36000, default=500) |
+| `/strip-empty-tag [true\|false]` | Strip bare ``` wrappers (default=false) |
 | `/ls [path]` | List files in directory (relative or absolute) |
 | `/cd [path]` | Change directory (only before path is locked) |
 | `/set-current-path` | Lock current directory (one-time only, cannot be changed) |

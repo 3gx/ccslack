@@ -43,6 +43,7 @@ src/
 ├── abort-tracker.ts   # Tracks aborted queries by conversation key
 ├── concurrent-check.ts # Detects if session is active in terminal
 ├── model-cache.ts     # Caches available models from SDK
+├── markdown-png.ts    # Markdown to PNG image conversion
 ├── utils.ts           # Utility functions (markdown conversion, etc.)
 └── __tests__/
     ├── unit/          # Unit tests (mocked dependencies)
@@ -63,7 +64,7 @@ src/
 - Thread replies get forked sessions automatically (point-in-time)
 - Session includes: `sessionId`, `workingDir`, `mode`, `model`, timestamps
 - Channel sessions include `messageMap` for Slack ts → SDK message ID mapping
-- Session configuration: `maxThinkingTokens`, `updateRateSeconds`, `lastUsage`
+- Session configuration: `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `stripEmptyTag`, `lastUsage`, `planFilePath`
 - `lastUsage` cleared on `/clear` to show fresh state in `/status` and `/context`
 
 ### Session Cleanup
@@ -149,15 +150,27 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 ### Extended Thinking Configuration
 - `maxThinkingTokens` in session controls Claude's extended thinking budget
 - Values: `undefined` = default (31,999), `0` = disabled, positive = custom budget
-- Set via `/thinking <tokens>` command
+- Set via `/max-thinking-tokens <tokens>` command
 - Inherited by thread sessions from parent channel
 - Shown in `/status` output
 
 ### Update Rate Configuration
 - `updateRateSeconds` controls how often Slack status updates during processing
-- Values: `undefined` = 1 second (default), range 1-10 seconds
+- Values: `undefined` = 2 seconds (default), range 1-10 seconds
 - Higher values reduce Slack API rate limit pressure
-- Set via `/rate <seconds>` command
+- Set via `/update-rate <seconds>` command
+- Shown in `/status` output
+
+### Message Size Configuration
+- `threadCharLimit` controls max chars before response truncation
+- Values: `undefined` = 500 (default), range 100-36000
+- Set via `/message-size <chars>` command
+- Shown in `/status` output
+
+### Strip Empty Tag Configuration
+- `stripEmptyTag` controls stripping of bare ``` wrappers
+- Values: `undefined` or `false` = preserve (default), `true` = strip
+- Set via `/strip-empty-tag [true|false]` command
 - Shown in `/status` output
 
 ### Activity Log and Generating Entries
