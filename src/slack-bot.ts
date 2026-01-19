@@ -2214,6 +2214,13 @@ async function handleMessage(params: {
             }
             processingState.exitPlanModeIndex = null;
             processingState.exitPlanModeInputJson = '';
+
+            // CRITICAL: In plan mode, interrupt query to show approval buttons
+            // This prevents Claude from continuing with "plan approved" and implementation
+            if (session.mode === 'plan' && processingState.exitPlanModeInput !== null) {
+              console.log('[ExitPlanMode] Interrupting query in plan mode to show approval buttons');
+              await claudeQuery.interrupt();
+            }
           }
 
           // Parse Write tool input to capture plan file path

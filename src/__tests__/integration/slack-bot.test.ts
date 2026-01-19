@@ -4362,3 +4362,291 @@ describe('answer file format', () => {
     expect(answerData).toMatch(/"answer":"test"/);
   });
 });
+
+describe('ExitPlanMode interrupt behavior', () => {
+  it('should interrupt query after ExitPlanMode in plan mode', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    // Mock session in plan mode
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    // Track interrupt calls
+    const mockInterrupt = vi.fn().mockResolvedValue(undefined);
+    let toolUseIndex = 0;
+
+    // Mock startClaudeQuery to emit ExitPlanMode tool events
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+
+        // Text block (Claude writing the plan)
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+        };
+
+        // ExitPlanMode tool started
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 1,
+            content_block: { type: 'tool_use', name: 'ExitPlanMode' },
+          },
+        };
+        toolUseIndex = 1;
+
+        // ExitPlanMode input (allowedPrompts)
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 1,
+            delta: { type: 'input_json_delta', partial_json: '{"allowedPrompts":[]}' },
+          },
+        };
+
+        // ExitPlanMode tool completed - this should trigger interrupt
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_stop', index: 1 },
+        };
+
+        // This should NOT be yielded if interrupt works
+        yield { type: 'result', result: 'Plan approved - implementing now', usage: { input_tokens: 100, output_tokens: 50 } };
+      },
+      interrupt: mockInterrupt,
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> implement a feature', channel: 'C123', ts: 'msg1' },
+      client: mockClient,
+    });
+
+    // Verify interrupt was called
+    expect(mockInterrupt).toHaveBeenCalled();
+  });
+
+  it('should NOT interrupt after ExitPlanMode in non-plan modes', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    // Mock session in bypassPermissions mode
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'bypassPermissions',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    const mockInterrupt = vi.fn().mockResolvedValue(undefined);
+
+    // Mock startClaudeQuery with ExitPlanMode
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+
+        // ExitPlanMode tool started (shouldn't interrupt in non-plan mode)
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', name: 'ExitPlanMode' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '{}' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_stop', index: 0 },
+        };
+
+        yield { type: 'result', result: 'Continuing normally', usage: { input_tokens: 100, output_tokens: 50 } };
+      },
+      interrupt: mockInterrupt,
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> do something', channel: 'C123', ts: 'msg1' },
+      client: mockClient,
+    });
+
+    // Verify interrupt was NOT called (non-plan mode)
+    expect(mockInterrupt).not.toHaveBeenCalled();
+  });
+
+  it('should parse ExitPlanMode input before interrupting', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    const mockInterrupt = vi.fn().mockResolvedValue(undefined);
+
+    // Mock fs.promises.readFile for plan file
+    vi.mocked(fs.promises.readFile).mockResolvedValue('# Test Plan');
+
+    // Track what happens
+    let interruptCalledAfterParsing = false;
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+
+        // Write tool (plan file)
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', name: 'Write' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '{"file_path":"/test/.claude/plans/test.md"}' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_stop', index: 0 },
+        };
+
+        // ExitPlanMode tool with allowedPrompts
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 1,
+            content_block: { type: 'tool_use', name: 'ExitPlanMode' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 1,
+            delta: { type: 'input_json_delta', partial_json: '{"allowedPrompts":[{"tool":"Bash","prompt":"run tests"}]}' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_stop', index: 1 },
+        };
+
+        yield { type: 'result', result: 'Done', usage: { input_tokens: 100, output_tokens: 50 } };
+      },
+      interrupt: mockInterrupt,
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> implement feature', channel: 'C123', ts: 'msg1' },
+      client: mockClient,
+    });
+
+    // Verify interrupt was called after ExitPlanMode completed (with parsed input)
+    expect(mockInterrupt).toHaveBeenCalled();
+  });
+
+  it('should NOT interrupt if ExitPlanMode JSON parsing fails', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    const mockInterrupt = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', name: 'ExitPlanMode' },
+          },
+        };
+
+        // Invalid JSON input
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '{invalid json' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_stop', index: 0 },
+        };
+
+        yield { type: 'result', result: 'Done', usage: { input_tokens: 100, output_tokens: 50 } };
+      },
+      interrupt: mockInterrupt,
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> do something', channel: 'C123', ts: 'msg1' },
+      client: mockClient,
+    });
+
+    // Verify interrupt was NOT called (JSON parse failed, exitPlanModeInput is null)
+    expect(mockInterrupt).not.toHaveBeenCalled();
+  });
+});
