@@ -81,8 +81,12 @@ vi.mock('fs', () => ({
     existsSync: vi.fn(),
     writeFileSync: vi.fn(),
     readFileSync: vi.fn(),
+    promises: {
+      readFile: vi.fn().mockResolvedValue('# Test Plan Content'),
+    },
   },
 }));
+
 
 import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog } from '../../session-manager.js';
 import { isSessionActiveInTerminal } from '../../concurrent-check.js';
@@ -1149,6 +1153,49 @@ describe('slack-bot handlers', () => {
 
       // Should save to the channel (extracted from conversation key)
       expect(saveSession).toHaveBeenCalledWith('C123', { mode: 'bypassPermissions' });
+    });
+
+    it('option 1: should use fallback userText when no planFilePath', async () => {
+      const option1Handler = registeredHandlers['action_^plan_clear_bypass_(.+)$'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // No active query, so no planFilePath
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await option1Handler({
+        action: { action_id: 'plan_clear_bypass_C123' },
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      // Should use fallback text
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'Yes, proceed with the plan.',
+        expect.anything()
+      );
     });
   });
 

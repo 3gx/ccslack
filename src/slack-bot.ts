@@ -96,6 +96,10 @@ interface ProcessingState {
   exitPlanModeIndex: number | null;
   exitPlanModeInputJson: string;
   exitPlanModeInput: ExitPlanModeInput | null;
+  // Write tool tracking (to capture plan file path)
+  writeToolIndex: number | null;
+  writeToolInputJson: string;
+  planFilePath: string | null;
 }
 
 /**
@@ -1501,6 +1505,9 @@ async function handleMessage(params: {
     exitPlanModeIndex: null,
     exitPlanModeInputJson: '',
     exitPlanModeInput: null,
+    writeToolIndex: null,
+    writeToolInputJson: '',
+    planFilePath: null,
   };
 
   // Post Message 1: Status panel (Block Kit with Abort)
@@ -1990,6 +1997,12 @@ async function handleMessage(params: {
             console.log('[ExitPlanMode] Tool started at index:', event.index);
           }
 
+          // Track Write tool for plan file path capture
+          if (event.content_block.name === 'Write') {
+            processingState.writeToolIndex = event.index;
+            processingState.writeToolInputJson = '';
+          }
+
           // Timer will render updated status at next interval
         }
 
@@ -1999,6 +2012,13 @@ async function handleMessage(params: {
             event.delta?.type === 'input_json_delta' &&
             processingState.exitPlanModeIndex === event.index) {
           processingState.exitPlanModeInputJson += event.delta.partial_json || '';
+        }
+
+        // Accumulate JSON input for Write tool (plan file capture)
+        if (event?.type === 'content_block_delta' &&
+            event.delta?.type === 'input_json_delta' &&
+            processingState.writeToolIndex === event.index) {
+          processingState.writeToolInputJson += event.delta.partial_json || '';
         }
 
         // Tool use completed (content_block_stop for tool_use block)
@@ -2019,6 +2039,21 @@ async function handleMessage(params: {
             }
             processingState.exitPlanModeIndex = null;
             processingState.exitPlanModeInputJson = '';
+          }
+
+          // Parse Write tool input to capture plan file path
+          if (processingState.writeToolIndex === event.index) {
+            try {
+              const input = JSON.parse(processingState.writeToolInputJson || '{}');
+              if (input.file_path?.includes('.claude/plans/')) {
+                processingState.planFilePath = input.file_path;
+                console.log('[PlanFile] Detected plan file:', input.file_path);
+              }
+            } catch (e) {
+              console.error('[PlanFile] JSON parse failed:', e);
+            }
+            processingState.writeToolIndex = null;
+            processingState.writeToolInputJson = '';
           }
 
           processingState.currentToolUseIndex = null;
@@ -2252,6 +2287,28 @@ async function handleMessage(params: {
       // Check if in plan mode and Claude called ExitPlanMode tool
       // If so, add CLI-style plan approval buttons with permissions display
       if (session.mode === 'plan' && processingState.exitPlanModeInput !== null) {
+        // Display plan file content with .md/.png before approval buttons
+        if (processingState.planFilePath) {
+          try {
+            const planContent = await fs.promises.readFile(processingState.planFilePath, 'utf-8');
+            const slackFormatted = markdownToSlack(planContent);
+            const liveConfig = getLiveSessionConfig(channelId, threadTs);
+
+            await uploadMarkdownAndPngWithResponse(
+              client,
+              channelId,
+              planContent,
+              slackFormatted,
+              threadTs,
+              userId,
+              liveConfig.threadCharLimit
+            );
+          } catch (e) {
+            console.error('[PlanFile] Failed to read/display plan file:', e);
+          }
+        }
+
+        // Then show approval buttons
         try {
           await withSlackRetry(() =>
             client.chat.postMessage({
@@ -2799,6 +2856,10 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
 
   await updateApprovalMessage(body, client, '✅ Clearing context and proceeding with bypass mode...');
 
+  // Get plan file path before clearing (from activeQuery's processingState)
+  const activeQuery = activeQueries.get(conversationKey);
+  const planFilePath = activeQuery?.processingState?.planFilePath;
+
   // Clear session (set sessionId to null) and set bypass mode
   saveSession(channelId, { sessionId: null, mode: 'bypassPermissions' });
 
@@ -2806,7 +2867,9 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
-    userText: 'Yes, proceed with the plan.',
+    userText: planFilePath
+      ? `Execute the plan at ${planFilePath}`
+      : 'Yes, proceed with the plan.',
     originalTs: threadTs,
     threadTs,
     client,
