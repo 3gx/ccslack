@@ -5,7 +5,8 @@ setup:
 	npm install
 
 # Run unit/mock tests (excludes live SDK tests)
-# Configure parallel workers with JOBS=n (default 8)
+# Configure parallel workers with JOBS=n (default 4)
+JOBS ?= 4
 test:
 	npx vitest run --exclude='src/__tests__/sdk-live/**' --maxWorkers=$(JOBS)
 
@@ -21,11 +22,11 @@ test-watch:
 test-coverage:
 	npm run test:coverage
 
-# Run SDK live tests in parallel (default 8 workers, configure with JOBS=n)
+# Run SDK live tests in parallel (default 1 workers, configure with SDKJOBS=n)
 # Uses --silent to suppress console.log, 90s timeout
-JOBS ?= 4
+SDKJOBS ?= 4
 sdk-test:
-	npx vitest run src/__tests__/sdk-live/ --silent --testTimeout=90000 --maxWorkers=$(JOBS)
+	npx vitest run src/__tests__/sdk-live/ --silent --testTimeout=90000 --maxWorkers=$(SDKJOBS)
 
 # Development server
 dev:
