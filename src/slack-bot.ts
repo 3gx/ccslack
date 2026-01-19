@@ -98,9 +98,8 @@ interface ProcessingState {
   exitPlanModeIndex: number | null;
   exitPlanModeInputJson: string;
   exitPlanModeInput: ExitPlanModeInput | null;
-  // Write tool tracking (to capture plan file path)
-  writeToolIndex: number | null;
-  writeToolInputJson: string;
+  // File tool tracking (Write, Edit, Read) to capture plan file path
+  fileToolInputs: Map<number, string>;  // Tracks by tool index
   planFilePath: string | null;
 }
 
@@ -717,6 +716,7 @@ async function runClearSession(
       previousSessionIds: previousIds,
       lastUsage: undefined,  // Clear stale usage data so /status and /context show fresh state
       mode: 'default',  // Reset to safe default mode
+      planFilePath: null,  // Reset plan file path on clear
     });
     console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
 
@@ -811,6 +811,7 @@ async function handleForkThread(params: {
     mode: sourceSession.mode,
     createdAt: Date.now(),
     lastActiveAt: Date.now(),
+    planFilePath: null,  // Don't inherit plan from parent
   });
 
   // 4. Post first message in new thread with link to the fork command message
@@ -1154,6 +1155,133 @@ app.event('channel_deleted', async ({ event }) => {
   }
 });
 
+/**
+ * Display plan approval UI (plan file + approval buttons)
+ * Used by both normal completion and ExitPlanMode interrupt handling
+ */
+async function showPlanApprovalUI(params: {
+  client: any;
+  channelId: string;
+  threadTs?: string;
+  userId: string | undefined;
+  conversationKey: string;
+  planFilePath: string | null;
+  exitPlanModeInput: ExitPlanModeInput | null;
+  statusMsgTs?: string;
+  processingState: {
+    model?: string;
+    toolsCompleted: number;
+    startTime: number;
+    activityLog: ActivityEntry[];
+  };
+  session: { mode: PermissionMode };
+  originalTs?: string;
+}): Promise<void> {
+  const {
+    client, channelId, threadTs, userId, conversationKey,
+    planFilePath, exitPlanModeInput, statusMsgTs, processingState,
+    session, originalTs
+  } = params;
+
+  // Check abort status first
+  if (isAborted(conversationKey)) {
+    console.log('[PlanApproval] Skipping - query was aborted');
+    return;
+  }
+
+  // Add activity log entry for ExitPlanMode completion
+  processingState.activityLog.push({
+    timestamp: Date.now(),
+    type: 'tool_complete',
+    tool: 'ExitPlanMode',
+  });
+
+  // Update status panel to complete
+  if (statusMsgTs) {
+    try {
+      await withSlackRetry(() =>
+        client.chat.update({
+          channel: channelId,
+          ts: statusMsgTs,
+          blocks: buildStatusPanelBlocks({
+            status: 'complete',
+            mode: session.mode,
+            model: processingState.model,
+            toolsCompleted: processingState.toolsCompleted,
+            elapsedMs: Date.now() - processingState.startTime,
+            conversationKey,
+          }),
+          text: 'Plan ready for review',
+        })
+      );
+    } catch (e) {
+      console.error('[PlanApproval] Error updating status panel:', e);
+    }
+  }
+
+  // Display plan file content if available
+  if (planFilePath) {
+    try {
+      const planContent = await fs.promises.readFile(planFilePath, 'utf-8');
+      const slackFormatted = markdownToSlack(planContent);
+      const liveConfig = getLiveSessionConfig(channelId, threadTs);
+
+      await uploadMarkdownAndPngWithResponse(
+        client,
+        channelId,
+        planContent,
+        slackFormatted,
+        threadTs,
+        userId,
+        liveConfig.threadCharLimit,
+        liveConfig.stripEmptyTag
+      );
+    } catch (e) {
+      console.error('[PlanApproval] Failed to read/display plan file:', e);
+    }
+  } else {
+    // No plan file path detected - show warning
+    console.warn('[PlanApproval] No plan file path available');
+    await withSlackRetry(async () =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: ':warning: Could not locate plan file. The plan may have been created in a previous session.',
+      })
+    );
+  }
+
+  // Show approval buttons
+  try {
+    await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        blocks: buildPlanApprovalBlocks({
+          conversationKey,
+          allowedPrompts: exitPlanModeInput?.allowedPrompts,
+        }),
+        text: 'Would you like to proceed? Choose how to execute the plan.',
+      })
+    );
+  } catch (btnError) {
+    console.error('[PlanApproval] Error posting plan approval buttons:', btnError);
+  }
+
+  // Remove eyes reaction
+  if (originalTs) {
+    try {
+      await client.reactions.remove({
+        channel: channelId,
+        timestamp: originalTs,
+        name: 'eyes',
+      });
+    } catch (e) {
+      // Ignore - reaction may already be removed
+    }
+  }
+}
+
 // Common message handler
 async function handleMessage(params: {
   channelId: string;
@@ -1186,6 +1314,7 @@ async function handleMessage(params: {
     maxThinkingTokens?: number;  // Extended thinking budget
     updateRateSeconds?: number;  // Status update interval (1-10s)
     threadCharLimit?: number;    // Thread char limit (100-3000, default 500)
+    planFilePath?: string | null;  // Persistent plan file path for plan mode
   };
   let isNewFork = false;
   let forkedFromSessionId: string | null = null;
@@ -1223,6 +1352,7 @@ async function handleMessage(params: {
       maxThinkingTokens: threadResult.session.maxThinkingTokens,
       updateRateSeconds: threadResult.session.updateRateSeconds,
       threadCharLimit: threadResult.session.threadCharLimit,
+      planFilePath: threadResult.session.planFilePath,
     };
     isNewFork = threadResult.isNewFork;
     forkedFromSessionId = threadResult.session.forkedFrom;
@@ -1261,6 +1391,7 @@ async function handleMessage(params: {
         configuredPath: null,
         configuredBy: null,
         configuredAt: null,
+        planFilePath: null,
       };
       saveSession(channelId, mainSession);
     }
@@ -1640,9 +1771,9 @@ async function handleMessage(params: {
     exitPlanModeIndex: null,
     exitPlanModeInputJson: '',
     exitPlanModeInput: null,
-    writeToolIndex: null,
-    writeToolInputJson: '',
-    planFilePath: null,
+    fileToolInputs: new Map(),
+    // Initialize from session (falls back to null if not set)
+    planFilePath: session.planFilePath || null,
   };
 
   // Post Message 1: Status panel (Block Kit with Abort)
@@ -2172,10 +2303,10 @@ async function handleMessage(params: {
             console.log('[ExitPlanMode] Tool started at index:', event.index);
           }
 
-          // Track Write tool for plan file path capture
-          if (event.content_block.name === 'Write') {
-            processingState.writeToolIndex = event.index;
-            processingState.writeToolInputJson = '';
+          // Track ALL tool_use blocks for plan file path capture
+          // Write/Edit/Read use file_path param, Grep/Glob use path param
+          if (event.content_block?.type === 'tool_use') {
+            processingState.fileToolInputs.set(event.index, '');
           }
 
           // Timer will render updated status at next interval
@@ -2189,11 +2320,12 @@ async function handleMessage(params: {
           processingState.exitPlanModeInputJson += event.delta.partial_json || '';
         }
 
-        // Accumulate JSON input for Write tool (plan file capture)
+        // Accumulate JSON input for file tools (Write/Edit/Read for plan file capture)
         if (event?.type === 'content_block_delta' &&
             event.delta?.type === 'input_json_delta' &&
-            processingState.writeToolIndex === event.index) {
-          processingState.writeToolInputJson += event.delta.partial_json || '';
+            processingState.fileToolInputs.has(event.index)) {
+          const current = processingState.fileToolInputs.get(event.index) || '';
+          processingState.fileToolInputs.set(event.index, current + (event.delta.partial_json || ''));
         }
 
         // Tool use completed (content_block_stop for tool_use block)
@@ -2223,19 +2355,28 @@ async function handleMessage(params: {
             }
           }
 
-          // Parse Write tool input to capture plan file path
-          if (processingState.writeToolIndex === event.index) {
+          // Parse file tool input to capture plan file path
+          // Write/Edit/Read use file_path, Grep/Glob use path
+          if (processingState.fileToolInputs.has(event.index)) {
             try {
-              const input = JSON.parse(processingState.writeToolInputJson || '{}');
-              if (input.file_path?.includes('.claude/plans/')) {
-                processingState.planFilePath = input.file_path;
-                console.log('[PlanFile] Detected plan file:', input.file_path);
+              const inputJson = processingState.fileToolInputs.get(event.index) || '{}';
+              const input = JSON.parse(inputJson);
+              // Check both file_path (Write/Edit/Read) and path (Grep/Glob)
+              const planPath = input.file_path || input.path;
+              if (typeof planPath === 'string' && planPath.includes('.claude/plans/')) {
+                processingState.planFilePath = planPath;
+                // Persist to session for cross-turn access
+                if (threadTs) {
+                  saveThreadSession(channelId, threadTs, { planFilePath: planPath });
+                } else {
+                  saveSession(channelId, { planFilePath: planPath });
+                }
+                console.log('[PlanFile] Detected and persisted plan file:', planPath);
               }
             } catch (e) {
               console.error('[PlanFile] JSON parse failed:', e);
             }
-            processingState.writeToolIndex = null;
-            processingState.writeToolInputJson = '';
+            processingState.fileToolInputs.delete(event.index);
           }
 
           processingState.currentToolUseIndex = null;
@@ -2470,60 +2611,43 @@ async function handleMessage(params: {
         });
       }
 
-      // Check if in plan mode and Claude called ExitPlanMode tool
-      // If so, add CLI-style plan approval buttons with permissions display
-      if (session.mode === 'plan' && processingState.exitPlanModeInput !== null) {
-        // Display plan file content with .md/.png before approval buttons
-        if (processingState.planFilePath) {
-          try {
-            const planContent = await fs.promises.readFile(processingState.planFilePath, 'utf-8');
-            const slackFormatted = markdownToSlack(planContent);
-            const liveConfig = getLiveSessionConfig(channelId, threadTs);
-
-            await uploadMarkdownAndPngWithResponse(
-              client,
-              channelId,
-              planContent,
-              slackFormatted,
-              threadTs,
-              userId,
-              liveConfig.threadCharLimit,
-              liveConfig.stripEmptyTag
-            );
-          } catch (e) {
-            console.error('[PlanFile] Failed to read/display plan file:', e);
-          }
-        }
-
-        // Then show approval buttons
-        try {
-          await withSlackRetry(() =>
-            client.chat.postMessage({
-              channel: channelId,
-              thread_ts: threadTs,
-              blocks: buildPlanApprovalBlocks({
-                conversationKey,
-                allowedPrompts: processingState.exitPlanModeInput?.allowedPrompts,
-              }),
-              text: 'Would you like to proceed? Choose how to execute the plan.',
-            })
-          );
-        } catch (error) {
-          console.error('Error posting plan approval buttons:', error);
-        }
-      }
     }
 
-    // Remove eyes reaction
-    if (originalTs) {
-      try {
-        await client.reactions.remove({
-          channel: channelId,
-          timestamp: originalTs,
-          name: 'eyes',
-        });
-      } catch (error) {
-        console.error('Error removing reaction:', error);
+    // Check if in plan mode and Claude called ExitPlanMode tool
+    // If so, add CLI-style plan approval buttons with permissions display
+    // IMPORTANT: This is OUTSIDE the fullResponse check - approval buttons must show
+    // even if Claude didn't output text (e.g., only wrote plan file then called ExitPlanMode)
+    if (!isAborted(conversationKey) && session.mode === 'plan' && processingState.exitPlanModeInput !== null) {
+      await showPlanApprovalUI({
+        client,
+        channelId,
+        threadTs,
+        userId,
+        conversationKey,
+        planFilePath: processingState.planFilePath,
+        exitPlanModeInput: processingState.exitPlanModeInput,
+        statusMsgTs,
+        processingState: {
+          model: processingState.model,
+          toolsCompleted: processingState.toolsCompleted,
+          startTime: processingState.startTime,
+          activityLog: processingState.activityLog,
+        },
+        session,
+        originalTs,
+      });
+    } else {
+      // Remove eyes reaction (only if not plan mode with ExitPlanMode - helper handles that case)
+      if (originalTs) {
+        try {
+          await client.reactions.remove({
+            channel: channelId,
+            timestamp: originalTs,
+            name: 'eyes',
+          });
+        } catch (error) {
+          console.error('Error removing reaction:', error);
+        }
       }
     }
 
@@ -2532,6 +2656,48 @@ async function handleMessage(params: {
 
   } catch (error: any) {
     console.error('Error streaming Claude response:', error);
+
+    // Stop spinner timer immediately
+    if (spinnerTimer) {
+      clearTimeout(spinnerTimer);
+      spinnerTimer = undefined;
+    }
+
+    // Safety net: Check if this is an ExitPlanMode interrupt (not a real error)
+    // NOTE: Testing shows interrupt() typically completes normally without throwing.
+    // The normal completion path at line ~2596 handles ExitPlanMode approval UI.
+    // This catch block is a fallback in case SDK behavior changes or edge cases occur.
+    // See: sdk-live/interrupt-error-format.test.ts for documented SDK behavior.
+    const isExitPlanModeInterrupt =
+      session.mode === 'plan' &&
+      processingState.exitPlanModeInput !== null &&
+      !isAborted(conversationKey) &&  // Don't show buttons if user aborted
+      error.message?.includes('exited with code 1');
+
+    if (isExitPlanModeInterrupt) {
+      console.log('[ExitPlanMode] Detected interrupt, showing approval buttons');
+
+      await showPlanApprovalUI({
+        client,
+        channelId,
+        threadTs,
+        userId,
+        conversationKey,
+        planFilePath: processingState.planFilePath,
+        exitPlanModeInput: processingState.exitPlanModeInput,
+        statusMsgTs,
+        processingState: {
+          model: processingState.model,
+          toolsCompleted: processingState.toolsCompleted,
+          startTime: processingState.startTime,
+          activityLog: processingState.activityLog,
+        },
+        session,
+        originalTs,
+      });
+
+      return; // Exit early - don't show error to user
+    }
 
     // Update both messages to error state (only if not aborted)
     if (!isAborted(conversationKey)) {

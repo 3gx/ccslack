@@ -638,6 +638,7 @@ export interface StatusDisplayParams {
   updateRateSeconds?: number;  // undefined = 2 (default), range 1-10
   messageSize?: number;        // undefined = 500 (default), range 100-36000
   stripEmptyTag?: boolean;     // undefined = false (default), true = strip bare ``` wrappers
+  planFilePath?: string | null;  // Plan file path for plan mode
 }
 
 // Default thinking tokens for display
@@ -651,7 +652,7 @@ const MESSAGE_SIZE_DEFAULT = 500;
  * Build blocks for /status command response.
  */
 export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
-  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens, updateRateSeconds, messageSize, stripEmptyTag } = params;
+  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens, updateRateSeconds, messageSize, stripEmptyTag, planFilePath } = params;
 
   // SDK mode emojis for display
   const modeEmoji: Record<PermissionMode, string> = {
@@ -668,6 +669,11 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
     `*Working Directory:* \`${workingDir}\``,
     `*Last Active:* ${lastActive}`,
   ];
+
+  // Add plan file path if set (only relevant in plan mode)
+  if (planFilePath) {
+    statusLines.push(`*Plan File:* \`${planFilePath}\``);
+  }
 
   // Add model and context info if available
   if (lastUsage) {

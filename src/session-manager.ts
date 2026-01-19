@@ -50,6 +50,8 @@ export interface Session {
   threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
   // Strip empty code fence tag configuration
   stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
+  // Persistent plan file path for plan mode (detected from tool usage)
+  planFilePath?: string | null;
 }
 
 /**
@@ -81,6 +83,8 @@ export interface ThreadSession {
   threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
   // Strip empty code fence tag configuration (inherited from channel)
   stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
+  // Persistent plan file path for plan mode (NOT inherited - each thread has its own)
+  planFilePath?: string | null;
 }
 
 /**
@@ -228,6 +232,7 @@ export function saveSession(channelId: string, session: Partial<Session>): void 
     updateRateSeconds: existing?.updateRateSeconds,  // Preserve update rate config
     threadCharLimit: existing?.threadCharLimit,  // Preserve thread char limit config
     stripEmptyTag: existing?.stripEmptyTag,  // Preserve strip empty tag config
+    planFilePath: existing?.planFilePath,  // Preserve plan file path for plan mode
     threads: existing?.threads,  // Preserve existing threads
     messageMap: existing?.messageMap,  // Preserve message mappings for point-in-time forking
     activityLogs: existing?.activityLogs,  // Preserve activity logs for View Log modal
@@ -308,6 +313,8 @@ export function saveThreadSession(
     threadCharLimit: existingThread?.threadCharLimit ?? store.channels[channelId].threadCharLimit,
     // Inherit strip empty tag config from channel
     stripEmptyTag: existingThread?.stripEmptyTag ?? store.channels[channelId].stripEmptyTag,
+    // NOT inherited - each thread has its own plan file path
+    planFilePath: existingThread?.planFilePath,
     ...session,
   };
 

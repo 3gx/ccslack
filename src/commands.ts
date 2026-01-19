@@ -333,6 +333,7 @@ function handleStatus(session: Session): CommandResult {
       updateRateSeconds: session.updateRateSeconds,
       messageSize: session.threadCharLimit,
       stripEmptyTag: session.stripEmptyTag,
+      planFilePath: session.planFilePath,
     }),
   };
 }
