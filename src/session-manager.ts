@@ -48,6 +48,8 @@ export interface Session {
   updateRateSeconds?: number;  // undefined = 2 (default), range 1-10
   // Message size limit configuration
   threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
+  // Strip empty code fence tag configuration
+  stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
 }
 
 /**
@@ -77,6 +79,8 @@ export interface ThreadSession {
   updateRateSeconds?: number;  // undefined = 2 (default), range 1-10
   // Message size limit configuration (inherited from channel)
   threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
+  // Strip empty code fence tag configuration (inherited from channel)
+  stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
 }
 
 /**
@@ -223,6 +227,7 @@ export function saveSession(channelId: string, session: Partial<Session>): void 
     maxThinkingTokens: existing?.maxThinkingTokens,  // Preserve thinking token config
     updateRateSeconds: existing?.updateRateSeconds,  // Preserve update rate config
     threadCharLimit: existing?.threadCharLimit,  // Preserve thread char limit config
+    stripEmptyTag: existing?.stripEmptyTag,  // Preserve strip empty tag config
     threads: existing?.threads,  // Preserve existing threads
     messageMap: existing?.messageMap,  // Preserve message mappings for point-in-time forking
     activityLogs: existing?.activityLogs,  // Preserve activity logs for View Log modal
@@ -301,6 +306,8 @@ export function saveThreadSession(
     maxThinkingTokens: existingThread?.maxThinkingTokens ?? store.channels[channelId].maxThinkingTokens,
     // Inherit thread char limit config from channel
     threadCharLimit: existingThread?.threadCharLimit ?? store.channels[channelId].threadCharLimit,
+    // Inherit strip empty tag config from channel
+    stripEmptyTag: existingThread?.stripEmptyTag ?? store.channels[channelId].stripEmptyTag,
     ...session,
   };
 
@@ -365,6 +372,8 @@ export function getOrCreateThreadSession(
     maxThinkingTokens: mainSession?.maxThinkingTokens,
     // Inherit thread char limit config from main session
     threadCharLimit: mainSession?.threadCharLimit,
+    // Inherit strip empty tag config from main session
+    stripEmptyTag: mainSession?.stripEmptyTag,
   };
 
   // Save the new thread session

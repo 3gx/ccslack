@@ -188,6 +188,7 @@ function getLiveSessionConfig(channelId: string, threadTs?: string) {
   return {
     updateRateSeconds: session?.updateRateSeconds ?? 1,
     threadCharLimit: session?.threadCharLimit ?? 500,
+    stripEmptyTag: session?.stripEmptyTag ?? false,
   };
 }
 
@@ -2221,14 +2222,16 @@ async function handleMessage(params: {
     // Post complete response (only if not aborted and we have content)
     // Upload .md/.png files and post text separately (initial_comment doesn't support mrkdwn)
     if (!isAborted(conversationKey) && fullResponse) {
+      // Get live config values (allows /message-size and /strip-empty-tag to take effect mid-query)
+      const liveConfig = getLiveSessionConfig(channelId, threadTs);
+
       // Strip markdown code fence wrapper BEFORE converting to Slack format
       // Claude sometimes wraps output in ``` or ```markdown fences
-      const strippedResponse = stripMarkdownCodeFence(fullResponse);
+      const strippedResponse = stripMarkdownCodeFence(fullResponse, {
+        stripEmptyTag: liveConfig.stripEmptyTag,
+      });
       const slackResponse = markdownToSlack(strippedResponse);
       let postedMessages: { ts: string }[] = [];
-
-      // Get live config values (allows /message-size to take effect mid-query)
-      const liveConfig = getLiveSessionConfig(channelId, threadTs);
 
       // Try to upload .md and .png files with response text posted separately
       const uploadResult = await uploadMarkdownAndPngWithResponse(
@@ -2238,7 +2241,8 @@ async function handleMessage(params: {
         slackResponse,
         threadTs,
         userId,
-        liveConfig.threadCharLimit
+        liveConfig.threadCharLimit,
+        liveConfig.stripEmptyTag
       );
 
       if (uploadResult) {
@@ -2301,7 +2305,8 @@ async function handleMessage(params: {
               slackFormatted,
               threadTs,
               userId,
-              liveConfig.threadCharLimit
+              liveConfig.threadCharLimit,
+              liveConfig.stripEmptyTag
             );
           } catch (e) {
             console.error('[PlanFile] Failed to read/display plan file:', e);

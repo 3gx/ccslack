@@ -103,6 +103,8 @@ export function parseCommand(
       return handleUpdateRate(argString, session);
     case 'message-size':
       return handleMessageSize(argString, session);
+    case 'strip-empty-tag':
+      return handleStripEmptyTag(argString, session);
     default:
       // Unknown command - return error
       return {
@@ -128,6 +130,7 @@ function handleHelp(): CommandResult {
 \`/max-thinking-tokens [n]\` - Set thinking budget (0=disable, 1024-128000, default=31999)
 \`/update-rate [n]\` - Set status update interval (1-10 seconds, default=1)
 \`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
+\`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
 \`/continue\` - Get command to continue session in terminal
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
@@ -329,6 +332,7 @@ function handleStatus(session: Session): CommandResult {
       maxThinkingTokens: session.maxThinkingTokens,
       updateRateSeconds: session.updateRateSeconds,
       messageSize: session.threadCharLimit,
+      stripEmptyTag: session.stripEmptyTag,
     }),
   };
 }
@@ -686,5 +690,46 @@ function handleMessageSize(args: string, session: Session): CommandResult {
     handled: true,
     response: `Message size limit set to ${value}.`,
     sessionUpdate: { threadCharLimit: value },
+  };
+}
+
+/**
+ * /strip-empty-tag [true|false] - Control stripping of bare ``` wrappers
+ * - No args: Show current value
+ * - true: Strip bare ``` wrappers (Case C logic from stripMarkdownCodeFence)
+ * - false: Don't strip bare ``` wrappers (default)
+ */
+function handleStripEmptyTag(args: string, session: Session): CommandResult {
+  // No args - show current value
+  if (!args.trim()) {
+    const current = session.stripEmptyTag;
+    if (current === true) {
+      return { handled: true, response: 'Strip empty tag: enabled' };
+    } else {
+      return { handled: true, response: 'Strip empty tag: disabled (default)' };
+    }
+  }
+
+  // Parse boolean value
+  const value = args.trim().toLowerCase();
+  if (value === 'true' || value === '1' || value === 'on' || value === 'yes') {
+    return {
+      handled: true,
+      response: 'Strip empty tag enabled. Bare ``` wrappers will be stripped.',
+      sessionUpdate: { stripEmptyTag: true },
+    };
+  }
+  if (value === 'false' || value === '0' || value === 'off' || value === 'no') {
+    return {
+      handled: true,
+      response: 'Strip empty tag disabled. Bare ``` wrappers will be preserved.',
+      sessionUpdate: { stripEmptyTag: false },
+    };
+  }
+
+  // Invalid value
+  return {
+    handled: true,
+    response: 'Invalid value. Usage: `/strip-empty-tag [true|false]`',
   };
 }

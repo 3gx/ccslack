@@ -799,4 +799,85 @@ describe('commands', () => {
       expect(result.response).toContain('100-36000');
     });
   });
+
+  describe('/strip-empty-tag', () => {
+    it('should show default value (disabled) when not set', () => {
+      const result = parseCommand('/strip-empty-tag', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('disabled');
+      expect(result.response).toContain('default');
+    });
+
+    it('should show enabled when set to true', () => {
+      const sessionWithStrip: Session = { ...mockSession, stripEmptyTag: true };
+      const result = parseCommand('/strip-empty-tag', sessionWithStrip);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('enabled');
+      expect(result.response).not.toContain('default');
+    });
+
+    it('should accept true value', () => {
+      const result = parseCommand('/strip-empty-tag true', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.stripEmptyTag).toBe(true);
+      expect(result.response).toContain('enabled');
+    });
+
+    it('should accept false value', () => {
+      const sessionWithStrip: Session = { ...mockSession, stripEmptyTag: true };
+      const result = parseCommand('/strip-empty-tag false', sessionWithStrip);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.stripEmptyTag).toBe(false);
+      expect(result.response).toContain('disabled');
+    });
+
+    it('should accept 1 as true', () => {
+      const result = parseCommand('/strip-empty-tag 1', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.stripEmptyTag).toBe(true);
+    });
+
+    it('should accept 0 as false', () => {
+      const result = parseCommand('/strip-empty-tag 0', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.stripEmptyTag).toBe(false);
+    });
+
+    it('should accept on as true', () => {
+      const result = parseCommand('/strip-empty-tag on', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.stripEmptyTag).toBe(true);
+    });
+
+    it('should accept off as false', () => {
+      const result = parseCommand('/strip-empty-tag off', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.stripEmptyTag).toBe(false);
+    });
+
+    it('should accept yes as true', () => {
+      const result = parseCommand('/strip-empty-tag yes', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.stripEmptyTag).toBe(true);
+    });
+
+    it('should accept no as false', () => {
+      const result = parseCommand('/strip-empty-tag no', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.stripEmptyTag).toBe(false);
+    });
+
+    it('should reject invalid input', () => {
+      const result = parseCommand('/strip-empty-tag invalid', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Invalid value');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should appear in /help output', () => {
+      const result = parseCommand('/help', mockSession);
+      expect(result.response).toContain('/strip-empty-tag');
+      expect(result.response).toContain('true|false');
+    });
+  });
 });

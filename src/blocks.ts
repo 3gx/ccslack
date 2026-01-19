@@ -492,6 +492,7 @@ export interface StatusDisplayParams {
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
   updateRateSeconds?: number;  // undefined = 2 (default), range 1-10
   messageSize?: number;        // undefined = 500 (default), range 100-36000
+  stripEmptyTag?: boolean;     // undefined = false (default), true = strip bare ``` wrappers
 }
 
 // Default thinking tokens for display
@@ -505,7 +506,7 @@ const MESSAGE_SIZE_DEFAULT = 500;
  * Build blocks for /status command response.
  */
 export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
-  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens, updateRateSeconds, messageSize } = params;
+  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens, updateRateSeconds, messageSize, stripEmptyTag } = params;
 
   // SDK mode emojis for display
   const modeEmoji: Record<PermissionMode, string> = {
@@ -554,6 +555,13 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
     statusLines.push(`*Message Size:* ${MESSAGE_SIZE_DEFAULT} (default)`);
   } else {
     statusLines.push(`*Message Size:* ${messageSize.toLocaleString()}`);
+  }
+
+  // Add strip empty tag info
+  if (stripEmptyTag === true) {
+    statusLines.push(`*Strip Empty Tag:* enabled`);
+  } else {
+    statusLines.push(`*Strip Empty Tag:* disabled (default)`);
   }
 
   if (pathConfigured) {
