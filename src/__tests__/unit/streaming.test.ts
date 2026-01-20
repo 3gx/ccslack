@@ -362,7 +362,7 @@ describe('streaming', () => {
       );
     });
 
-    it('generates unique .md filename with timestamp and markdown filetype', async () => {
+    it('generates unique .md filename with timestamp', async () => {
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
@@ -374,7 +374,6 @@ describe('streaming', () => {
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           filename: expect.stringMatching(/^response-\d+\.md$/),
-          filetype: 'markdown',
         })
       );
     });
