@@ -10,6 +10,7 @@ import {
   extractTextContent,
   findMessageIndexByUuid,
   buildActivityEntriesFromMessage,
+  readLastUserMessageUuid,
   SessionFileMessage,
 } from '../../session-reader.js';
 
@@ -20,6 +21,7 @@ vi.mock('fs', async () => {
     ...actual,
     existsSync: vi.fn(),
     statSync: vi.fn(),
+    readFileSync: vi.fn(),
     promises: {
       stat: vi.fn(),
       open: vi.fn(),
@@ -462,6 +464,98 @@ describe('session-reader', () => {
       const result = findMessageIndexByUuid(messages, 'any-uuid');
 
       expect(result).toBe(-1);
+    });
+  });
+
+  describe('readLastUserMessageUuid', () => {
+    it('should return null when file does not exist', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      const result = readLastUserMessageUuid('/nonexistent/file.jsonl');
+
+      expect(result).toBeNull();
+    });
+
+    it('should return the last user message UUID', () => {
+      const userMsg1 = { type: 'user', uuid: 'uuid-first', message: { role: 'user', content: 'Hello' } };
+      const assistantMsg = { type: 'assistant', uuid: 'uuid-assistant', message: { role: 'assistant', content: [] } };
+      const userMsg2 = { type: 'user', uuid: 'uuid-last', message: { role: 'user', content: 'World' } };
+      const content = [userMsg1, assistantMsg, userMsg2].map(m => JSON.stringify(m)).join('\n');
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = readLastUserMessageUuid('/some/file.jsonl');
+
+      expect(result).toBe('uuid-last');
+    });
+
+    it('should return null when no user messages exist', () => {
+      const assistantMsg = { type: 'assistant', uuid: 'uuid-assistant', message: { role: 'assistant', content: [] } };
+      const progressMsg = { type: 'progress', uuid: 'uuid-progress' };
+      const content = [assistantMsg, progressMsg].map(m => JSON.stringify(m)).join('\n');
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = readLastUserMessageUuid('/some/file.jsonl');
+
+      expect(result).toBeNull();
+    });
+
+    it('should skip lines with invalid JSON', () => {
+      const userMsg = { type: 'user', uuid: 'uuid-valid', message: { role: 'user', content: 'Hello' } };
+      const content = JSON.stringify(userMsg) + '\n' + 'invalid json line' + '\n' + '{ broken json';
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = readLastUserMessageUuid('/some/file.jsonl');
+
+      expect(result).toBe('uuid-valid');
+    });
+
+    it('should return null when file read fails', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation(() => {
+        throw new Error('EACCES: permission denied');
+      });
+
+      const result = readLastUserMessageUuid('/protected/file.jsonl');
+
+      expect(result).toBeNull();
+    });
+
+    it('should handle empty file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('');
+
+      const result = readLastUserMessageUuid('/empty/file.jsonl');
+
+      expect(result).toBeNull();
+    });
+
+    it('should handle file with only whitespace', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('   \n\n  \n');
+
+      const result = readLastUserMessageUuid('/whitespace/file.jsonl');
+
+      expect(result).toBeNull();
+    });
+
+    it('should return user UUID even when last line is non-user message', () => {
+      const userMsg = { type: 'user', uuid: 'uuid-user', message: { role: 'user', content: 'Hello' } };
+      const assistantMsg = { type: 'assistant', uuid: 'uuid-assistant', message: { role: 'assistant', content: [] } };
+      const content = JSON.stringify(userMsg) + '\n' + JSON.stringify(assistantMsg);
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = readLastUserMessageUuid('/some/file.jsonl');
+
+      // Should find the user message even though assistant message is last
+      expect(result).toBe('uuid-user');
     });
   });
 

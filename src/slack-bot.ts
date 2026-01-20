@@ -69,6 +69,7 @@ import {
 import {
   getSessionFilePath,
   sessionFileExists,
+  readLastUserMessageUuid,
 } from './session-reader.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
 import fs from 'fs';
@@ -2317,7 +2318,7 @@ async function handleMessage(params: {
     let isActivelyStreaming = true;  // Flag to track if we're in middle of streaming (before result)
     let newSessionId: string | null = null;
     let modelName: string | undefined;
-    let currentAssistantMessageId: string | null = null;  // For message mapping
+    const assistantMessageUuids: Set<string> = new Set();  // Track ALL assistant UUIDs for message mapping
     let costUsd: number | undefined;
 
     // Helper to start an in-progress thinking entry (for live streaming)
@@ -2551,12 +2552,15 @@ async function handleMessage(params: {
     scheduleUpdate();
 
     for await (const msg of claudeQuery) {
-      // Capture assistant message UUID for message mapping (point-in-time forking)
-      // IMPORTANT: Use msg.uuid (SDK's internal UUID), NOT msg.message.id (Anthropic's message ID)
-      // The SDK's resumeSessionAt parameter expects the uuid, not the message.id
+      // Capture ALL assistant message UUIDs for message mapping (point-in-time forking)
+      // IMPORTANT: With extended thinking, SDK emits MULTIPLE assistant messages:
+      // - One for thinking content (uuid=X)
+      // - One for text content (uuid=Y)
+      // We must track ALL UUIDs so /ff can filter out all Slack-originated messages
       if (msg.type === 'assistant' && (msg as any).uuid) {
-        currentAssistantMessageId = (msg as any).uuid;
-        console.log(`[Mapping] Captured assistant message UUID: ${currentAssistantMessageId}`);
+        const uuid = (msg as any).uuid;
+        assistantMessageUuids.add(uuid);
+        console.log(`[Mapping] Captured assistant message UUID: ${uuid} (total: ${assistantMessageUuids.size})`);
         // Track generating activity for user visibility (shows text is being streamed)
         updateGeneratingEntry(fullResponse.length);
       }
@@ -2935,46 +2939,85 @@ async function handleMessage(params: {
 
     }
 
-    // MOVED OUTSIDE fullResponse check: Always track UUID if we have it
-    // This handles: empty responses, intermediate-only posts, activity-only responses
+    // CRITICAL: Save message mappings for /ff filtering AFTER query completes
+    // At this point, SDK has written all messages to the session file
     //
-    // Why this matters: If we don't track the UUID, /ff will think this is a
-    // terminal message and re-import it, causing duplicates.
+    // We track BOTH user and assistant UUIDs to prevent /ff from re-importing:
+    // 1. User message - read UUID from session file (not available at init time)
+    // 2. Assistant messages - captured from stream events (may be multiple with extended thinking)
     //
     // Edge cases:
     // - newSessionId null: SDK crashed before init - skip (nothing to track)
-    // - currentAssistantMessageId null: No assistant response - skip (nothing to track)
+    // - assistantMessageUuids empty: No assistant response - skip (nothing to track)
     // - postedMessages empty: Content posted earlier (intermediate) or nothing to post - use placeholder
-    if (currentAssistantMessageId && newSessionId) {
-      if (postedMessages.length > 0 && originalTs) {
-        // Normal case: map to real Slack timestamps
-        const userMessageTs = originalTs;
+    if (newSessionId) {
+      // 1. Capture user message UUID from session file (NOW it's written)
+      if (originalTs) {
+        const sessionFilePath = getSessionFilePath(newSessionId, session.workingDir);
+        const userUuid = readLastUserMessageUuid(sessionFilePath);
+        if (userUuid) {
+          saveMessageMapping(channelId, originalTs, {
+            sdkMessageId: userUuid,
+            sessionId: newSessionId,
+            type: 'user',
+          });
+          console.log(`[Mapping] Saved user message UUID: ${userUuid}`);
+        } else {
+          // Fallback to placeholder if file read fails
+          saveMessageMapping(channelId, originalTs, {
+            sdkMessageId: `user_${originalTs}`,
+            sessionId: newSessionId,
+            type: 'user',
+          });
+          console.log(`[Mapping] Saved user message placeholder (file read failed): user_${originalTs}`);
+        }
+      }
 
-        // Map ALL split message timestamps to the same SDK message UUID
-        postedMessages.forEach((slackMsg, index) => {
-          const isFirst = index === 0;
+      // 2. Save ALL assistant message UUIDs (thinking + text with extended thinking)
+      if (assistantMessageUuids.size > 0) {
+        if (postedMessages.length > 0 && originalTs) {
+          // Normal case: map first posted message to first assistant UUID
+          // Additional UUIDs get placeholder mappings
+          const uuidArray = Array.from(assistantMessageUuids);
+          const userMessageTs = originalTs;
 
-          saveMessageMapping(channelId, slackMsg.ts, {
-            sdkMessageId: currentAssistantMessageId!,  // This is the UUID, not message.id
-            sessionId: newSessionId!,  // Track which session this message belongs to
-            type: 'assistant',
-            parentSlackTs: isFirst ? userMessageTs : undefined,  // Only first links to user message
-            isContinuation: !isFirst,  // Mark continuations
+          // Map first posted message to first UUID (for point-in-time forking)
+          postedMessages.forEach((slackMsg, index) => {
+            const isFirst = index === 0;
+            // Use first UUID for all posted messages (they're all from the same response)
+            saveMessageMapping(channelId, slackMsg.ts, {
+              sdkMessageId: uuidArray[0],
+              sessionId: newSessionId!,
+              type: 'assistant',
+              parentSlackTs: isFirst ? userMessageTs : undefined,
+              isContinuation: !isFirst,
+            });
+            console.log(`[Mapping] Linked Slack ts ${slackMsg.ts} → SDK UUID ${uuidArray[0]}${!isFirst ? ' (continuation)' : ''}`);
           });
 
-          console.log(`[Mapping] Linked Slack ts ${slackMsg.ts} → SDK UUID ${currentAssistantMessageId} in session ${newSessionId}${!isFirst ? ' (continuation)' : ''}`);
-        });
-      } else {
-        // No final post OR posting failed: still track UUID with placeholder
-        // Placeholder format: _slack_<uuid> (underscore prefix avoids collision with Slack ts)
-        // This prevents /ff from re-importing Slack-originated messages
-        const placeholderTs = `_slack_${currentAssistantMessageId}`;
-        saveMessageMapping(channelId, placeholderTs, {
-          sdkMessageId: currentAssistantMessageId,
-          sessionId: newSessionId,
-          type: 'assistant',
-        });
-        console.log(`[Mapping] Saved placeholder for empty/failed response: ${currentAssistantMessageId}`);
+          // Save placeholder mappings for additional UUIDs (e.g., thinking block UUID)
+          // This ensures /ff won't re-import them
+          for (let i = 1; i < uuidArray.length; i++) {
+            const placeholderTs = `_slack_${uuidArray[i]}`;
+            saveMessageMapping(channelId, placeholderTs, {
+              sdkMessageId: uuidArray[i],
+              sessionId: newSessionId!,
+              type: 'assistant',
+            });
+            console.log(`[Mapping] Saved placeholder for additional assistant UUID: ${uuidArray[i]}`);
+          }
+        } else {
+          // No final post OR posting failed: save placeholders for ALL UUIDs
+          for (const uuid of assistantMessageUuids) {
+            const placeholderTs = `_slack_${uuid}`;
+            saveMessageMapping(channelId, placeholderTs, {
+              sdkMessageId: uuid,
+              sessionId: newSessionId!,
+              type: 'assistant',
+            });
+            console.log(`[Mapping] Saved placeholder for assistant UUID: ${uuid}`);
+          }
+        }
       }
     }
 

@@ -64,6 +64,12 @@ vi.mock('fs', () => ({
   },
 }));
 
+vi.mock('../../session-reader.js', () => ({
+  getSessionFilePath: vi.fn().mockReturnValue('/test/session.jsonl'),
+  sessionFileExists: vi.fn().mockReturnValue(false),
+  readLastUserMessageUuid: vi.fn().mockReturnValue(null),
+}));
+
 // Import utilities from setup
 import { createMockSlackClient } from './slack-bot-setup.js';
 

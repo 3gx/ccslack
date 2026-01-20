@@ -212,6 +212,39 @@ const THINKING_TRUNCATE_LENGTH = 500;
  *
  * @returns Array of activity entries (may be empty for user messages or messages with no activity)
  */
+/**
+ * Read the last user message UUID from a session file.
+ * Used to capture the real SDK-assigned UUID for user messages,
+ * which is needed for /ff to correctly filter out Slack-originated messages.
+ *
+ * @param sessionFilePath Path to the session JSONL file
+ * @returns The UUID of the last user message, or null if not found
+ */
+export function readLastUserMessageUuid(sessionFilePath: string): string | null {
+  if (!fs.existsSync(sessionFilePath)) return null;
+
+  try {
+    const content = fs.readFileSync(sessionFilePath, 'utf-8');
+    const lines = content.trim().split('\n');
+
+    // Search from end to find last user message
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const parsed = JSON.parse(lines[i]);
+        if (parsed.type === 'user' && parsed.uuid) {
+          return parsed.uuid;
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    // File read error
+    return null;
+  }
+  return null;
+}
+
 export function buildActivityEntriesFromMessage(msg: SessionFileMessage): ImportedActivityEntry[] {
   const entries: ImportedActivityEntry[] = [];
   const timestamp = new Date(msg.timestamp).getTime();
