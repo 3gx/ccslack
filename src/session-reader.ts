@@ -16,6 +16,7 @@ export interface ContentBlock {
   name?: string;
   input?: Record<string, unknown>;
   content?: string;
+  thinking?: string;  // For thinking blocks
 }
 
 /**
@@ -174,4 +175,95 @@ export function extractTextContent(msg: SessionFileMessage): string {
   }
 
   return parts.join('\n');
+}
+
+/**
+ * Find the index of a message by its UUID in a list of session messages.
+ * Used by /ff command to determine where to start syncing missed messages.
+ *
+ * @returns Index of the message with matching UUID, or -1 if not found
+ */
+export function findMessageIndexByUuid(
+  messages: SessionFileMessage[],
+  uuid: string
+): number {
+  return messages.findIndex(m => m.uuid === uuid);
+}
+
+/**
+ * Activity entry for /ff import - compatible with ActivityEntry in session-manager.ts
+ */
+export interface ImportedActivityEntry {
+  timestamp: number;
+  type: 'thinking' | 'tool_start' | 'generating';
+  tool?: string;
+  thinkingContent?: string;
+  thinkingTruncated?: string;
+  generatingChars?: number;
+}
+
+// Truncate length for thinking preview (matches blocks.ts)
+const THINKING_TRUNCATE_LENGTH = 500;
+
+/**
+ * Build activity entries from a session file message.
+ * Converts content blocks (thinking, tool_use, text) into ActivityEntry format
+ * for display in View Log modal.
+ *
+ * @returns Array of activity entries (may be empty for user messages or messages with no activity)
+ */
+export function buildActivityEntriesFromMessage(msg: SessionFileMessage): ImportedActivityEntry[] {
+  const entries: ImportedActivityEntry[] = [];
+  const timestamp = new Date(msg.timestamp).getTime();
+
+  // User messages don't generate activity entries
+  if (msg.type !== 'assistant') {
+    return entries;
+  }
+
+  const content = msg.message?.content;
+  if (!content || typeof content === 'string') {
+    return entries;
+  }
+
+  for (const block of content) {
+    switch (block.type) {
+      case 'thinking': {
+        const thinkingContent = block.thinking || '';
+        const thinkingTruncated = thinkingContent.length > THINKING_TRUNCATE_LENGTH
+          ? thinkingContent.substring(0, THINKING_TRUNCATE_LENGTH) + '...'
+          : thinkingContent;
+        entries.push({
+          timestamp,
+          type: 'thinking',
+          thinkingContent,
+          thinkingTruncated,
+        });
+        break;
+      }
+      case 'tool_use': {
+        if (block.name) {
+          entries.push({
+            timestamp,
+            type: 'tool_start',
+            tool: block.name,
+          });
+        }
+        break;
+      }
+      case 'text': {
+        if (block.text) {
+          entries.push({
+            timestamp,
+            type: 'generating',
+            generatingChars: block.text.length,
+          });
+        }
+        break;
+      }
+      // tool_result blocks are skipped (they're verbose and not user-facing)
+    }
+  }
+
+  return entries;
 }

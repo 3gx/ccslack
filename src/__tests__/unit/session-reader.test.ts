@@ -8,6 +8,8 @@ import {
   getFileSize,
   readNewMessages,
   extractTextContent,
+  findMessageIndexByUuid,
+  buildActivityEntriesFromMessage,
   SessionFileMessage,
 } from '../../session-reader.js';
 
@@ -427,6 +429,276 @@ describe('session-reader', () => {
       const result = extractTextContent(msg);
 
       expect(result).toBe('');
+    });
+  });
+
+  describe('findMessageIndexByUuid', () => {
+    it('should return -1 when UUID not found', () => {
+      const messages = [
+        { uuid: 'uuid-1', type: 'user' },
+        { uuid: 'uuid-2', type: 'assistant' },
+      ] as SessionFileMessage[];
+
+      const result = findMessageIndexByUuid(messages, 'uuid-not-found');
+
+      expect(result).toBe(-1);
+    });
+
+    it('should return correct index when UUID found', () => {
+      const messages = [
+        { uuid: 'uuid-1', type: 'user' },
+        { uuid: 'uuid-2', type: 'assistant' },
+        { uuid: 'uuid-3', type: 'user' },
+      ] as SessionFileMessage[];
+
+      expect(findMessageIndexByUuid(messages, 'uuid-1')).toBe(0);
+      expect(findMessageIndexByUuid(messages, 'uuid-2')).toBe(1);
+      expect(findMessageIndexByUuid(messages, 'uuid-3')).toBe(2);
+    });
+
+    it('should return -1 for empty array', () => {
+      const messages: SessionFileMessage[] = [];
+
+      const result = findMessageIndexByUuid(messages, 'any-uuid');
+
+      expect(result).toBe(-1);
+    });
+  });
+
+  describe('buildActivityEntriesFromMessage', () => {
+    it('should return empty array for user messages', () => {
+      const msg: SessionFileMessage = {
+        type: 'user',
+        uuid: '123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toEqual([]);
+    });
+
+    it('should extract thinking block as activity entry', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: 'Let me think about this...' }],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('thinking');
+      expect(result[0].thinkingContent).toBe('Let me think about this...');
+      expect(result[0].thinkingTruncated).toBe('Let me think about this...');
+      expect(result[0].timestamp).toBe(new Date('2024-01-01T12:00:00Z').getTime());
+    });
+
+    it('should truncate long thinking content in thinkingTruncated', () => {
+      const longThinking = 'A'.repeat(600);  // 600 chars, should be truncated
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: longThinking }],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].thinkingContent).toBe(longThinking);  // Full content preserved
+      expect(result[0].thinkingTruncated).toHaveLength(503);  // 500 chars + '...'
+      expect(result[0].thinkingTruncated?.endsWith('...')).toBe(true);
+    });
+
+    it('should extract tool_use block as tool_start entry', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', name: 'Read', input: { path: '/test.txt' } }],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('tool_start');
+      expect(result[0].tool).toBe('Read');
+    });
+
+    it('should extract text block as generating entry', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Here is my response with 30 chars' }],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('generating');
+      expect(result[0].generatingChars).toBe(33);  // 'Here is my response with 30 chars'.length
+    });
+
+    it('should extract multiple content blocks in order', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Let me think...' },
+            { type: 'tool_use', name: 'Grep', input: { pattern: 'test' } },
+            { type: 'text', text: 'Found it!' },
+          ],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(3);
+      expect(result[0].type).toBe('thinking');
+      expect(result[1].type).toBe('tool_start');
+      expect(result[1].tool).toBe('Grep');
+      expect(result[2].type).toBe('generating');
+    });
+
+    it('should skip tool_result blocks', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'tool_result', content: 'File contents...' },
+            { type: 'text', text: 'Based on the file...' },
+          ],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('generating');
+    });
+
+    it('should return empty array for message without content', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toEqual([]);
+    });
+
+    it('should return empty array for message with string content', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: 'Plain string content',  // This shouldn't happen for assistant but handle it
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toEqual([]);
+    });
+
+    it('should skip tool_use without name', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', input: { path: '/test.txt' } },  // No name
+            { type: 'text', text: 'Response' },
+          ],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('generating');
+    });
+
+    it('should skip text block without text', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text' },  // No text
+            { type: 'thinking', thinking: 'Thinking...' },
+          ],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('thinking');
+    });
+
+    it('should handle thinking block with empty thinking content', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T12:00:00Z',
+        sessionId: 'sess-1',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: '' }],
+        },
+      };
+
+      const result = buildActivityEntriesFromMessage(msg);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('thinking');
+      expect(result[0].thinkingContent).toBe('');
+      expect(result[0].thinkingTruncated).toBe('');
     });
   });
 });

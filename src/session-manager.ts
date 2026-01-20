@@ -52,6 +52,8 @@ export interface Session {
   stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
   // Persistent plan file path for plan mode (detected from tool usage)
   planFilePath?: string | null;
+  // UUIDs of messages synced from terminal via /ff (for resumable fast-forward)
+  syncedMessageUuids?: string[];
 }
 
 /**
@@ -85,6 +87,8 @@ export interface ThreadSession {
   stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
   // Persistent plan file path for plan mode (NOT inherited - each thread has its own)
   planFilePath?: string | null;
+  // UUIDs of messages synced from terminal via /ff (for resumable fast-forward)
+  syncedMessageUuids?: string[];
 }
 
 /**
@@ -497,6 +501,198 @@ export function findForkPointMessageId(
 
   console.warn(`No assistant message found before ${parentSlackTs}`);
   return null;
+}
+
+/**
+ * Result of finding the last synced message.
+ */
+export interface LastSyncedResult {
+  /** SDK message ID (UUID from session file) */
+  sdkMessageId: string;
+  /** Session ID the message belongs to */
+  sessionId: string;
+}
+
+/**
+ * Get the last synced message ID for a channel/thread.
+ * Used by /ff command to determine where to start syncing missed messages.
+ *
+ * Finds the newest messageMap entry by Slack timestamp for the current session.
+ *
+ * @param channelId - Slack channel ID
+ * @param threadTs - Thread timestamp (optional, for thread sessions)
+ * @param currentSessionId - Current session ID to filter by (optional)
+ * @returns Last synced message info, or null if no messages synced yet
+ */
+export function getLastSyncedMessageId(
+  channelId: string,
+  threadTs?: string,
+  currentSessionId?: string
+): LastSyncedResult | null {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession?.messageMap) {
+    return null;
+  }
+
+  // Get all messageMap entries
+  const entries = Object.entries(channelSession.messageMap);
+  if (entries.length === 0) {
+    return null;
+  }
+
+  // Filter by sessionId if provided (to only sync messages from current session)
+  // Also filter by thread context if in a thread
+  const filteredEntries = entries.filter(([_ts, mapping]) => {
+    // If currentSessionId provided, only consider messages from that session
+    if (currentSessionId && mapping.sessionId !== currentSessionId) {
+      return false;
+    }
+    return true;
+  });
+
+  if (filteredEntries.length === 0) {
+    return null;
+  }
+
+  // Sort by Slack timestamp (descending) to find the newest
+  const sortedEntries = filteredEntries.sort(([tsA], [tsB]) =>
+    parseFloat(tsB) - parseFloat(tsA)
+  );
+
+  const [_ts, newestMapping] = sortedEntries[0];
+
+  return {
+    sdkMessageId: newestMapping.sdkMessageId,
+    sessionId: newestMapping.sessionId,
+  };
+}
+
+/**
+ * Get all message UUIDs from messageMap for a channel.
+ * Used by /ff command to filter out messages already posted to Slack.
+ *
+ * messageMap contains UUIDs from ALL sources:
+ * - Regular Slack bot conversations
+ * - /watch terminal imports
+ * - /ff fast-forward imports
+ *
+ * @param channelId - Slack channel ID
+ * @returns Set of all UUIDs already posted to Slack
+ */
+export function getMessageMapUuids(channelId: string): Set<string> {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession?.messageMap) {
+    return new Set();
+  }
+
+  const uuids = new Set<string>();
+  for (const mapping of Object.values(channelSession.messageMap)) {
+    uuids.add(mapping.sdkMessageId);
+  }
+
+  return uuids;
+}
+
+/**
+ * Get the set of synced message UUIDs for a channel/thread.
+ * Used by /ff command for resumable fast-forward sync.
+ *
+ * @param channelId - Slack channel ID
+ * @param threadTs - Thread timestamp (optional, for thread sessions)
+ * @returns Set of synced UUIDs, empty set if none
+ */
+export function getSyncedMessageUuids(
+  channelId: string,
+  threadTs?: string
+): Set<string> {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession) {
+    return new Set();
+  }
+
+  if (threadTs) {
+    const threadSession = channelSession.threads?.[threadTs];
+    return new Set(threadSession?.syncedMessageUuids ?? []);
+  }
+
+  return new Set(channelSession.syncedMessageUuids ?? []);
+}
+
+/**
+ * Add a synced message UUID for a channel/thread.
+ * Called after each successful message post in /ff for crash-safe progress.
+ *
+ * @param channelId - Slack channel ID
+ * @param uuid - Message UUID from session file
+ * @param threadTs - Thread timestamp (optional, for thread sessions)
+ */
+export function addSyncedMessageUuid(
+  channelId: string,
+  uuid: string,
+  threadTs?: string
+): void {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession) {
+    console.warn(`Cannot add synced UUID: channel ${channelId} not found`);
+    return;
+  }
+
+  if (threadTs) {
+    // Thread session
+    if (!channelSession.threads?.[threadTs]) {
+      console.warn(`Cannot add synced UUID: thread ${threadTs} not found`);
+      return;
+    }
+    const existing = channelSession.threads[threadTs].syncedMessageUuids ?? [];
+    if (!existing.includes(uuid)) {
+      channelSession.threads[threadTs].syncedMessageUuids = [...existing, uuid];
+      saveSessions(store);
+    }
+  } else {
+    // Main channel session
+    const existing = channelSession.syncedMessageUuids ?? [];
+    if (!existing.includes(uuid)) {
+      channelSession.syncedMessageUuids = [...existing, uuid];
+      saveSessions(store);
+    }
+  }
+}
+
+/**
+ * Clear synced message UUIDs for a channel/thread.
+ * Called when session is cleared via /clear.
+ *
+ * @param channelId - Slack channel ID
+ * @param threadTs - Thread timestamp (optional, for thread sessions)
+ */
+export function clearSyncedMessageUuids(
+  channelId: string,
+  threadTs?: string
+): void {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession) {
+    return;
+  }
+
+  if (threadTs) {
+    if (channelSession.threads?.[threadTs]) {
+      channelSession.threads[threadTs].syncedMessageUuids = [];
+      saveSessions(store);
+    }
+  } else {
+    channelSession.syncedMessageUuids = [];
+    saveSessions(store);
+  }
 }
 
 // ============================================================================

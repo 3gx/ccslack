@@ -37,6 +37,7 @@ vi.mock('../../session-manager.js', () => ({
   deleteSession: vi.fn(),
   saveActivityLog: vi.fn().mockResolvedValue(undefined),
   getActivityLog: vi.fn().mockResolvedValue(null),
+  clearSyncedMessageUuids: vi.fn(),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({
@@ -53,6 +54,18 @@ vi.mock('../../model-cache.js', () => ({
   isModelAvailable: vi.fn().mockResolvedValue(true),
   refreshModelCache: vi.fn().mockResolvedValue(undefined),
   getModelInfo: vi.fn().mockResolvedValue({ value: 'claude-opus-4-20250514', displayName: 'Claude Opus 4' }),
+}));
+
+vi.mock('../../terminal-watcher.js', () => ({
+  startWatching: vi.fn().mockReturnValue({ success: true }),
+  stopWatching: vi.fn().mockReturnValue(true),
+  isWatching: vi.fn().mockReturnValue(false),
+  updateWatchRate: vi.fn().mockReturnValue(true),
+  getWatcher: vi.fn().mockReturnValue(undefined),
+  onSessionCleared: vi.fn(),
+  stopAllWatchers: vi.fn(),
+  postTerminalMessage: vi.fn().mockResolvedValue(undefined),
+  WatchState: {},
 }));
 
 vi.mock('fs', () => ({

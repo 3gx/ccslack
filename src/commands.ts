@@ -48,6 +48,8 @@ export interface CommandResult {
   startTerminalWatch?: boolean;
   // For /stop-watching command - signals to stop terminal session watching
   stopTerminalWatch?: boolean;
+  // For /ff command - signals to fast-forward sync missed terminal messages then start watching
+  fastForward?: boolean;
 }
 
 /**
@@ -85,6 +87,9 @@ export function parseCommand(
       return handleWatch(session);
     case 'stop-watching':
       return handleStopWatching();
+    case 'ff':
+    case 'fast-forward':
+      return handleFastForward(session);
     case 'fork':
       return handleFork(session);
     case 'resume':
@@ -133,6 +138,7 @@ function handleHelp(): CommandResult {
 \`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
 \`/watch\` - Get command to continue session in terminal and watch for activity
 \`/stop-watching\` - Stop watching terminal session
+\`/ff\` - Fast-forward: sync missed terminal messages and start watching
 \`/fork\` - Get command to fork session to terminal
 \`/resume <id>\` - Resume a terminal session in Slack
 \`/compact\` - Compact session to reduce context size
@@ -440,6 +446,25 @@ function handleStopWatching(): CommandResult {
   return {
     handled: true,
     stopTerminalWatch: true,
+  };
+}
+
+/**
+ * /ff (fast-forward) - Sync missed terminal messages and start watching
+ * Use when you forgot to use /watch and did work directly in terminal.
+ */
+function handleFastForward(session: Session): CommandResult {
+  if (!session.sessionId) {
+    return {
+      handled: true,
+      response: 'No active session. Start a conversation first.',
+    };
+  }
+
+  // Return flag - actual fast-forward logic handled in slack-bot.ts
+  return {
+    handled: true,
+    fastForward: true,
   };
 }
 

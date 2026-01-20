@@ -796,6 +796,38 @@ describe('commands', () => {
     });
   });
 
+  describe('/ff', () => {
+    it('should return error when no session ID', () => {
+      const sessionWithoutId: Session = { ...mockSession, sessionId: null };
+      const result = parseCommand('/ff', sessionWithoutId);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('No active session');
+      expect(result.fastForward).toBeUndefined();
+    });
+
+    it('should set fastForward flag with valid session', () => {
+      const result = parseCommand('/ff', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.fastForward).toBe(true);
+    });
+
+    it('should accept /fast-forward alias', () => {
+      const result = parseCommand('/fast-forward', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.fastForward).toBe(true);
+    });
+
+    it('should appear in /help output', () => {
+      const result = parseCommand('/help', mockSession);
+
+      expect(result.response).toContain('/ff');
+      expect(result.response).toContain('Fast-forward');
+    });
+  });
+
   describe('/strip-empty-tag', () => {
     it('should show default value (disabled) when not set', () => {
       const result = parseCommand('/strip-empty-tag', mockSession);

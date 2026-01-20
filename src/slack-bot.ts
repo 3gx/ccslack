@@ -12,6 +12,8 @@ import {
   findForkPointMessageId,
   saveActivityLog,
   getActivityLog,
+  getMessageMapUuids,
+  clearSyncedMessageUuids,
   Session,
   ThreadSession,
   PermissionMode,
@@ -49,10 +51,11 @@ import {
 } from './model-cache.js';
 import { uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
+import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
 import { parseCommand, UPDATE_RATE_DEFAULT } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
-import { withSlackRetry } from './retry.js';
+import { withSlackRetry, withInfiniteRetry, sleep } from './retry.js';
 import {
   startWatching,
   stopWatching,
@@ -60,8 +63,19 @@ import {
   updateWatchRate,
   getWatcher,
   onSessionCleared,
-  stopAllWatchers
+  stopAllWatchers,
+  postTerminalMessage,
+  WatchState,
 } from './terminal-watcher.js';
+import {
+  readNewMessages,
+  getSessionFilePath,
+  findMessageIndexByUuid,
+  sessionFileExists,
+  buildActivityEntriesFromMessage,
+  extractTextContent,
+  ImportedActivityEntry,
+} from './session-reader.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
@@ -732,6 +746,9 @@ async function runClearSession(
     // Stop terminal watcher if active (session is being cleared)
     onSessionCleared(channelId, threadTs);
 
+    // Clear synced message UUIDs (for /ff resumability)
+    clearSyncedMessageUuids(channelId, threadTs);
+
     console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
 
     await withSlackRetry(() =>
@@ -780,6 +797,421 @@ async function runClearSession(
         text: 'Session status',
       });
     }
+  }
+}
+
+/** Pacing delay between messages in /ff sync (milliseconds) */
+const FF_PACING_DELAY_MS = 500;
+
+/**
+ * Handle /ff (fast-forward) command - sync missed terminal messages and start watching.
+ * Used when user forgot to use /watch and did work directly in terminal.
+ *
+ * Features:
+ * - UUID tracking: tracks all synced message UUIDs (handles gaps, crash-safe)
+ * - Infinite retries: never gives up on rate limits, uses exponential backoff
+ * - Pacing: 500ms delay between messages to reduce rate limit hits
+ * - Progress updates: shows sync progress to user
+ */
+async function handleFastForwardSync(
+  client: any,
+  channelId: string,
+  threadTs: string | undefined,
+  session: Session,
+  userId?: string
+): Promise<void> {
+  // Get effective session (thread session if in thread)
+  const effectiveSession = threadTs
+    ? getThreadSession(channelId, threadTs) ?? session
+    : session;
+
+  const sessionId = effectiveSession.sessionId;
+  const conversationKey = threadTs ? `${channelId}_${threadTs}` : channelId;
+
+  // Clear any previous abort flag
+  clearFfAborted(conversationKey);
+
+  if (!sessionId) {
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: ':warning: No active session. Start a conversation first.',
+    });
+    return;
+  }
+
+  // Check if session file exists
+  if (!sessionFileExists(sessionId, effectiveSession.workingDir)) {
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: ':warning: Session file not found. The session may have been deleted.',
+    });
+    return;
+  }
+
+  // Post initial status message
+  const statusMsg = await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: ':fast_forward: Syncing terminal messages...',
+    })
+  );
+  const statusMsgTs = (statusMsg as { ts?: string }).ts!;
+
+  try {
+    // 1. Read all messages from session file
+    const filePath = getSessionFilePath(sessionId, effectiveSession.workingDir);
+    const { messages: allMessages } = await readNewMessages(filePath, 0);
+
+    // 2. Get UUIDs already posted to Slack (from messageMap - includes bot, /watch, /ff)
+    const alreadyInSlack = getMessageMapUuids(channelId);
+
+    // 3. Filter to only messages not yet in Slack
+    const messagesToSync = allMessages.filter(m => !alreadyInSlack.has(m.uuid));
+
+    // Log summary
+    const totalInFile = allMessages.length;
+    const alreadyPosted = alreadyInSlack.size;
+    const toImport = messagesToSync.length;
+    console.log(`[FastForward] Session file: ${totalInFile} messages, already in Slack: ${alreadyPosted}, to import: ${toImport}`);
+
+    // 4. Check if already up to date
+    if (messagesToSync.length === 0) {
+      await withSlackRetry(() =>
+        client.chat.update({
+          channel: channelId,
+          ts: statusMsgTs,
+          text: ':white_check_mark: Already up to date. No new terminal messages to sync.',
+        })
+      );
+
+      // Still start watching
+      const updateRate = effectiveSession.updateRateSeconds ?? 2;
+      const watchStatusMsg = await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
+        blocks: [
+          {
+            type: 'context',
+            elements: [{
+              type: 'mrkdwn',
+              text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
+            }],
+          },
+          {
+            type: 'actions',
+            block_id: `terminal_watch_${sessionId}`,
+            elements: [{
+              type: 'button',
+              text: { type: 'plain_text', text: 'Stop Watching' },
+              action_id: 'stop_terminal_watch',
+              value: JSON.stringify({ sessionId }),
+            }],
+          },
+        ],
+      });
+      startWatching(channelId, threadTs, effectiveSession as Session, client, watchStatusMsg.ts as string, userId);
+      return;
+    }
+
+    // 5. Update status with count and Stop FF button
+    const totalToSync = messagesToSync.length;
+    const buildProgressBlocks = (current: number, total: number) => [
+      {
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `:fast_forward: Syncing terminal messages... ${current}/${total}`,
+        }],
+      },
+      {
+        type: 'actions',
+        block_id: `ff_sync_${sessionId}`,
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Stop FF' },
+          action_id: 'stop_ff_sync',
+          style: 'danger',
+          value: JSON.stringify({ sessionId }),
+        }],
+      },
+    ];
+
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: statusMsgTs,
+        text: `:fast_forward: Syncing ${totalToSync} message(s) from terminal...`,
+        blocks: buildProgressBlocks(0, totalToSync),
+      })
+    );
+
+    // Track current status message ts (will change as we move it to bottom)
+    let currentStatusMsgTs = statusMsgTs;
+
+    // Helper to move status message to bottom (delete old, post new)
+    const moveStatusToBottom = async (current: number, total: number): Promise<void> => {
+      // Delete old status message
+      try {
+        await client.chat.delete({
+          channel: channelId,
+          ts: currentStatusMsgTs,
+        });
+      } catch (error) {
+        // Ignore delete errors (message may already be deleted)
+        console.log(`[FastForward] Could not delete old status message: ${error}`);
+      }
+
+      // Post new status message at bottom
+      try {
+        const result = await withSlackRetry(() =>
+          client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: `:fast_forward: Syncing terminal messages... ${current}/${total}`,
+            blocks: buildProgressBlocks(current, total),
+          })
+        );
+        const newTs = (result as { ts?: string }).ts;
+        if (newTs) {
+          currentStatusMsgTs = newTs;
+        }
+      } catch (error) {
+        console.error(`[FastForward] Failed to post new status message:`, error);
+      }
+    };
+
+    // 6. Create WatchState for posting messages
+    const watchState: WatchState = {
+      conversationKey,
+      channelId,
+      threadTs,
+      sessionId,
+      workingDir: effectiveSession.workingDir,
+      fileOffset: 0,  // Not used for posting
+      intervalId: null as any,  // Not used for posting
+      statusMsgTs,
+      client,
+      updateRateMs: (effectiveSession.updateRateSeconds ?? 2) * 1000,
+      userId,
+    };
+
+    // 7. Post each message with pacing and infinite retries
+    let syncedCount = 0;
+    let wasStopped = false;
+    const collectedActivityEntries: ImportedActivityEntry[] = [];
+
+    for (let i = 0; i < messagesToSync.length; i++) {
+      // Check if user stopped the sync
+      if (isFfAborted(conversationKey)) {
+        wasStopped = true;
+        console.log(`[FastForward] Sync stopped by user at message ${i + 1}/${totalToSync}`);
+        break;
+      }
+
+      const msg = messagesToSync[i];
+
+      // Build activity entries from this message (thinking, tool_use, etc.)
+      const activityEntries = buildActivityEntriesFromMessage(msg);
+      collectedActivityEntries.push(...activityEntries);
+
+      // Check if message has extractable text content
+      const textContent = extractTextContent(msg);
+      const hasText = textContent.trim().length > 0;
+
+      if (hasText) {
+        // Message has text - post normally via postTerminalMessage
+        await withInfiniteRetry(
+          () => postTerminalMessage(watchState, msg),
+          {
+            baseDelayMs: 3000,
+            maxDelayMs: 30000,
+            onRetry: (error, attempt, delayMs) => {
+              console.log(`[FastForward] Message ${msg.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+            },
+            onSuccess: (attempts) => {
+              if (attempts > 1) {
+                console.log(`[FastForward] Message ${msg.uuid} succeeded after ${attempts} attempts`);
+              }
+            },
+          }
+        );
+        console.log(`[FastForward] Synced message ${syncedCount + 1}/${totalToSync} (${msg.type}): ${msg.uuid}`);
+      } else if (activityEntries.length > 0) {
+        // Message has activity (thinking/tools) but no text - post summary with View Log button
+        const thinkingCount = activityEntries.filter(e => e.type === 'thinking').length;
+        const toolCount = activityEntries.filter(e => e.type === 'tool_start').length;
+
+        const parts: string[] = [];
+        if (thinkingCount > 0) parts.push(`${thinkingCount} thinking`);
+        if (toolCount > 0) {
+          const toolNames = activityEntries
+            .filter(e => e.type === 'tool_start')
+            .map(e => e.tool)
+            .join(', ');
+          parts.push(`tools: ${toolNames}`);
+        }
+
+        const summaryText = `:brain: *Terminal Activity* (${parts.join(', ')})`;
+
+        // Post activity summary with View Log button
+        // Use a unique key for this message's activity (for the View Log button)
+        const activityKey = `${conversationKey}_ff_${msg.uuid}`;
+
+        await withInfiniteRetry(
+          async () => {
+            const result = await withSlackRetry(() =>
+              client.chat.postMessage({
+                channel: channelId,
+                thread_ts: threadTs,
+                text: summaryText,
+                blocks: [
+                  {
+                    type: 'section',
+                    text: { type: 'mrkdwn', text: summaryText },
+                  },
+                  {
+                    type: 'actions',
+                    block_id: `ff_activity_${msg.uuid}`,
+                    elements: [{
+                      type: 'button',
+                      text: { type: 'plain_text', text: 'View Log' },
+                      action_id: `view_activity_log_${activityKey}`,
+                      value: activityKey,
+                    }],
+                  },
+                ],
+              })
+            );
+
+            // Save activity entries for this specific message (for View Log modal)
+            // Cast to ActivityEntry[] since ImportedActivityEntry is compatible
+            await saveActivityLog(activityKey, activityEntries as unknown as ActivityEntry[]);
+
+            // Save mapping for thread forking (use the message ts)
+            if (result?.ts) {
+              saveMessageMapping(channelId, result.ts, {
+                sdkMessageId: msg.uuid,
+                sessionId,
+                type: msg.type as 'user' | 'assistant',
+              });
+            }
+          },
+          {
+            baseDelayMs: 3000,
+            maxDelayMs: 30000,
+            onRetry: (error, attempt, delayMs) => {
+              console.log(`[FastForward] Activity ${msg.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+            },
+          }
+        );
+        console.log(`[FastForward] Synced activity ${syncedCount + 1}/${totalToSync} (${msg.type}, ${parts.join(', ')}): ${msg.uuid}`);
+      } else {
+        // No text and no activity entries - skip this message
+        console.log(`[FastForward] Skipped empty message ${syncedCount + 1}/${totalToSync} (${msg.type}): ${msg.uuid}`);
+      }
+
+      // messageMap is updated by postTerminalMessage or above for activity-only messages
+      syncedCount++;
+
+      // Move status message to bottom every 10 messages or on last message
+      // This keeps the Stop FF button visible as messages pile up above it
+      if ((i + 1) % 10 === 0 || i === messagesToSync.length - 1) {
+        await moveStatusToBottom(i + 1, totalToSync);
+      }
+
+      // Pace: wait before next message (skip on last)
+      if (i < messagesToSync.length - 1) {
+        await sleep(FF_PACING_DELAY_MS);
+      }
+    }
+
+    // Clear abort flag
+    clearFfAborted(conversationKey);
+
+    // 8. Update status to show completion or stopped
+    if (wasStopped) {
+      const remaining = totalToSync - syncedCount;
+      await withSlackRetry(() =>
+        client.chat.update({
+          channel: channelId,
+          ts: currentStatusMsgTs,
+          text: `:stop_sign: Sync stopped. Synced ${syncedCount}/${totalToSync} message(s). Run \`/ff\` again to continue.`,
+          blocks: [{
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `:stop_sign: Sync stopped. Synced ${syncedCount}/${totalToSync} message(s).\n:point_right: Run \`/ff\` again to sync remaining ${remaining} message(s).`,
+            },
+          }],
+        })
+      );
+      return;  // Don't start watching after stop
+    }
+
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: currentStatusMsgTs,
+        text: `:white_check_mark: Synced ${totalToSync} message(s) from terminal.`,
+        blocks: [{
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `:white_check_mark: Synced ${totalToSync} message(s) from terminal.`,
+          },
+        }],
+      })
+    );
+
+    // 9. Start watching (same as /watch)
+    const updateRate = effectiveSession.updateRateSeconds ?? 2;
+    const watchStatusMsg = await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
+      blocks: [
+        {
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
+          }],
+        },
+        {
+          type: 'actions',
+          block_id: `terminal_watch_${sessionId}`,
+          elements: [{
+            type: 'button',
+            text: { type: 'plain_text', text: 'Stop Watching' },
+            action_id: 'stop_terminal_watch',
+            value: JSON.stringify({ sessionId }),
+          }],
+        },
+      ],
+    });
+
+    const result = startWatching(channelId, threadTs, effectiveSession as Session, client, watchStatusMsg.ts as string, userId);
+    if (!result.success) {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: `:warning: Could not start watching: ${result.error}`,
+      });
+    }
+
+  } catch (error) {
+    console.error('[FastForward] Error:', error);
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: statusMsgTs,
+        text: `:x: Failed to sync terminal messages: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    );
   }
 }
 
@@ -1654,6 +2086,9 @@ async function handleMessage(params: {
           ? ':white_check_mark: Stopped watching terminal session.'
           : ':information_source: No active terminal watcher in this conversation.',
       });
+    } else if (commandResult.fastForward && session?.sessionId) {
+      // Fast-forward: sync missed terminal messages and start watching
+      await handleFastForwardSync(client, channelId, threadTs, session, userId);
     } else if (commandResult.response) {
       await client.chat.postMessage({
         channel: channelId,
@@ -4036,6 +4471,43 @@ app.action('stop_terminal_watch', async ({ ack, body, client }) => {
       });
     } catch (error) {
       console.error('[StopWatch] Failed to update message:', error);
+    }
+  }
+});
+
+// Handle "Stop FF" button click for fast-forward sync
+app.action('stop_ff_sync', async ({ ack, body, client }) => {
+  await ack();
+
+  const channelId = body.channel?.id;
+  if (!channelId) return;
+
+  // Get threadTs from message if in thread
+  const bodyWithMessage = body as any;
+  const threadTs = bodyWithMessage.message?.thread_ts;
+
+  // Mark sync as aborted
+  const conversationKey = threadTs ? `${channelId}_${threadTs}` : channelId;
+  markFfAborted(conversationKey);
+  console.log(`[StopFF] User requested stop for ${conversationKey}`);
+
+  // Update message to show stopping state (actual stop message is handled by the sync loop)
+  if (bodyWithMessage.message?.ts) {
+    try {
+      await client.chat.update({
+        channel: channelId,
+        ts: bodyWithMessage.message.ts,
+        text: 'Stopping sync...',
+        blocks: [{
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: ':hourglass: Stopping sync... (will stop after current message completes)',
+          }],
+        }],
+      });
+    } catch (error) {
+      console.error('[StopFF] Failed to update message:', error);
     }
   }
 });

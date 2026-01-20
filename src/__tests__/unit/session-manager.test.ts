@@ -13,6 +13,11 @@ import {
   getOrCreateThreadSession,
   saveActivityLog,
   getActivityLog,
+  getLastSyncedMessageId,
+  getMessageMapUuids,
+  getSyncedMessageUuids,
+  addSyncedMessageUuid,
+  clearSyncedMessageUuids,
 } from '../../session-manager.js';
 import type { Session, ThreadSession, SlackMessageMapping, ActivityEntry } from '../../session-manager.js';
 
@@ -1321,6 +1326,160 @@ describe('session-manager', () => {
     });
   });
 
+  describe('getLastSyncedMessageId', () => {
+    it('should return null when no messageMap entries', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getLastSyncedMessageId('C123');
+      expect(result).toBeNull();
+    });
+
+    it('should return newest entry by Slack timestamp', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234567890.000100': { sdkMessageId: 'uuid-1', sessionId: 'main-session-123', type: 'user' as const },
+              '1234567890.000200': { sdkMessageId: 'uuid-2', sessionId: 'main-session-123', type: 'assistant' as const },
+              '1234567890.000300': { sdkMessageId: 'uuid-3', sessionId: 'main-session-123', type: 'user' as const },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getLastSyncedMessageId('C123');
+      expect(result?.sdkMessageId).toBe('uuid-3');
+      expect(result?.sessionId).toBe('main-session-123');
+    });
+
+    it('should filter by sessionId when provided', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'new-session',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234567890.000100': { sdkMessageId: 'uuid-old-1', sessionId: 'old-session', type: 'user' as const },
+              '1234567890.000200': { sdkMessageId: 'uuid-old-2', sessionId: 'old-session', type: 'assistant' as const },
+              '1234567890.000300': { sdkMessageId: 'uuid-new-1', sessionId: 'new-session', type: 'user' as const },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Without filter: should return newest (uuid-new-1)
+      const allResult = getLastSyncedMessageId('C123');
+      expect(allResult?.sdkMessageId).toBe('uuid-new-1');
+
+      // With filter for new-session: should return uuid-new-1
+      const newResult = getLastSyncedMessageId('C123', undefined, 'new-session');
+      expect(newResult?.sdkMessageId).toBe('uuid-new-1');
+
+      // With filter for old-session: should return uuid-old-2 (newest from old)
+      const oldResult = getLastSyncedMessageId('C123', undefined, 'old-session');
+      expect(oldResult?.sdkMessageId).toBe('uuid-old-2');
+    });
+
+    it('should return null if no messages match sessionId filter', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234567890.000100': { sdkMessageId: 'uuid-1', sessionId: 'other-session', type: 'user' as const },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getLastSyncedMessageId('C123', undefined, 'main-session');
+      expect(result).toBeNull();
+    });
+
+    it('should return null for channel without session', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
+
+      const result = getLastSyncedMessageId('C999');
+      expect(result).toBeNull();
+    });
+
+    it('should handle empty messageMap', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {},
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getLastSyncedMessageId('C123');
+      expect(result).toBeNull();
+    });
+  });
+
   describe('messageMap preservation', () => {
     it('should preserve messageMap when saveSession is called', () => {
       // Setup: Start with empty store
@@ -1415,6 +1574,115 @@ describe('session-manager', () => {
       expect(finalStore.channels['C123'].messageMap['1234.001'].type).toBe('user');
       expect(finalStore.channels['C123'].messageMap['1234.002'].type).toBe('assistant');
       expect(finalStore.channels['C123'].messageMap['1234.003'].type).toBe('user');
+    });
+  });
+
+  describe('getMessageMapUuids', () => {
+    it('should return empty set when channel does not exist', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      const result = getMessageMapUuids('C999');
+
+      expect(result).toBeInstanceOf(Set);
+      expect(result.size).toBe(0);
+    });
+
+    it('should return empty set when messageMap is empty', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'sess-1',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {},
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getMessageMapUuids('C123');
+
+      expect(result).toBeInstanceOf(Set);
+      expect(result.size).toBe(0);
+    });
+
+    it('should return all sdkMessageId values from messageMap', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'sess-1',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.001': { sdkMessageId: 'uuid-aaa', sessionId: 'sess-1', type: 'user' },
+              '1234.002': { sdkMessageId: 'uuid-bbb', sessionId: 'sess-1', type: 'assistant' },
+              '1234.003': { sdkMessageId: 'uuid-ccc', sessionId: 'sess-1', type: 'user' },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getMessageMapUuids('C123');
+
+      expect(result).toBeInstanceOf(Set);
+      expect(result.size).toBe(3);
+      expect(result.has('uuid-aaa')).toBe(true);
+      expect(result.has('uuid-bbb')).toBe(true);
+      expect(result.has('uuid-ccc')).toBe(true);
+    });
+
+    it('should include UUIDs from multiple sessions (after /clear)', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'sess-2',  // Current session
+            previousSessionIds: ['sess-1'],
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              // Messages from old session
+              '1234.001': { sdkMessageId: 'uuid-old-1', sessionId: 'sess-1', type: 'user' },
+              '1234.002': { sdkMessageId: 'uuid-old-2', sessionId: 'sess-1', type: 'assistant' },
+              // Messages from new session
+              '1234.003': { sdkMessageId: 'uuid-new-1', sessionId: 'sess-2', type: 'user' },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      const result = getMessageMapUuids('C123');
+
+      // Should include UUIDs from both sessions
+      expect(result.size).toBe(3);
+      expect(result.has('uuid-old-1')).toBe(true);
+      expect(result.has('uuid-old-2')).toBe(true);
+      expect(result.has('uuid-new-1')).toBe(true);
     });
   });
 
@@ -2016,6 +2284,339 @@ describe('session-manager', () => {
 
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
       expect(writtenData.channels['C123'].threads['thread123'].lastUsage).toEqual(newUsage);
+    });
+  });
+
+  // ============================================================================
+  // Synced Message UUIDs Tests (for /ff command)
+  // ============================================================================
+
+  describe('syncedMessageUuids', () => {
+    describe('getSyncedMessageUuids', () => {
+      it('should return empty set when no channel session exists', () => {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
+
+        const result = getSyncedMessageUuids('C999');
+        expect(result).toBeInstanceOf(Set);
+        expect(result.size).toBe(0);
+      });
+
+      it('should return empty set when no syncedMessageUuids field', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        const result = getSyncedMessageUuids('C123');
+        expect(result.size).toBe(0);
+      });
+
+      it('should return set of synced UUIDs for channel', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              syncedMessageUuids: ['uuid-1', 'uuid-2', 'uuid-3'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        const result = getSyncedMessageUuids('C123');
+        expect(result.size).toBe(3);
+        expect(result.has('uuid-1')).toBe(true);
+        expect(result.has('uuid-2')).toBe(true);
+        expect(result.has('uuid-3')).toBe(true);
+      });
+
+      it('should return set of synced UUIDs for thread', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              syncedMessageUuids: ['main-uuid-1'],
+              threads: {
+                'thread123': {
+                  sessionId: 'thread-session',
+                  forkedFrom: 'main-session',
+                  workingDir: '/test',
+                  mode: 'plan' as const,
+                  createdAt: Date.now(),
+                  lastActiveAt: Date.now(),
+                  pathConfigured: true,
+                  configuredPath: '/test',
+                  configuredBy: 'U123',
+                  configuredAt: Date.now(),
+                  syncedMessageUuids: ['thread-uuid-1', 'thread-uuid-2'],
+                },
+              },
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        // Channel UUIDs
+        const channelResult = getSyncedMessageUuids('C123');
+        expect(channelResult.size).toBe(1);
+        expect(channelResult.has('main-uuid-1')).toBe(true);
+
+        // Thread UUIDs
+        const threadResult = getSyncedMessageUuids('C123', 'thread123');
+        expect(threadResult.size).toBe(2);
+        expect(threadResult.has('thread-uuid-1')).toBe(true);
+        expect(threadResult.has('thread-uuid-2')).toBe(true);
+      });
+    });
+
+    describe('addSyncedMessageUuid', () => {
+      it('should add UUID to channel session', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        addSyncedMessageUuid('C123', 'new-uuid-1');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        expect(writtenData.channels['C123'].syncedMessageUuids).toEqual(['new-uuid-1']);
+      });
+
+      it('should append UUID to existing list', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              syncedMessageUuids: ['uuid-1', 'uuid-2'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        addSyncedMessageUuid('C123', 'uuid-3');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        expect(writtenData.channels['C123'].syncedMessageUuids).toEqual(['uuid-1', 'uuid-2', 'uuid-3']);
+      });
+
+      it('should not add duplicate UUID', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              syncedMessageUuids: ['uuid-1', 'uuid-2'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        addSyncedMessageUuid('C123', 'uuid-1');  // Already exists
+
+        // Should not call writeFileSync since no change
+        expect(fs.writeFileSync).not.toHaveBeenCalled();
+      });
+
+      it('should add UUID to thread session', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              threads: {
+                'thread123': {
+                  sessionId: 'thread-session',
+                  forkedFrom: 'main-session',
+                  workingDir: '/test',
+                  mode: 'plan' as const,
+                  createdAt: Date.now(),
+                  lastActiveAt: Date.now(),
+                  pathConfigured: true,
+                  configuredPath: '/test',
+                  configuredBy: 'U123',
+                  configuredAt: Date.now(),
+                },
+              },
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        addSyncedMessageUuid('C123', 'thread-uuid-1', 'thread123');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        expect(writtenData.channels['C123'].threads['thread123'].syncedMessageUuids).toEqual(['thread-uuid-1']);
+      });
+
+      it('should warn if channel not found', () => {
+        const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
+
+        addSyncedMessageUuid('C999', 'uuid-1');
+
+        expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Cannot add synced UUID'));
+        consoleSpy.mockRestore();
+      });
+    });
+
+    describe('clearSyncedMessageUuids', () => {
+      it('should clear UUIDs for channel', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              syncedMessageUuids: ['uuid-1', 'uuid-2', 'uuid-3'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        clearSyncedMessageUuids('C123');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        expect(writtenData.channels['C123'].syncedMessageUuids).toEqual([]);
+      });
+
+      it('should clear UUIDs for thread', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              syncedMessageUuids: ['main-uuid'],
+              threads: {
+                'thread123': {
+                  sessionId: 'thread-session',
+                  forkedFrom: 'main-session',
+                  workingDir: '/test',
+                  mode: 'plan' as const,
+                  createdAt: Date.now(),
+                  lastActiveAt: Date.now(),
+                  pathConfigured: true,
+                  configuredPath: '/test',
+                  configuredBy: 'U123',
+                  configuredAt: Date.now(),
+                  syncedMessageUuids: ['thread-uuid-1', 'thread-uuid-2'],
+                },
+              },
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        clearSyncedMessageUuids('C123', 'thread123');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        // Thread UUIDs should be cleared
+        expect(writtenData.channels['C123'].threads['thread123'].syncedMessageUuids).toEqual([]);
+        // Main channel UUIDs should be preserved
+        expect(writtenData.channels['C123'].syncedMessageUuids).toEqual(['main-uuid']);
+      });
+
+      it('should do nothing if channel not found', () => {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
+
+        clearSyncedMessageUuids('C999');
+
+        expect(fs.writeFileSync).not.toHaveBeenCalled();
+      });
     });
   });
 });

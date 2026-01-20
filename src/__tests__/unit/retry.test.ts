@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { withRetry, withSlackRetry, sleep } from '../../retry.js';
+import { withRetry, withSlackRetry, withInfiniteRetry, sleep } from '../../retry.js';
 import { Errors } from '../../errors.js';
 
 describe('retry module', () => {
@@ -560,6 +560,191 @@ describe('retry module', () => {
       await promise;
 
       expect(onRateLimit).toHaveBeenCalledWith(undefined);
+    });
+  });
+
+  describe('withInfiniteRetry', () => {
+    it('should return result on first success', async () => {
+      const fn = vi.fn().mockResolvedValue('success');
+
+      const promise = withInfiniteRetry(fn);
+      await vi.runAllTimersAsync();
+      const result = await promise;
+
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('should retry indefinitely until success', async () => {
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 10) {  // Fail 9 times
+          throw new Error('Temporary failure');
+        }
+        return 'success';
+      });
+
+      const promise = withInfiniteRetry(fn, { baseDelayMs: 10, maxDelayMs: 50 });
+      await vi.runAllTimersAsync();
+      const result = await promise;
+
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(10);
+    });
+
+    it('should call onRetry callback on each failure', async () => {
+      const onRetry = vi.fn();
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 3) {
+          throw new Error('Failure');
+        }
+        return 'success';
+      });
+
+      const promise = withInfiniteRetry(fn, { baseDelayMs: 10, onRetry });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      expect(onRetry).toHaveBeenCalledTimes(2);
+      expect(onRetry).toHaveBeenCalledWith(
+        expect.any(Error),
+        1,
+        expect.any(Number)
+      );
+      expect(onRetry).toHaveBeenCalledWith(
+        expect.any(Error),
+        2,
+        expect.any(Number)
+      );
+    });
+
+    it('should call onSuccess callback after retries', async () => {
+      const onSuccess = vi.fn();
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 3) {
+          throw new Error('Failure');
+        }
+        return 'success';
+      });
+
+      const promise = withInfiniteRetry(fn, { baseDelayMs: 10, onSuccess });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      expect(onSuccess).toHaveBeenCalledTimes(1);
+      expect(onSuccess).toHaveBeenCalledWith(3);  // Total attempts including success
+    });
+
+    it('should NOT call onSuccess on first-try success', async () => {
+      const onSuccess = vi.fn();
+      const fn = vi.fn().mockResolvedValue('success');
+
+      const promise = withInfiniteRetry(fn, { onSuccess });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      // onSuccess only called if there were retries
+      expect(onSuccess).not.toHaveBeenCalled();
+    });
+
+    it('should use exponential backoff with default base of 3000ms', async () => {
+      const delays: number[] = [];
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 4) {
+          throw new Error('Failure');
+        }
+        return 'success';
+      });
+
+      const promise = withInfiniteRetry(fn, {
+        onRetry: (_, __, delay) => delays.push(delay)
+      });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      // Delays should increase: 3000, 6000, 12000 (plus jitter 0-500)
+      expect(delays[0]).toBeGreaterThanOrEqual(3000);
+      expect(delays[0]).toBeLessThan(3600);  // 3000 + 500 jitter max
+      expect(delays[1]).toBeGreaterThanOrEqual(6000);
+      expect(delays[2]).toBeGreaterThanOrEqual(12000);
+    });
+
+    it('should cap delay at maxDelayMs', async () => {
+      const delays: number[] = [];
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 6) {
+          throw new Error('Failure');
+        }
+        return 'success';
+      });
+
+      const promise = withInfiniteRetry(fn, {
+        baseDelayMs: 10000,
+        maxDelayMs: 15000,
+        onRetry: (_, __, delay) => delays.push(delay)
+      });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      // After a few attempts, delays should cap at maxDelayMs + jitter
+      for (const delay of delays) {
+        expect(delay).toBeLessThanOrEqual(15500);  // 15000 + 500 jitter
+      }
+    });
+
+    it('should respect Retry-After header', async () => {
+      const delays: number[] = [];
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 2) {
+          throw { data: { error: 'ratelimited', response_metadata: { retry_after: 10 } } };
+        }
+        return 'success';
+      });
+
+      const promise = withInfiniteRetry(fn, {
+        baseDelayMs: 1000,
+        onRetry: (_, __, delay) => delays.push(delay)
+      });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      // Should use Retry-After (10 seconds = 10000ms) plus jitter
+      expect(delays[0]).toBeGreaterThanOrEqual(10000);
+      expect(delays[0]).toBeLessThan(10600);  // 10000 + 500 jitter max
+    });
+
+    it('should use custom baseDelayMs', async () => {
+      const delays: number[] = [];
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts < 2) {
+          throw new Error('Failure');
+        }
+        return 'success';
+      });
+
+      const promise = withInfiniteRetry(fn, {
+        baseDelayMs: 500,
+        onRetry: (_, __, delay) => delays.push(delay)
+      });
+      await vi.runAllTimersAsync();
+      await promise;
+
+      // First delay should be around 500ms + jitter
+      expect(delays[0]).toBeGreaterThanOrEqual(500);
+      expect(delays[0]).toBeLessThan(1100);  // 500 + 500 jitter max
     });
   });
 });

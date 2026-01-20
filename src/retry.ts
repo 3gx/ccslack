@@ -204,3 +204,77 @@ function isNetworkError(error: unknown): boolean {
     code === 'EAI_AGAIN'
   );
 }
+
+/**
+ * Options for infinite retry behavior.
+ */
+export interface InfiniteRetryOptions {
+  /** Base delay in milliseconds (default: 3000) */
+  baseDelayMs?: number;
+  /** Maximum delay in milliseconds (default: 30000) */
+  maxDelayMs?: number;
+  /** Called on each retry attempt */
+  onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
+  /** Called on success after retries */
+  onSuccess?: (attempts: number) => void;
+}
+
+/**
+ * Execute a function with infinite retries until success.
+ * Used by /ff command to ensure all messages eventually sync.
+ *
+ * Uses exponential backoff starting at baseDelayMs, capped at maxDelayMs.
+ * Resets to baseDelayMs after success (for next call).
+ *
+ * @example
+ * ```typescript
+ * await withInfiniteRetry(
+ *   () => postMessage(msg),
+ *   {
+ *     baseDelayMs: 3000,
+ *     onRetry: (err, attempt, delay) => console.log(`Retry ${attempt} in ${delay}ms`)
+ *   }
+ * );
+ * ```
+ */
+export async function withInfiniteRetry<T>(
+  fn: () => Promise<T>,
+  options: InfiniteRetryOptions = {}
+): Promise<T> {
+  const baseDelayMs = options.baseDelayMs ?? 3000;
+  const maxDelayMs = options.maxDelayMs ?? 30000;
+  let attempt = 0;
+
+  while (true) {
+    try {
+      const result = await fn();
+      // Success - notify if we had retries
+      if (attempt > 0 && options.onSuccess) {
+        options.onSuccess(attempt + 1);
+      }
+      return result;
+    } catch (error) {
+      attempt++;
+
+      // Calculate delay with exponential backoff, capped at max
+      // Check for Retry-After header first
+      const retryAfter = getRetryAfter(error);
+      let delay: number;
+      if (retryAfter && retryAfter > 0) {
+        delay = retryAfter * 1000;
+      } else {
+        delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+      }
+
+      // Add jitter (0-500ms) to prevent thundering herd
+      delay += Math.random() * 500;
+
+      if (options.onRetry) {
+        options.onRetry(error, attempt, delay);
+      }
+
+      await sleep(delay);
+      // Loop continues - never give up
+    }
+  }
+}

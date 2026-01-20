@@ -19,8 +19,9 @@ import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse } from '
 
 /**
  * State for an active terminal watcher.
+ * Exported for /ff (fast-forward) command to construct state for posting missed messages.
  */
-interface WatchState {
+export interface WatchState {
   conversationKey: string;  // channelId or channelId_threadTs
   channelId: string;
   threadTs?: string;
@@ -273,8 +274,10 @@ async function moveStatusMessageToBottom(state: WatchState): Promise<void> {
  * - Smart truncation with closed formatting (code blocks, bold, italic)
  * - File attachments (.md + .png) for assistant output
  * - Message mapping for thread forking
+ *
+ * Exported for /ff (fast-forward) command to sync missed terminal messages.
  */
-async function postTerminalMessage(state: WatchState, msg: SessionFileMessage): Promise<void> {
+export async function postTerminalMessage(state: WatchState, msg: SessionFileMessage): Promise<void> {
   const rawText = extractTextContent(msg);
   if (!rawText.trim()) return;
 
