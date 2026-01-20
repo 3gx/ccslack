@@ -44,7 +44,7 @@ export interface CommandResult {
   compactSession?: boolean;
   // For /clear command - clears session history
   clearSession?: boolean;
-  // For /continue command - signals to start terminal session watching
+  // For /watch command - signals to start terminal session watching
   startTerminalWatch?: boolean;
   // For /stop-watching command - signals to stop terminal session watching
   stopTerminalWatch?: boolean;
@@ -81,8 +81,8 @@ export function parseCommand(
       return handleCd(argString, session);
     case 'ls':
       return handleLs(argString, session);
-    case 'continue':
-      return handleContinue(session);
+    case 'watch':
+      return handleWatch(session);
     case 'stop-watching':
       return handleStopWatching();
     case 'fork':
@@ -131,7 +131,7 @@ function handleHelp(): CommandResult {
 \`/update-rate [n]\` - Set status update interval (1-10 seconds, default=2)
 \`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
 \`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
-\`/continue\` - Get command to continue session in terminal
+\`/watch\` - Get command to continue session in terminal and watch for activity
 \`/stop-watching\` - Stop watching terminal session
 \`/fork\` - Get command to fork session to terminal
 \`/resume <id>\` - Resume a terminal session in Slack
@@ -376,9 +376,9 @@ function handleMode(modeArg: string, session: Session): CommandResult {
 }
 
 /**
- * /continue - Show command to continue session in terminal and start watching
+ * /watch - Show command to continue session in terminal and start watching
  */
-function handleContinue(session: Session): CommandResult {
+function handleWatch(session: Session): CommandResult {
   if (!session.sessionId) {
     return {
       handled: true,
@@ -386,7 +386,7 @@ function handleContinue(session: Session): CommandResult {
     };
   }
 
-  const command = `claude --resume ${session.sessionId}`;
+  const command = `cd ${session.workingDir} && claude --dangerously-skip-permissions --resume ${session.sessionId}`;
   const updateRate = session.updateRateSeconds ?? 2;
 
   return {
@@ -405,12 +405,6 @@ function handleContinue(session: Session): CommandResult {
       {
         type: "section",
         text: { type: "mrkdwn", text: "```" + command + "```" },
-      },
-      {
-        type: "context",
-        elements: [
-          { type: "mrkdwn", text: `:file_folder: *Working directory:* \`${session.workingDir}\`` },
-        ],
       },
       {
         type: "divider",

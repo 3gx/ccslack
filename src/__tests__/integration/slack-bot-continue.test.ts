@@ -84,7 +84,7 @@ import { getSession, saveSession } from '../../session-manager.js';
 import { startWatching, stopWatching, isWatching, getWatcher, onSessionCleared, updateWatchRate } from '../../terminal-watcher.js';
 import { startClaudeQuery } from '../../claude-client.js';
 
-describe('slack-bot /continue command', () => {
+describe('slack-bot /watch command', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     registeredHandlers = {};
@@ -105,7 +105,7 @@ describe('slack-bot /continue command', () => {
     vi.clearAllMocks();
   });
 
-  describe('/continue command with terminal watching', () => {
+  describe('/watch command with terminal watching', () => {
     it('should post blocks with watching status and stop button', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
@@ -127,7 +127,7 @@ describe('slack-bot /continue command', () => {
       mockClient.chat.postMessage.mockResolvedValue({ ts: 'response-ts-123' });
 
       await handler({
-        event: { text: '<@BOT123> /continue', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'original-ts', user: 'U123' },
         client: mockClient,
         say: vi.fn(),
       });
@@ -154,7 +154,7 @@ describe('slack-bot /continue command', () => {
       }));
     });
 
-    it('should call startWatching after posting /continue response', async () => {
+    it('should call startWatching after posting /watch response', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -174,7 +174,7 @@ describe('slack-bot /continue command', () => {
       mockClient.chat.postMessage.mockResolvedValue({ ts: 'response-ts-456' });
 
       await handler({
-        event: { text: '<@BOT123> /continue', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'original-ts', user: 'U123' },
         client: mockClient,
         say: vi.fn(),
       });
@@ -213,7 +213,7 @@ describe('slack-bot /continue command', () => {
       mockClient.chat.postMessage.mockResolvedValue({ ts: 'response-ts' });
 
       await handler({
-        event: { text: '<@BOT123> /continue', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'original-ts', user: 'U123' },
         client: mockClient,
         say: vi.fn(),
       });
@@ -227,7 +227,7 @@ describe('slack-bot /continue command', () => {
       );
     });
 
-    it('should return error when no session exists for /continue', async () => {
+    it('should return error when no session exists for /watch', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -244,7 +244,7 @@ describe('slack-bot /continue command', () => {
       });
 
       await handler({
-        event: { text: '<@BOT123> /continue', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'original-ts', user: 'U123' },
         client: mockClient,
         say: vi.fn(),
       });
@@ -418,7 +418,7 @@ describe('slack-bot /continue command', () => {
       );
     });
 
-    it('should block /continue command while already watching', async () => {
+    it('should block /watch command while already watching', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -437,7 +437,7 @@ describe('slack-bot /continue command', () => {
       });
 
       await handler({
-        event: { text: '<@BOT123> /continue', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'original-ts', user: 'U123' },
         client: mockClient,
         say: vi.fn(),
       });

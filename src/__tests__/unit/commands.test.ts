@@ -52,7 +52,7 @@ describe('commands', () => {
       expect(result.response).toContain('/set-current-path');
       expect(result.response).toContain('/status');
       expect(result.response).toContain('/mode');
-      expect(result.response).toContain('/continue');
+      expect(result.response).toContain('/watch');
       expect(result.response).toContain('/stop-watching');
       expect(result.response).toContain('/fork');
       expect(result.response).toContain('/resume');
@@ -323,17 +323,17 @@ describe('commands', () => {
     });
   });
 
-  describe('/continue', () => {
+  describe('/watch', () => {
     it('should return error when no session ID', () => {
       const sessionWithoutId: Session = { ...mockSession, sessionId: null };
-      const result = parseCommand('/continue', sessionWithoutId);
+      const result = parseCommand('/watch', sessionWithoutId);
 
       expect(result.handled).toBe(true);
       expect(result.response).toContain('No active session');
     });
 
     it('should show terminal command blocks', () => {
-      const result = parseCommand('/continue', mockSession);
+      const result = parseCommand('/watch', mockSession);
 
       expect(result.handled).toBe(true);
       expect(result.blocks).toBeDefined();
@@ -344,20 +344,22 @@ describe('commands', () => {
       expect(headerBlock.text?.text).toBe('Continue in Terminal');
     });
 
-    it('should include resume command', () => {
-      const result = parseCommand('/continue', mockSession);
-      const commandBlock = result.blocks!.find(b => b.text?.text?.includes('claude --resume'));
+    it('should include full cd && claude command', () => {
+      const result = parseCommand('/watch', mockSession);
+      const commandBlock = result.blocks!.find(b => b.text?.text?.includes('claude'));
 
       expect(commandBlock).toBeDefined();
-      expect(commandBlock?.text?.text).toContain(`claude --resume ${mockSession.sessionId}`);
+      // Should include cd, --dangerously-skip-permissions, and --resume
+      expect(commandBlock?.text?.text).toContain(`cd ${mockSession.workingDir}`);
+      expect(commandBlock?.text?.text).toContain('--dangerously-skip-permissions');
+      expect(commandBlock?.text?.text).toContain(`--resume ${mockSession.sessionId}`);
     });
 
-    it('should show working directory in context', () => {
-      const result = parseCommand('/continue', mockSession);
-      const contextBlock = result.blocks!.find(b => b.type === 'context');
+    it('should set startTerminalWatch flag', () => {
+      const result = parseCommand('/watch', mockSession);
 
-      expect(contextBlock).toBeDefined();
-      expect(contextBlock?.elements?.[0]?.text).toContain(mockSession.workingDir);
+      expect(result.handled).toBe(true);
+      expect(result.startTerminalWatch).toBe(true);
     });
   });
 
