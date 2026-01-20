@@ -33,6 +33,15 @@ export interface SessionFileMessage {
     role: string;
     content: string | ContentBlock[];  // string for user, array for assistant
   };
+  toolUseResult?: {
+    type?: string;
+    content?: string;
+    filePath?: string;
+    file?: {
+      filePath?: string;
+      content?: string;
+    };
+  };
 }
 
 /**
@@ -142,9 +151,52 @@ export async function readNewMessages(
 }
 
 /**
+ * Extract plan content from message if it's a plan file operation.
+ * Checks tool inputs (Write, ExitPlanMode) and tool results (Read, Write).
+ */
+function extractPlanContent(msg: SessionFileMessage): string | null {
+  // 1. Check toolUseResult for user messages (Read/Write results)
+  if (msg.toolUseResult) {
+    const tur = msg.toolUseResult;
+    const filePath = tur.filePath || tur.file?.filePath;
+    if (filePath?.includes('.claude/plans/')) {
+      if (tur.content) return tur.content;
+      if (tur.file?.content) return tur.file.content;
+    }
+  }
+
+  // 2. Check tool_use inputs for assistant messages
+  if (msg.message?.content && Array.isArray(msg.message.content)) {
+    for (const block of msg.message.content) {
+      if (block.type === 'tool_use' && block.input) {
+        const input = block.input as Record<string, unknown>;
+        const filePath = (input.file_path || input.path) as string | undefined;
+
+        // ExitPlanMode: input.plan
+        if (block.name === 'ExitPlanMode' && input.plan) {
+          return input.plan as string;
+        }
+
+        // Write to plans dir: input.content
+        if (filePath?.includes('.claude/plans/') && input.content) {
+          return input.content as string;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Extract text content from message, handling all content block types.
  */
 export function extractTextContent(msg: SessionFileMessage): string {
+  // Check for plan content first
+  const planContent = extractPlanContent(msg);
+  if (planContent) {
+    return planContent;
+  }
+
   if (!msg.message?.content) return '';
 
   // User messages have content as string, assistant messages have array

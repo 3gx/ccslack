@@ -432,6 +432,114 @@ describe('session-reader', () => {
 
       expect(result).toBe('');
     });
+
+    it('should extract plan from Write tool input', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: 'test-uuid',
+        timestamp: '2024-01-01',
+        sessionId: 'session-1',
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            name: 'Write',
+            input: {
+              file_path: '/Users/x/.claude/plans/test.md',
+              content: '# My Plan\n\nContent here',
+            },
+          }],
+        },
+      };
+      expect(extractTextContent(msg)).toBe('# My Plan\n\nContent here');
+    });
+
+    it('should extract plan from ExitPlanMode input.plan', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: 'test-uuid',
+        timestamp: '2024-01-01',
+        sessionId: 'session-1',
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            name: 'ExitPlanMode',
+            input: { plan: '# Exit Plan\n\nDetails' },
+          }],
+        },
+      };
+      expect(extractTextContent(msg)).toBe('# Exit Plan\n\nDetails');
+    });
+
+    it('should extract plan from toolUseResult.content (Write result)', () => {
+      const msg: SessionFileMessage = {
+        type: 'user',
+        uuid: 'test-uuid',
+        timestamp: '2024-01-01',
+        sessionId: 'session-1',
+        message: { role: 'user', content: [] },
+        toolUseResult: {
+          type: 'create',
+          filePath: '/Users/x/.claude/plans/test.md',
+          content: '# Created Plan',
+        },
+      };
+      expect(extractTextContent(msg)).toBe('# Created Plan');
+    });
+
+    it('should extract plan from toolUseResult.file.content (Read result)', () => {
+      const msg: SessionFileMessage = {
+        type: 'user',
+        uuid: 'test-uuid',
+        timestamp: '2024-01-01',
+        sessionId: 'session-1',
+        message: { role: 'user', content: [] },
+        toolUseResult: {
+          type: 'text',
+          file: {
+            filePath: '/Users/x/.claude/plans/test.md',
+            content: '# Read Plan Content',
+          },
+        },
+      };
+      expect(extractTextContent(msg)).toBe('# Read Plan Content');
+    });
+
+    it('should NOT extract from non-plan files', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: 'test-uuid',
+        timestamp: '2024-01-01',
+        sessionId: 'session-1',
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            name: 'Write',
+            input: {
+              file_path: '/Users/x/project/src/file.ts',
+              content: 'const x = 1;',
+            },
+          }],
+        },
+      };
+      expect(extractTextContent(msg)).toBe('[Tool: Write]');
+    });
+
+    it('should still extract regular text content', () => {
+      const msg: SessionFileMessage = {
+        type: 'assistant',
+        uuid: 'test-uuid',
+        timestamp: '2024-01-01',
+        sessionId: 'session-1',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello world' }],
+        },
+      };
+      expect(extractTextContent(msg)).toBe('Hello world');
+    });
   });
 
   describe('findMessageIndexByUuid', () => {
