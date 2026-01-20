@@ -473,7 +473,7 @@ describe('terminal-watcher', () => {
               elements: expect.arrayContaining([
                 expect.objectContaining({
                   action_id: 'stop_terminal_watch',
-                  text: expect.objectContaining({ text: 'Stop Watching' }),
+                  text: expect.objectContaining({ text: '🛑 Stop Watching' }),
                 }),
               ]),
             }),

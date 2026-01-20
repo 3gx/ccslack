@@ -1015,8 +1015,9 @@ async function handleFastForwardSync(
             block_id: `terminal_watch_${sessionId}`,
             elements: [{
               type: 'button',
-              text: { type: 'plain_text', text: 'Stop Watching' },
+              text: { type: 'plain_text', text: '🛑 Stop Watching', emoji: true },
               action_id: 'stop_terminal_watch',
+              style: 'danger',
               value: JSON.stringify({ sessionId }),
             }],
           },
