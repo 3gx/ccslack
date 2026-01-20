@@ -1,9 +1,5 @@
-import { describe, it, expect, afterAll } from 'vitest';
-import { markdownToPng, shutdownBrowser } from '../../markdown-png.js';
-
-afterAll(async () => {
-  await shutdownBrowser();
-});
+import { describe, it, expect } from 'vitest';
+import { markdownToPng } from '../../markdown-png.js';
 
 describe('markdownToPng (Puppeteer)', () => {
   describe('basic rendering', () => {
