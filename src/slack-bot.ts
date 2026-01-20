@@ -783,73 +783,6 @@ async function runClearSession(
   }
 }
 
-// Handle /fork-thread command - creates new thread from existing thread session
-async function handleForkThread(params: {
-  channelId: string;
-  sourceThreadTs: string;
-  forkCommandTs: string;  // The specific message where /fork-thread was typed
-  description: string;
-  client: any;
-}): Promise<void> {
-  const { channelId, sourceThreadTs, forkCommandTs, description, client } = params;
-
-  // 1. Get source thread's session
-  const sourceSession = getThreadSession(channelId, sourceThreadTs);
-  if (!sourceSession?.sessionId) {
-    await withSlackRetry(() =>
-      client.chat.postMessage({
-        channel: channelId,
-        thread_ts: sourceThreadTs,
-        text: '❌ Cannot fork: no active session in this thread.',
-      })
-    );
-    return;
-  }
-
-  // 2. Create new top-level message in main DM (anchor for new thread)
-  const anchorMessage = await withSlackRetry(() =>
-    client.chat.postMessage({
-      channel: channelId,
-      text: `🔀 Forked: ${description}`,
-      blocks: buildForkAnchorBlocks({ description }),
-    })
-  );
-  const newThreadTs = (anchorMessage as { ts?: string }).ts!;
-
-  // 3. Create forked thread session (sessionId null until SDK creates it)
-  saveThreadSession(channelId, newThreadTs, {
-    sessionId: null,
-    forkedFrom: sourceSession.sessionId,
-    forkedFromThreadTs: sourceThreadTs,
-    workingDir: sourceSession.workingDir,
-    mode: sourceSession.mode,
-    createdAt: Date.now(),
-    lastActiveAt: Date.now(),
-    planFilePath: null,  // Don't inherit plan from parent
-  });
-
-  // 4. Post first message in new thread with link to the fork command message
-  // Slack message links: https://slack.com/archives/{channel}/p{ts_without_dot}?thread_ts={thread_ts}
-  const forkCommandLink = `https://slack.com/archives/${channelId}/p${forkCommandTs.replace('.', '')}?thread_ts=${sourceThreadTs}&cid=${channelId}`;
-  await withSlackRetry(() =>
-    client.chat.postMessage({
-      channel: channelId,
-      thread_ts: newThreadTs,
-      text: `_Forked from <${forkCommandLink}|previous thread>. Ready to explore: ${description}_\n\nSend a message to continue.`,
-    })
-  );
-
-  // 5. Notify in source thread with link to new thread
-  const newThreadLink = `https://slack.com/archives/${channelId}/p${newThreadTs.replace('.', '')}`;
-  await withSlackRetry(() =>
-    client.chat.postMessage({
-      channel: channelId,
-      thread_ts: sourceThreadTs,
-      text: `_Session forked to <${newThreadLink}|new thread>._`,
-    })
-  );
-}
-
 // Create a fork from a specific message (point-in-time fork)
 // Used by both /fork-message command and "Fork here" button
 async function createForkFromMessage(params: {
@@ -1543,31 +1476,6 @@ async function handleMessage(params: {
     } catch (error) {
       // Ignore errors (e.g., already reacted)
     }
-  }
-
-  // Check for > fork: prefix in threads (thread-to-thread forking)
-  const forkMatch = userText.match(/^>\s*fork:\s*(.+)/i);
-  if (forkMatch && threadTs && originalTs) {
-    await handleForkThread({
-      channelId,
-      sourceThreadTs: threadTs,
-      forkCommandTs: originalTs,
-      description: forkMatch[1].trim(),
-      client,
-    });
-    // Remove eyes reaction - fork done
-    if (originalTs) {
-      try {
-        await client.reactions.remove({
-          channel: channelId,
-          timestamp: originalTs,
-          name: 'eyes',
-        });
-      } catch (error) {
-        // Ignore errors
-      }
-    }
-    return;
   }
 
   // Check for slash commands (e.g., /status, /mode, /continue)
