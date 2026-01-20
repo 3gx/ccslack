@@ -12,7 +12,6 @@ import {
   findForkPointMessageId,
   saveActivityLog,
   getActivityLog,
-  getMessageMapUuids,
   clearSyncedMessageUuids,
   Session,
   ThreadSession,
@@ -55,7 +54,7 @@ import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.j
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
 import { parseCommand, UPDATE_RATE_DEFAULT } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
-import { withSlackRetry, withInfiniteRetry, sleep } from './retry.js';
+import { withSlackRetry } from './retry.js';
 import {
   startWatching,
   stopWatching,
@@ -68,14 +67,10 @@ import {
   WatchState,
 } from './terminal-watcher.js';
 import {
-  readNewMessages,
   getSessionFilePath,
-  findMessageIndexByUuid,
   sessionFileExists,
-  buildActivityEntriesFromMessage,
-  extractTextContent,
-  ImportedActivityEntry,
 } from './session-reader.js';
+import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
@@ -861,24 +856,121 @@ async function handleFastForwardSync(
   const statusMsgTs = (statusMsg as { ts?: string }).ts!;
 
   try {
-    // 1. Read all messages from session file
+    // 1. Prepare sync state
     const filePath = getSessionFilePath(sessionId, effectiveSession.workingDir);
-    const { messages: allMessages } = await readNewMessages(filePath, 0);
+    const syncState: MessageSyncState = {
+      conversationKey,
+      channelId,
+      threadTs,
+      sessionId,
+      workingDir: effectiveSession.workingDir,
+      client,
+    };
 
-    // 2. Get UUIDs already posted to Slack (from messageMap - includes bot, /watch, /ff)
-    const alreadyInSlack = getMessageMapUuids(channelId);
+    // Create WatchState for postTerminalMessage callback
+    const watchState: WatchState = {
+      conversationKey,
+      channelId,
+      threadTs,
+      sessionId,
+      workingDir: effectiveSession.workingDir,
+      fileOffset: 0,  // Not used for posting
+      intervalId: null as any,  // Not used for posting
+      statusMsgTs,
+      client,
+      updateRateMs: (effectiveSession.updateRateSeconds ?? 2) * 1000,
+      userId,
+    };
 
-    // 3. Filter to only messages not yet in Slack
-    const messagesToSync = allMessages.filter(m => !alreadyInSlack.has(m.uuid));
+    // Track current status message ts (will change as we move it to bottom)
+    let currentStatusMsgTs = statusMsgTs;
+    let lastReportedTotal = 0;
 
-    // Log summary
-    const totalInFile = allMessages.length;
-    const alreadyPosted = alreadyInSlack.size;
-    const toImport = messagesToSync.length;
-    console.log(`[FastForward] Session file: ${totalInFile} messages, already in Slack: ${alreadyPosted}, to import: ${toImport}`);
+    // Helper to build progress blocks
+    const buildProgressBlocks = (current: number, total: number) => [
+      {
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `:fast_forward: Syncing terminal messages... ${current}/${total}`,
+        }],
+      },
+      {
+        type: 'actions',
+        block_id: `ff_sync_${sessionId}`,
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Stop FF' },
+          action_id: 'stop_ff_sync',
+          style: 'danger',
+          value: JSON.stringify({ sessionId }),
+        }],
+      },
+    ];
 
-    // 4. Check if already up to date
-    if (messagesToSync.length === 0) {
+    // Helper to move status message to bottom (delete old, post new)
+    const moveStatusToBottom = async (current: number, total: number): Promise<void> => {
+      // Delete old status message
+      try {
+        await client.chat.delete({
+          channel: channelId,
+          ts: currentStatusMsgTs,
+        });
+      } catch (error) {
+        // Ignore delete errors (message may already be deleted)
+        console.log(`[FastForward] Could not delete old status message: ${error}`);
+      }
+
+      // Post new status message at bottom
+      try {
+        const result = await withSlackRetry(() =>
+          client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: `:fast_forward: Syncing terminal messages... ${current}/${total}`,
+            blocks: buildProgressBlocks(current, total),
+          })
+        );
+        const newTs = (result as { ts?: string }).ts;
+        if (newTs) {
+          currentStatusMsgTs = newTs;
+        }
+      } catch (error) {
+        console.error(`[FastForward] Failed to post new status message:`, error);
+      }
+    };
+
+    // 2. Run sync with progress tracking
+    const syncResult = await syncMessagesFromOffset(syncState, filePath, 0, {
+      infiniteRetry: true,
+      isAborted: () => isFfAborted(conversationKey),
+      pacingDelayMs: FF_PACING_DELAY_MS,
+      postTextMessage: (s, msg) => postTerminalMessage(watchState, msg),
+      onProgress: async (synced, total) => {
+        lastReportedTotal = total;
+        // Update initial status on first message
+        if (synced === 1) {
+          await withSlackRetry(() =>
+            client.chat.update({
+              channel: channelId,
+              ts: currentStatusMsgTs,
+              text: `:fast_forward: Syncing ${total} message(s) from terminal...`,
+              blocks: buildProgressBlocks(synced, total),
+            })
+          );
+        }
+        // Move status message to bottom every 10 messages or on last message
+        if (synced % 10 === 0 || synced === total) {
+          await moveStatusToBottom(synced, total);
+        }
+      },
+    });
+
+    // Clear abort flag
+    clearFfAborted(conversationKey);
+
+    // 3. Handle "already up to date" case
+    if (syncResult.totalToSync === 0) {
       await withSlackRetry(() =>
         client.chat.update({
           channel: channelId,
@@ -917,220 +1009,10 @@ async function handleFastForwardSync(
       return;
     }
 
-    // 5. Update status with count and Stop FF button
-    const totalToSync = messagesToSync.length;
-    const buildProgressBlocks = (current: number, total: number) => [
-      {
-        type: 'context',
-        elements: [{
-          type: 'mrkdwn',
-          text: `:fast_forward: Syncing terminal messages... ${current}/${total}`,
-        }],
-      },
-      {
-        type: 'actions',
-        block_id: `ff_sync_${sessionId}`,
-        elements: [{
-          type: 'button',
-          text: { type: 'plain_text', text: 'Stop FF' },
-          action_id: 'stop_ff_sync',
-          style: 'danger',
-          value: JSON.stringify({ sessionId }),
-        }],
-      },
-    ];
-
-    await withSlackRetry(() =>
-      client.chat.update({
-        channel: channelId,
-        ts: statusMsgTs,
-        text: `:fast_forward: Syncing ${totalToSync} message(s) from terminal...`,
-        blocks: buildProgressBlocks(0, totalToSync),
-      })
-    );
-
-    // Track current status message ts (will change as we move it to bottom)
-    let currentStatusMsgTs = statusMsgTs;
-
-    // Helper to move status message to bottom (delete old, post new)
-    const moveStatusToBottom = async (current: number, total: number): Promise<void> => {
-      // Delete old status message
-      try {
-        await client.chat.delete({
-          channel: channelId,
-          ts: currentStatusMsgTs,
-        });
-      } catch (error) {
-        // Ignore delete errors (message may already be deleted)
-        console.log(`[FastForward] Could not delete old status message: ${error}`);
-      }
-
-      // Post new status message at bottom
-      try {
-        const result = await withSlackRetry(() =>
-          client.chat.postMessage({
-            channel: channelId,
-            thread_ts: threadTs,
-            text: `:fast_forward: Syncing terminal messages... ${current}/${total}`,
-            blocks: buildProgressBlocks(current, total),
-          })
-        );
-        const newTs = (result as { ts?: string }).ts;
-        if (newTs) {
-          currentStatusMsgTs = newTs;
-        }
-      } catch (error) {
-        console.error(`[FastForward] Failed to post new status message:`, error);
-      }
-    };
-
-    // 6. Create WatchState for posting messages
-    const watchState: WatchState = {
-      conversationKey,
-      channelId,
-      threadTs,
-      sessionId,
-      workingDir: effectiveSession.workingDir,
-      fileOffset: 0,  // Not used for posting
-      intervalId: null as any,  // Not used for posting
-      statusMsgTs,
-      client,
-      updateRateMs: (effectiveSession.updateRateSeconds ?? 2) * 1000,
-      userId,
-    };
-
-    // 7. Post each message with pacing and infinite retries
-    let syncedCount = 0;
-    let wasStopped = false;
-    const collectedActivityEntries: ImportedActivityEntry[] = [];
-
-    for (let i = 0; i < messagesToSync.length; i++) {
-      // Check if user stopped the sync
-      if (isFfAborted(conversationKey)) {
-        wasStopped = true;
-        console.log(`[FastForward] Sync stopped by user at message ${i + 1}/${totalToSync}`);
-        break;
-      }
-
-      const msg = messagesToSync[i];
-
-      // Build activity entries from this message (thinking, tool_use, etc.)
-      const activityEntries = buildActivityEntriesFromMessage(msg);
-      collectedActivityEntries.push(...activityEntries);
-
-      // Check if message has extractable text content
-      const textContent = extractTextContent(msg);
-      const hasText = textContent.trim().length > 0;
-
-      if (hasText) {
-        // Message has text - post normally via postTerminalMessage
-        await withInfiniteRetry(
-          () => postTerminalMessage(watchState, msg),
-          {
-            baseDelayMs: 3000,
-            maxDelayMs: 30000,
-            onRetry: (error, attempt, delayMs) => {
-              console.log(`[FastForward] Message ${msg.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
-            },
-            onSuccess: (attempts) => {
-              if (attempts > 1) {
-                console.log(`[FastForward] Message ${msg.uuid} succeeded after ${attempts} attempts`);
-              }
-            },
-          }
-        );
-        console.log(`[FastForward] Synced message ${syncedCount + 1}/${totalToSync} (${msg.type}): ${msg.uuid}`);
-      } else if (activityEntries.length > 0) {
-        // Message has activity (thinking/tools) but no text - post summary with View Log button
-        const thinkingCount = activityEntries.filter(e => e.type === 'thinking').length;
-        const toolCount = activityEntries.filter(e => e.type === 'tool_start').length;
-
-        const parts: string[] = [];
-        if (thinkingCount > 0) parts.push(`${thinkingCount} thinking`);
-        if (toolCount > 0) {
-          const toolNames = activityEntries
-            .filter(e => e.type === 'tool_start')
-            .map(e => e.tool)
-            .join(', ');
-          parts.push(`tools: ${toolNames}`);
-        }
-
-        const summaryText = `:brain: *Terminal Activity* (${parts.join(', ')})`;
-
-        // Post activity summary with View Log button
-        // Use a unique key for this message's activity (for the View Log button)
-        const activityKey = `${conversationKey}_ff_${msg.uuid}`;
-
-        await withInfiniteRetry(
-          async () => {
-            const result = await withSlackRetry(() =>
-              client.chat.postMessage({
-                channel: channelId,
-                thread_ts: threadTs,
-                text: summaryText,
-                blocks: [
-                  {
-                    type: 'section' as const,
-                    text: { type: 'mrkdwn' as const, text: summaryText },
-                  },
-                  {
-                    type: 'actions' as const,
-                    block_id: `ff_activity_${msg.uuid}`,
-                    elements: [{
-                      type: 'button' as const,
-                      text: { type: 'plain_text' as const, text: 'View Log' },
-                      action_id: `view_activity_log_${activityKey}`,
-                      value: activityKey,
-                    }],
-                  },
-                ],
-              })
-            ) as { ts?: string };
-
-            // Save activity entries for this specific message (for View Log modal)
-            // Cast to ActivityEntry[] since ImportedActivityEntry is compatible
-            await saveActivityLog(activityKey, activityEntries as unknown as ActivityEntry[]);
-
-            // Save mapping for thread forking (use the message ts)
-            if (result?.ts) {
-              saveMessageMapping(channelId, result.ts, {
-                sdkMessageId: msg.uuid,
-                sessionId,
-                type: msg.type as 'user' | 'assistant',
-              });
-            }
-          },
-          {
-            baseDelayMs: 3000,
-            maxDelayMs: 30000,
-            onRetry: (error, attempt, delayMs) => {
-              console.log(`[FastForward] Activity ${msg.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
-            },
-          }
-        );
-        console.log(`[FastForward] Synced activity ${syncedCount + 1}/${totalToSync} (${msg.type}, ${parts.join(', ')}): ${msg.uuid}`);
-      } else {
-        // No text and no activity entries - skip this message
-        console.log(`[FastForward] Skipped empty message ${syncedCount + 1}/${totalToSync} (${msg.type}): ${msg.uuid}`);
-      }
-
-      // messageMap is updated by postTerminalMessage or above for activity-only messages
-      syncedCount++;
-
-      // Move status message to bottom every 10 messages or on last message
-      // This keeps the Stop FF button visible as messages pile up above it
-      if ((i + 1) % 10 === 0 || i === messagesToSync.length - 1) {
-        await moveStatusToBottom(i + 1, totalToSync);
-      }
-
-      // Pace: wait before next message (skip on last)
-      if (i < messagesToSync.length - 1) {
-        await sleep(FF_PACING_DELAY_MS);
-      }
-    }
-
-    // Clear abort flag
-    clearFfAborted(conversationKey);
+    // Use tracked values for completion message
+    const totalToSync = lastReportedTotal || syncResult.totalToSync;
+    const syncedCount = syncResult.syncedCount;
+    const wasStopped = syncResult.wasAborted;
 
     // 8. Update status to show completion or stopped
     if (wasStopped) {

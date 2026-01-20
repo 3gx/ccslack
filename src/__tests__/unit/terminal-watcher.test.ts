@@ -634,7 +634,7 @@ describe('terminal-watcher', () => {
       expect(watcher?.fileOffset).toBe(1000);
     });
 
-    it('should advance offset when all messages post successfully', async () => {
+    it('should NOT advance offset - relies on messageMap for deduplication', async () => {
       const mockMessage = {
         type: 'user',
         uuid: 'success-msg-123',
@@ -660,8 +660,8 @@ describe('terminal-watcher', () => {
       // Get watcher state to check offset
       const watcher = getWatcher('channel-1');
 
-      // Offset should have advanced to 2000
-      expect(watcher?.fileOffset).toBe(2000);
+      // Offset should NOT advance - we rely on messageMap for deduplication
+      expect(watcher?.fileOffset).toBe(1000);
     });
 
     it('should skip messages already in messageMap', async () => {
@@ -699,12 +699,12 @@ describe('terminal-watcher', () => {
       );
       expect(contentPosts.length).toBe(0);
 
-      // Offset should still advance (message was skipped, not failed)
+      // Offset should NOT advance - we rely on messageMap for deduplication
       const watcher = getWatcher('channel-1');
-      expect(watcher?.fileOffset).toBe(2000);
+      expect(watcher?.fileOffset).toBe(1000);
     });
 
-    it('should retry failed messages on next poll', async () => {
+    it('should retry failed messages on next poll via messageMap', async () => {
       const mockMessage = {
         type: 'user',
         uuid: 'retry-msg-123',
@@ -735,13 +735,13 @@ describe('terminal-watcher', () => {
       await vi.advanceTimersByTimeAsync(0);
 
       let watcher = getWatcher('channel-1');
-      expect(watcher?.fileOffset).toBe(1000); // Not advanced after immediate poll failure
+      expect(watcher?.fileOffset).toBe(1000); // Not advanced (offset never advances)
 
-      // Timer poll - should succeed (message is re-read because offset didn't advance)
+      // Timer poll - should succeed (message is re-read from same offset, messageMap filters duplicates)
       await vi.advanceTimersByTimeAsync(2000);
 
       watcher = getWatcher('channel-1');
-      expect(watcher?.fileOffset).toBe(2000); // Now advanced after successful retry
+      expect(watcher?.fileOffset).toBe(1000); // Still not advanced - we rely on messageMap
     });
 
     it('should not double-post messages after retry', async () => {

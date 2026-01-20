@@ -4,20 +4,18 @@
  */
 
 import { WebClient } from '@slack/web-api';
-import { Session, getSession, getThreadSession, saveMessageMapping, saveActivityLog, ActivityEntry, getMessageMapUuids } from './session-manager.js';
+import { Session, getSession, getThreadSession, saveMessageMapping } from './session-manager.js';
 import {
   getSessionFilePath,
   getFileSize,
-  readNewMessages,
   extractTextContent,
   sessionFileExists,
   SessionFileMessage,
-  buildActivityEntriesFromMessage,
-  ImportedActivityEntry,
 } from './session-reader.js';
 import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse } from './streaming.js';
+import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
 
 /**
  * State for an active terminal watcher.
@@ -35,6 +33,7 @@ export interface WatchState {
   client: WebClient;  // Store client reference for rate updates
   updateRateMs: number;
   userId?: string;  // User who initiated /continue (for ephemeral errors)
+  pollInProgress?: boolean;  // Prevents overlapping polls
 }
 
 /**
@@ -185,51 +184,50 @@ export function onSessionCleared(channelId: string, threadTs?: string): void {
 /**
  * Poll for new messages in the session file.
  *
- * Important: Only advances file offset after ALL messages are successfully posted.
- * This ensures failed messages are retried on the next poll. Messages already
- * posted (in messageMap) are skipped to avoid duplicates on retry.
+ * Uses shared syncMessagesFromOffset() function to post messages.
+ * Only advances file offset after ALL messages are successfully posted.
  */
 async function pollForChanges(state: WatchState): Promise<void> {
+  // Prevent overlapping polls (if previous poll is still in progress)
+  if (state.pollInProgress) {
+    console.log(`[TerminalWatcher] Skipping poll for ${state.conversationKey} - previous poll still in progress`);
+    return;
+  }
+  state.pollInProgress = true;
+
   try {
     const filePath = getSessionFilePath(state.sessionId, state.workingDir);
-    const { messages, newOffset } = await readNewMessages(filePath, state.fileOffset);
+    console.log(`[TerminalWatcher] Polling ${state.conversationKey} at offset ${state.fileOffset}`);
 
-    if (messages.length === 0) {
-      return;
-    }
+    // Create sync state from watch state
+    const syncState: MessageSyncState = {
+      conversationKey: state.conversationKey,
+      channelId: state.channelId,
+      threadTs: state.threadTs,
+      sessionId: state.sessionId,
+      workingDir: state.workingDir,
+      client: state.client,
+    };
 
-    // Get UUIDs already posted to Slack (from messageMap)
-    // This prevents duplicates if we re-read messages after a partial failure
-    const alreadyPosted = getMessageMapUuids(state.channelId);
+    const syncResult = await syncMessagesFromOffset(syncState, filePath, state.fileOffset, {
+      infiniteRetry: false,  // /watch uses limited retries
+      postTextMessage: (s, msg) => postTerminalMessage(state, msg),
+    });
 
-    // Track if all messages were successfully posted
-    let allSucceeded = true;
+    console.log(`[TerminalWatcher] Poll result: synced=${syncResult.syncedCount}/${syncResult.totalToSync}`);
 
-    // Post each message (skip if already posted)
-    for (const msg of messages) {
-      if (alreadyPosted.has(msg.uuid)) {
-        // Already posted (from previous attempt or /ff) - skip
-        continue;
-      }
-
-      const success = await postTerminalMessage(state, msg);
-      if (!success) {
-        allSucceeded = false;
-        // Continue trying other messages, but don't advance offset
-      }
-    }
-
-    // Only advance offset if ALL messages were successfully posted
-    // This ensures failed messages are retried on next poll
-    if (allSucceeded) {
-      state.fileOffset = newOffset;
-    }
+    // Note: We don't update fileOffset - messageMap handles deduplication
+    // This simplifies logic and avoids offset advancement bugs
 
     // Move status message to bottom after posting new messages
-    await moveStatusMessageToBottom(state);
+    if (syncResult.syncedCount > 0) {
+      await moveStatusMessageToBottom(state);
+    }
   } catch (error) {
     console.error(`[TerminalWatcher] Poll error for ${state.conversationKey}:`, error);
     // Don't stop on transient errors - will retry next poll
+  } finally {
+    state.pollInProgress = false;
   }
 }
 
@@ -295,21 +293,22 @@ async function moveStatusMessageToBottom(state: WatchState): Promise<void> {
 }
 
 /**
- * Post a terminal message to Slack with full bot fidelity.
+ * Post a terminal message with TEXT content to Slack.
  * - Uses session config for message size (threadCharLimit)
  * - Smart truncation with closed formatting (code blocks, bold, italic)
  * - File attachments (.md + .png) for assistant output
  * - Message mapping for thread forking
  *
- * Exported for /ff (fast-forward) command to sync missed terminal messages.
+ * NOTE: This function only handles messages with text content.
+ * Activity-only messages (thinking/tools but no text output) are handled by
+ * syncMessagesFromOffset() in message-sync.ts.
+ *
+ * Exported for use as callback in syncMessagesFromOffset().
  *
  * @returns true if message was successfully posted (and saved to messageMap), false on failure
  */
 export async function postTerminalMessage(state: WatchState, msg: SessionFileMessage): Promise<boolean> {
   const rawText = extractTextContent(msg);
-
-  // Build activity entries for assistant messages (thinking, tool_use, etc.)
-  const activityEntries = buildActivityEntriesFromMessage(msg);
 
   // Get session config - use correct function for channel vs thread
   const session = state.threadTs
@@ -317,13 +316,8 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
     : getSession(state.channelId);
   const charLimit = session?.threadCharLimit ?? 500;
 
-  // If no text content, check for activity-only messages
+  // If no text content, nothing to post - activity-only messages are handled by message-sync.ts
   if (!rawText.trim()) {
-    if (activityEntries.length > 0) {
-      // Activity-only message (thinking/tools but no output text) - post summary with View Log
-      return await postActivitySummary(state, msg, activityEntries);
-    }
-    // No text and no activity - nothing to post, consider success
     return true;
   }
 
@@ -439,77 +433,3 @@ async function notifyWatcherStopped(state: WatchState, reason: string): Promise<
   }
 }
 
-/**
- * Post an activity summary for messages with activity (thinking/tools) but no text output.
- * Mirrors /ff behavior: posts summary with View Log button for detailed inspection.
- *
- * @returns true if successfully posted and saved to messageMap, false on failure
- */
-async function postActivitySummary(
-  state: WatchState,
-  msg: SessionFileMessage,
-  activityEntries: ImportedActivityEntry[]
-): Promise<boolean> {
-  const thinkingCount = activityEntries.filter(e => e.type === 'thinking').length;
-  const toolCount = activityEntries.filter(e => e.type === 'tool_start').length;
-
-  const parts: string[] = [];
-  if (thinkingCount > 0) parts.push(`${thinkingCount} thinking`);
-  if (toolCount > 0) {
-    const toolNames = activityEntries
-      .filter(e => e.type === 'tool_start')
-      .map(e => e.tool)
-      .join(', ');
-    parts.push(`tools: ${toolNames}`);
-  }
-
-  const summaryText = `:brain: *Terminal Activity* (${parts.join(', ')})`;
-
-  // Use a unique key for this message's activity (for the View Log button)
-  const activityKey = `${state.conversationKey}_watch_${msg.uuid}`;
-
-  try {
-    const result = await withSlackRetry(() =>
-      state.client.chat.postMessage({
-        channel: state.channelId,
-        thread_ts: state.threadTs,
-        text: summaryText,
-        blocks: [
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: summaryText },
-          },
-          {
-            type: 'actions',
-            block_id: `watch_activity_${msg.uuid}`,
-            elements: [{
-              type: 'button',
-              text: { type: 'plain_text', text: 'View Log' },
-              action_id: `view_activity_log_${activityKey}`,
-              value: activityKey,
-            }],
-          },
-        ],
-      })
-    );
-
-    // Save activity entries for View Log modal
-    // Cast to ActivityEntry[] since ImportedActivityEntry is compatible
-    await saveActivityLog(activityKey, activityEntries as unknown as ActivityEntry[]);
-
-    // Save mapping for thread forking
-    if (result?.ts) {
-      saveMessageMapping(state.channelId, result.ts, {
-        sdkMessageId: msg.uuid,
-        sessionId: state.sessionId,
-        type: msg.type as 'user' | 'assistant',
-      });
-      console.log(`[TerminalWatcher] Posted activity summary for ${msg.uuid}: ${parts.join(', ')}`);
-      return true;
-    }
-    return false;
-  } catch (error) {
-    console.error(`[TerminalWatcher] Failed to post activity summary:`, error);
-    return false;
-  }
-}

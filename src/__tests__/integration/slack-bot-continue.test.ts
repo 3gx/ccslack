@@ -67,7 +67,7 @@ vi.mock('../../terminal-watcher.js', () => ({
   getWatcher: vi.fn().mockReturnValue(undefined),
   onSessionCleared: vi.fn(),
   stopAllWatchers: vi.fn(),
-  postTerminalMessage: vi.fn().mockResolvedValue(undefined),
+  postTerminalMessage: vi.fn().mockResolvedValue(true),
   WatchState: {},  // Mock interface
 }));
 
