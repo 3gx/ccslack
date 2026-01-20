@@ -384,6 +384,93 @@ describe('terminal-watcher', () => {
       );
     });
 
+    it('should post tool-only messages without file attachments', async () => {
+      const mockMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Read' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('[Tool: Read]');
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Should NOT use uploadMarkdownAndPngWithResponse for tool-only messages
+      expect(streaming.uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
+
+      // Should use simple chat.postMessage instead
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'channel-1',
+          text: expect.stringContaining('[Tool: Read]'),
+        })
+      );
+    });
+
+    it('should post multiple tool-only messages without file attachments', async () => {
+      const mockMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', name: 'Read' },
+          { type: 'tool_use', name: 'Write' },
+        ] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('[Tool: Read]\n[Tool: Write]');
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Should NOT use uploadMarkdownAndPngWithResponse for tool-only messages
+      expect(streaming.uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
+
+      // Should use simple chat.postMessage
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('[Tool: Read]'),
+        })
+      );
+    });
+
+    it('should still use file attachments for mixed content (text + tools)', async () => {
+      const mockMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [
+          { type: 'text', text: 'Here is the file:' },
+          { type: 'tool_use', name: 'Read' },
+        ] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Here is the file:\n[Tool: Read]');
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Should use uploadMarkdownAndPngWithResponse for mixed content
+      expect(streaming.uploadMarkdownAndPngWithResponse).toHaveBeenCalled();
+    });
+
     it('should truncate long messages for user input', async () => {
       const longText = 'x'.repeat(1000);
       const mockMessage = {

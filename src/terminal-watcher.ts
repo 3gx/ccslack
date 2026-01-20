@@ -354,7 +354,43 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
       return false;
     }
   } else {
-    // Assistant output: full bot fidelity with .md + .png
+    // Check if content is tool-only (no actual text output)
+    // Matches: [Tool: Read], [Tool: Write]\n[Tool: Bash], etc.
+    const isToolOnly = /^(\[Tool: [^\]]+\]\n?)+$/.test(rawText.trim());
+
+    if (isToolOnly) {
+      // Tool-only messages: simple text post (no file attachments)
+      let slackText = rawText;
+      if (slackText.length > charLimit) {
+        slackText = truncateWithClosedFormatting(slackText, charLimit);
+      }
+      const fullText = ':outbox_tray: *Terminal Output*\n' + slackText;
+
+      try {
+        const result = await withSlackRetry(() =>
+          state.client.chat.postMessage({
+            channel: state.channelId,
+            thread_ts: state.threadTs,
+            text: fullText,
+          })
+        );
+
+        if (result?.ts) {
+          saveMessageMapping(state.channelId, result.ts, {
+            sdkMessageId: msg.uuid,
+            sessionId: state.sessionId,
+            type: 'assistant',
+          });
+          return true;
+        }
+        return false;
+      } catch (error) {
+        console.error(`[TerminalWatcher] Failed to post tool-only message:`, error);
+        return false;
+      }
+    }
+
+    // Assistant output with real content: full bot fidelity with .md + .png
     const strippedMarkdown = stripMarkdownCodeFence(rawText, {
       stripEmptyTag: session?.stripEmptyTag
     });
