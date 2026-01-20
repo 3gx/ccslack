@@ -14,10 +14,28 @@ import {
   SessionFileMessage,
   buildActivityEntriesFromMessage,
   ImportedActivityEntry,
+  hasTextOutput,
 } from './session-reader.js';
+import { buildActivityLogText, ACTIVITY_LOG_MAX_CHARS } from './blocks.js';
 import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse } from './streaming.js';
+
+// Constants for live activity display
+const SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
+
+/**
+ * Processing state for live activity updates during watch mode.
+ * Tracks accumulated activity entries and the live activity Slack message.
+ */
+export interface WatchProcessingState {
+  currentMessageUuid: string | null;  // Current assistant message being tracked
+  activityLog: ImportedActivityEntry[];  // Accumulated activity entries
+  activityMsgTs: string | null;       // Slack message ts for live activity
+  status: 'idle' | 'processing';      // State machine
+  startTime: number;                  // For elapsed time display
+  spinnerIndex: number;               // For alive indicator
+}
 
 /**
  * State for an active terminal watcher.
@@ -35,6 +53,7 @@ export interface WatchState {
   client: WebClient;  // Store client reference for rate updates
   updateRateMs: number;
   userId?: string;  // User who initiated /continue (for ephemeral errors)
+  processing: WatchProcessingState;  // Live activity state
 }
 
 /**
@@ -100,6 +119,14 @@ export function startWatching(
     client,
     updateRateMs,
     userId,
+    processing: {
+      currentMessageUuid: null,
+      activityLog: [],
+      activityMsgTs: null,
+      status: 'idle',
+      startTime: Date.now(),
+      spinnerIndex: 0,
+    },
   };
 
   // Start polling - poll immediately, then on interval
@@ -183,7 +210,237 @@ export function onSessionCleared(channelId: string, threadTs?: string): void {
 }
 
 /**
+ * Build Block Kit blocks for live activity display.
+ * Shows rolling thinking output, tool activity, and View Log button.
+ */
+function buildLiveActivityBlocks(state: WatchState): any[] {
+  const { processing, conversationKey, sessionId } = state;
+  const elapsed = ((Date.now() - processing.startTime) / 1000).toFixed(1);
+  const spinner = SPINNER_FRAMES[processing.spinnerIndex % SPINNER_FRAMES.length];
+
+  // Convert ImportedActivityEntry to ActivityEntry format for buildActivityLogText
+  const activityEntries = processing.activityLog.map(entry => ({
+    timestamp: entry.timestamp,
+    type: entry.type as 'thinking' | 'tool_start' | 'generating',
+    tool: entry.tool,
+    thinkingContent: entry.thinkingContent,
+    thinkingTruncated: entry.thinkingTruncated,
+    generatingChars: entry.generatingChars,
+    // Mark in-progress for active thinking/generating entries
+    thinkingInProgress: entry.type === 'thinking',
+    generatingInProgress: entry.type === 'generating',
+  }));
+
+  // Build activity text using shared function
+  const activityText = buildActivityLogText(activityEntries, true, ACTIVITY_LOG_MAX_CHARS);
+
+  // Activity key for View Log button
+  const activityKey = `${conversationKey}_watch_live`;
+
+  const blocks: any[] = [
+    // Header with spinner and elapsed time
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:eye: *Watching terminal activity...* ${spinner} [${elapsed}s]`,
+      },
+    },
+    // Activity log content
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: activityText },
+    },
+    // Divider
+    { type: 'divider' },
+    // Buttons: View Log and Stop Watching
+    {
+      type: 'actions',
+      block_id: `watch_live_${sessionId}`,
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'View Log' },
+          action_id: `view_activity_log_${activityKey}`,
+          value: activityKey,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Stop Watching' },
+          action_id: 'stop_terminal_watch',
+          value: JSON.stringify({ sessionId }),
+        },
+      ],
+    },
+  ];
+
+  return blocks;
+}
+
+/**
+ * Create the initial live activity message when processing starts.
+ */
+async function createLiveActivityMessage(state: WatchState): Promise<void> {
+  try {
+    const result = await withSlackRetry(() =>
+      state.client.chat.postMessage({
+        channel: state.channelId,
+        thread_ts: state.threadTs,
+        text: 'Processing terminal activity...',
+        blocks: buildLiveActivityBlocks(state),
+      })
+    );
+
+    if (result?.ts) {
+      state.processing.activityMsgTs = result.ts as string;
+    }
+    console.log(`[TerminalWatcher] Created live activity message for ${state.conversationKey}`);
+  } catch (error) {
+    console.error(`[TerminalWatcher] Failed to create live activity message:`, error);
+  }
+}
+
+/**
+ * Update the live activity message with current state.
+ */
+async function updateLiveActivityMessage(state: WatchState): Promise<void> {
+  if (!state.processing.activityMsgTs) return;
+
+  // Increment spinner
+  state.processing.spinnerIndex++;
+
+  try {
+    await withSlackRetry(() =>
+      state.client.chat.update({
+        channel: state.channelId,
+        ts: state.processing.activityMsgTs!,
+        text: 'Processing terminal activity...',
+        blocks: buildLiveActivityBlocks(state),
+      })
+    );
+  } catch (error) {
+    console.error(`[TerminalWatcher] Failed to update live activity message:`, error);
+  }
+}
+
+/**
+ * Finalize live activity: post the final response and update activity message to summary.
+ */
+async function finalizeLiveActivity(state: WatchState, msg: SessionFileMessage): Promise<void> {
+  const { processing, conversationKey } = state;
+
+  // First, post the actual assistant response using existing postTerminalMessage
+  await postTerminalMessage(state, msg);
+
+  // Then update the activity message to a collapsed summary
+  if (processing.activityMsgTs) {
+    const elapsed = ((Date.now() - processing.startTime) / 1000).toFixed(1);
+    const thinkingCount = processing.activityLog.filter(e => e.type === 'thinking').length;
+    const toolCount = processing.activityLog.filter(e => e.type === 'tool_start').length;
+
+    // Build summary parts
+    const parts: string[] = [];
+    if (thinkingCount > 0) parts.push(`${thinkingCount} thinking`);
+    if (toolCount > 0) parts.push(`${toolCount} tool${toolCount > 1 ? 's' : ''}`);
+    const summaryText = parts.length > 0
+      ? `:clipboard: *Completed* (${parts.join(', ')}) in ${elapsed}s`
+      : `:clipboard: *Completed* in ${elapsed}s`;
+
+    // Activity key for this completed turn
+    const activityKey = `${conversationKey}_watch_${msg.uuid}`;
+
+    try {
+      await withSlackRetry(() =>
+        state.client.chat.update({
+          channel: state.channelId,
+          ts: processing.activityMsgTs!,
+          text: summaryText,
+          blocks: [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: summaryText },
+            },
+            {
+              type: 'actions',
+              block_id: `watch_complete_${msg.uuid}`,
+              elements: [
+                {
+                  type: 'button',
+                  text: { type: 'plain_text', text: 'View Log' },
+                  action_id: `view_activity_log_${activityKey}`,
+                  value: activityKey,
+                },
+              ],
+            },
+          ],
+        })
+      );
+
+      // Save activity log for View Log modal (cast to ActivityEntry[])
+      await saveActivityLog(activityKey, processing.activityLog as unknown as ActivityEntry[]);
+    } catch (error) {
+      console.error(`[TerminalWatcher] Failed to finalize activity message:`, error);
+    }
+  }
+
+  // Reset processing state to idle
+  state.processing = {
+    currentMessageUuid: null,
+    activityLog: [],
+    activityMsgTs: null,
+    status: 'idle',
+    startTime: Date.now(),
+    spinnerIndex: 0,
+  };
+
+  console.log(`[TerminalWatcher] Finalized activity for ${state.conversationKey}, msg ${msg.uuid}`);
+}
+
+/**
+ * Post a user message to Slack (simple text, no file attachments).
+ * Used by the new state-machine pollForChanges.
+ */
+async function postUserMessage(state: WatchState, msg: SessionFileMessage): Promise<void> {
+  const rawText = extractTextContent(msg);
+  if (!rawText.trim()) return;
+
+  // Get session config
+  const session = state.threadTs
+    ? getThreadSession(state.channelId, state.threadTs)
+    : getSession(state.channelId);
+  const charLimit = session?.threadCharLimit ?? 500;
+
+  let slackText = markdownToSlack(rawText);
+  if (slackText.length > charLimit) {
+    slackText = truncateWithClosedFormatting(slackText, charLimit);
+  }
+  const fullText = ':inbox_tray: *Terminal Input*\n' + slackText;
+
+  try {
+    const result = await withSlackRetry(() =>
+      state.client.chat.postMessage({
+        channel: state.channelId,
+        thread_ts: state.threadTs,
+        text: fullText,
+      })
+    );
+
+    // Save mapping for thread forking
+    if (result?.ts) {
+      saveMessageMapping(state.channelId, result.ts, {
+        sdkMessageId: msg.uuid,
+        sessionId: state.sessionId,
+        type: 'user',
+      });
+    }
+  } catch (error) {
+    console.error(`[TerminalWatcher] Failed to post user message:`, error);
+  }
+}
+
+/**
  * Poll for new messages in the session file.
+ * Uses state machine to track processing: idle -> processing -> idle.
  */
 async function pollForChanges(state: WatchState): Promise<void> {
   try {
@@ -191,14 +448,47 @@ async function pollForChanges(state: WatchState): Promise<void> {
     const { messages, newOffset } = await readNewMessages(filePath, state.fileOffset);
 
     if (messages.length === 0) {
+      // No new messages - update spinner if processing
+      if (state.processing.status === 'processing') {
+        await updateLiveActivityMessage(state);
+      }
       return;
     }
 
     state.fileOffset = newOffset;
 
-    // Post each message
     for (const msg of messages) {
-      await postTerminalMessage(state, msg);
+      if (msg.type === 'user') {
+        // User messages: post directly and continue
+        await postUserMessage(state, msg);
+        continue;
+      }
+
+      // Assistant message - process with state machine
+      const entries = buildActivityEntriesFromMessage(msg);
+      const msgHasText = hasTextOutput(msg);
+
+      if (state.processing.status === 'idle') {
+        // Start new processing turn
+        state.processing = {
+          status: 'processing',
+          startTime: Date.now(),
+          currentMessageUuid: msg.uuid,
+          activityLog: entries,
+          activityMsgTs: null,
+          spinnerIndex: 0,
+        };
+        await createLiveActivityMessage(state);
+      } else {
+        // Accumulate activity from additional assistant messages
+        state.processing.activityLog.push(...entries);
+        await updateLiveActivityMessage(state);
+      }
+
+      if (msgHasText) {
+        // Turn complete - finalize
+        await finalizeLiveActivity(state, msg);
+      }
     }
 
     // Move status message to bottom after posting new messages
