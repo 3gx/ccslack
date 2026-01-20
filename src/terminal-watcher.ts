@@ -4,14 +4,16 @@
  */
 
 import { WebClient } from '@slack/web-api';
-import { Session, getSession, getThreadSession, saveMessageMapping } from './session-manager.js';
+import { Session, getSession, getThreadSession, saveMessageMapping, saveActivityLog, ActivityEntry } from './session-manager.js';
 import {
   getSessionFilePath,
   getFileSize,
   readNewMessages,
   extractTextContent,
   sessionFileExists,
-  SessionFileMessage
+  SessionFileMessage,
+  buildActivityEntriesFromMessage,
+  ImportedActivityEntry,
 } from './session-reader.js';
 import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
@@ -279,13 +281,25 @@ async function moveStatusMessageToBottom(state: WatchState): Promise<void> {
  */
 export async function postTerminalMessage(state: WatchState, msg: SessionFileMessage): Promise<void> {
   const rawText = extractTextContent(msg);
-  if (!rawText.trim()) return;
+
+  // Build activity entries for assistant messages (thinking, tool_use, etc.)
+  const activityEntries = buildActivityEntriesFromMessage(msg);
 
   // Get session config - use correct function for channel vs thread
   const session = state.threadTs
     ? getThreadSession(state.channelId, state.threadTs)
     : getSession(state.channelId);
   const charLimit = session?.threadCharLimit ?? 500;
+
+  // If no text content, check for activity-only messages
+  if (!rawText.trim()) {
+    if (activityEntries.length > 0) {
+      // Activity-only message (thinking/tools but no output text) - post summary with View Log
+      await postActivitySummary(state, msg, activityEntries);
+    }
+    // No text and no activity - skip
+    return;
+  }
 
   if (msg.type === 'user') {
     // User input: simple text post (no file attachments)
@@ -391,5 +405,76 @@ async function notifyWatcherStopped(state: WatchState, reason: string): Promise<
     });
   } catch (error) {
     console.error(`[TerminalWatcher] Failed to update stop message:`, error);
+  }
+}
+
+/**
+ * Post an activity summary for messages with activity (thinking/tools) but no text output.
+ * Mirrors /ff behavior: posts summary with View Log button for detailed inspection.
+ */
+async function postActivitySummary(
+  state: WatchState,
+  msg: SessionFileMessage,
+  activityEntries: ImportedActivityEntry[]
+): Promise<void> {
+  const thinkingCount = activityEntries.filter(e => e.type === 'thinking').length;
+  const toolCount = activityEntries.filter(e => e.type === 'tool_start').length;
+
+  const parts: string[] = [];
+  if (thinkingCount > 0) parts.push(`${thinkingCount} thinking`);
+  if (toolCount > 0) {
+    const toolNames = activityEntries
+      .filter(e => e.type === 'tool_start')
+      .map(e => e.tool)
+      .join(', ');
+    parts.push(`tools: ${toolNames}`);
+  }
+
+  const summaryText = `:brain: *Terminal Activity* (${parts.join(', ')})`;
+
+  // Use a unique key for this message's activity (for the View Log button)
+  const activityKey = `${state.conversationKey}_watch_${msg.uuid}`;
+
+  try {
+    const result = await withSlackRetry(() =>
+      state.client.chat.postMessage({
+        channel: state.channelId,
+        thread_ts: state.threadTs,
+        text: summaryText,
+        blocks: [
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: summaryText },
+          },
+          {
+            type: 'actions',
+            block_id: `watch_activity_${msg.uuid}`,
+            elements: [{
+              type: 'button',
+              text: { type: 'plain_text', text: 'View Log' },
+              action_id: `view_activity_log_${activityKey}`,
+              value: activityKey,
+            }],
+          },
+        ],
+      })
+    );
+
+    // Save activity entries for View Log modal
+    // Cast to ActivityEntry[] since ImportedActivityEntry is compatible
+    await saveActivityLog(activityKey, activityEntries as unknown as ActivityEntry[]);
+
+    // Save mapping for thread forking
+    if (result?.ts) {
+      saveMessageMapping(state.channelId, result.ts, {
+        sdkMessageId: msg.uuid,
+        sessionId: state.sessionId,
+        type: msg.type as 'user' | 'assistant',
+      });
+    }
+
+    console.log(`[TerminalWatcher] Posted activity summary for ${msg.uuid}: ${parts.join(', ')}`);
+  } catch (error) {
+    console.error(`[TerminalWatcher] Failed to post activity summary:`, error);
   }
 }

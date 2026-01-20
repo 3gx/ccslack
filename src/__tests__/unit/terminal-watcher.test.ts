@@ -19,9 +19,10 @@ vi.mock('../../session-reader.js', () => ({
   getFileSize: vi.fn(() => 1000),
   readNewMessages: vi.fn(() => Promise.resolve({ messages: [], newOffset: 1000 })),
   extractTextContent: vi.fn((msg) => msg.message?.content?.[0]?.text || ''),
+  buildActivityEntriesFromMessage: vi.fn(() => []),  // Default to no activity
 }));
 
-// Mock session-manager (for getSession, getThreadSession, saveMessageMapping)
+// Mock session-manager (for getSession, getThreadSession, saveMessageMapping, saveActivityLog)
 vi.mock('../../session-manager.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../session-manager.js')>();
   return {
@@ -29,6 +30,7 @@ vi.mock('../../session-manager.js', async (importOriginal) => {
     getSession: vi.fn(() => ({ threadCharLimit: 500, stripEmptyTag: false })),
     getThreadSession: vi.fn(() => null),
     saveMessageMapping: vi.fn(),
+    saveActivityLog: vi.fn(),
   };
 });
 
