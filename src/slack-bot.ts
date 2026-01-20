@@ -979,13 +979,29 @@ async function handleFastForwardSync(
         })
       );
 
-      // Still start watching
+      // Still start watching - show terminal command like /watch does
       const updateRate = effectiveSession.updateRateSeconds ?? 2;
+      const terminalCommand = `cd ${effectiveSession.workingDir} && claude --dangerously-skip-permissions --resume ${sessionId}`;
       const watchStatusMsg = await client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
-        text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
+        text: `Continue in Terminal: ${terminalCommand}`,
         blocks: [
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: 'Continue in Terminal' },
+          },
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: 'Run this command to continue your session locally:' },
+          },
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: '```' + terminalCommand + '```' },
+          },
+          {
+            type: 'divider',
+          },
           {
             type: 'context',
             elements: [{
@@ -1049,13 +1065,29 @@ async function handleFastForwardSync(
       })
     );
 
-    // 9. Start watching (same as /watch)
+    // 9. Start watching (same as /watch) - show terminal command
     const updateRate = effectiveSession.updateRateSeconds ?? 2;
+    const terminalCommand = `cd ${effectiveSession.workingDir} && claude --dangerously-skip-permissions --resume ${sessionId}`;
     const watchStatusMsg = await client.chat.postMessage({
       channel: channelId,
       thread_ts: threadTs,
-      text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
+      text: `Continue in Terminal: ${terminalCommand}`,
       blocks: [
+        {
+          type: 'header',
+          text: { type: 'plain_text', text: 'Continue in Terminal' },
+        },
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: 'Run this command to continue your session locally:' },
+        },
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: '```' + terminalCommand + '```' },
+        },
+        {
+          type: 'divider',
+        },
         {
           type: 'context',
           elements: [{
