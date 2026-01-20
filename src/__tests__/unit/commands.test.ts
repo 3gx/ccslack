@@ -457,42 +457,6 @@ describe('commands', () => {
     });
   });
 
-  describe('/fork-thread', () => {
-    it('should return forkThread with description', () => {
-      const result = parseCommand('/fork-thread "try async approach"', mockSession);
-
-      expect(result.handled).toBe(true);
-      expect(result.forkThread).toBeDefined();
-      expect(result.forkThread?.description).toBe('try async approach');
-    });
-
-    it('should strip quotes from description', () => {
-      const result = parseCommand("/fork-thread 'single quotes work too'", mockSession);
-
-      expect(result.forkThread?.description).toBe('single quotes work too');
-    });
-
-    it('should handle description without quotes', () => {
-      const result = parseCommand('/fork-thread try puppeteer instead', mockSession);
-
-      expect(result.forkThread?.description).toBe('try puppeteer instead');
-    });
-
-    it('should use default description when none provided', () => {
-      const result = parseCommand('/fork-thread', mockSession);
-
-      expect(result.handled).toBe(true);
-      expect(result.forkThread).toBeDefined();
-      expect(result.forkThread?.description).toBe('Exploring alternative approach');
-    });
-
-    it('should include /fork-thread in help output', () => {
-      const result = parseCommand('/help', mockSession);
-
-      expect(result.response).toContain('/fork-thread');
-    });
-  });
-
   describe('/compact', () => {
     it('should return compactSession flag when session exists', () => {
       const result = parseCommand('/compact', mockSession);

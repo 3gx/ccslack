@@ -508,7 +508,7 @@ describe('slack-bot fork handlers', () => {
     });
   });
 
-  describe('thread-to-thread forking (/fork-thread)', () => {
+  describe('thread-to-thread forking (> fork: prefix)', () => {
     it('should include link to fork command message in new thread message', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
@@ -549,7 +549,7 @@ describe('slack-bot fork handlers', () => {
         event: {
           type: 'app_mention',
           user: 'U123',
-          text: '<@BOT123> /fork-thread "test forking"',
+          text: '<@BOT123> > fork: test forking',
           channel: 'C123',
           ts: forkCommandTs,
           thread_ts: sourceThreadTs,
@@ -606,7 +606,7 @@ describe('slack-bot fork handlers', () => {
         event: {
           type: 'app_mention',
           user: 'U123',
-          text: '<@BOT123> /fork-thread "test"',
+          text: '<@BOT123> > fork: test',
           channel: 'C123',
           ts: '5555555555.555555',
           thread_ts: sourceThreadTs,
@@ -624,43 +624,6 @@ describe('slack-bot fork handlers', () => {
       const expectedLink = `https://slack.com/archives/C123/p${newThreadTs.replace('.', '')}`;
       expect(sourceNotifyCall[0].text).toContain(expectedLink);
       expect(sourceNotifyCall[0].text).toContain('new thread');
-    });
-
-    it('should error when /fork-thread used outside a thread', async () => {
-      const handler = registeredHandlers['event_app_mention'];
-      const mockClient = createMockSlackClient();
-
-      vi.mocked(getSession).mockReturnValue({
-        sessionId: 'main-session',
-        workingDir: '/test/dir',
-        mode: 'plan',
-        createdAt: Date.now(),
-        lastActiveAt: Date.now(),
-        pathConfigured: true,
-        configuredPath: '/test/dir',
-        configuredBy: 'U123',
-        configuredAt: Date.now(),
-      });
-
-      await handler({
-        event: {
-          type: 'app_mention',
-          user: 'U123',
-          text: '<@BOT123> /fork-thread "test"',
-          channel: 'C123',
-          ts: '1234567890.123456',
-          // No thread_ts - not in a thread
-        },
-        client: mockClient,
-      });
-
-      // Should post error message
-      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel: 'C123',
-          text: expect.stringContaining('can only be used inside a thread'),
-        })
-      );
     });
 
     it('should error when source thread has no session', async () => {
@@ -686,7 +649,7 @@ describe('slack-bot fork handlers', () => {
         event: {
           type: 'app_mention',
           user: 'U123',
-          text: '<@BOT123> /fork-thread "test"',
+          text: '<@BOT123> > fork: test',
           channel: 'C123',
           ts: '5555555555.555555',
           thread_ts: '1234567890.123456',
@@ -740,7 +703,7 @@ describe('slack-bot fork handlers', () => {
         event: {
           type: 'app_mention',
           user: 'U123',
-          text: '<@BOT123> /fork-thread "test"',
+          text: '<@BOT123> > fork: test',
           channel: 'C123',
           ts: '5555555555.555555',
           thread_ts: sourceThreadTs,
@@ -846,7 +809,7 @@ describe('slack-bot fork handlers', () => {
       });
     });
 
-    it('should fork from thread session (not main session) when using /fork-thread', async () => {
+    it('should fork from thread session (not main session) when using > fork: prefix', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
       const sourceThreadTs = '1234567890.123456';
@@ -886,7 +849,7 @@ describe('slack-bot fork handlers', () => {
         event: {
           type: 'app_mention',
           user: 'U123',
-          text: '<@BOT123> /fork-thread "explore alternative"',
+          text: '<@BOT123> > fork: explore alternative',
           channel: 'C123',
           ts: '5555555555.555555',
           thread_ts: sourceThreadTs,

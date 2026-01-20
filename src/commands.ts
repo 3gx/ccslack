@@ -34,15 +34,6 @@ export interface CommandResult {
   response?: string;
   blocks?: Block[];
   sessionUpdate?: Partial<Session>;
-  // For /fork-thread command - caller handles the actual forking
-  forkThread?: {
-    description: string;
-  };
-  // For /fork-message command - fork from a specific message via link
-  forkMessage?: {
-    messageLink: string;
-    description: string;
-  };
   // For /wait command - rate limit stress test
   waitTest?: {
     seconds: number;
@@ -96,10 +87,6 @@ export function parseCommand(
       return handleStopWatching();
     case 'fork':
       return handleFork(session);
-    case 'fork-thread':
-      return handleForkThread(argString);
-    case 'fork-message':
-      return handleForkMessage(argString);
     case 'resume':
       return handleResume(argString);
     case 'wait':
@@ -147,8 +134,6 @@ function handleHelp(): CommandResult {
 \`/continue\` - Get command to continue session in terminal
 \`/stop-watching\` - Stop watching terminal session
 \`/fork\` - Get command to fork session to terminal
-\`/fork-thread [desc]\` - Fork current thread to new thread
-\`/fork-message <link> [desc]\` - Fork from a specific message
 \`/resume <id>\` - Resume a terminal session in Slack
 \`/compact\` - Compact session to reduce context size
 \`/clear\` - Clear session history (start fresh)
@@ -515,58 +500,6 @@ function handleResume(sessionId: string): CommandResult {
     handled: true,
     response: `Resuming session \`${sessionId}\`\n\nYour next message will continue this session.`,
     sessionUpdate: { sessionId },
-  };
-}
-
-/**
- * /fork-thread [description] - Fork current thread to a new thread
- * Must be used inside a thread. Caller handles the actual forking.
- */
-function handleForkThread(description: string): CommandResult {
-  // Strip quotes if present
-  const cleanDescription = description.replace(/^["']|["']$/g, '').trim();
-
-  return {
-    handled: true,
-    forkThread: {
-      description: cleanDescription || 'Exploring alternative approach',
-    },
-  };
-}
-
-/**
- * /fork-message <link> [description] - Fork from a specific message
- * Creates a new thread that forks from the exact message in the link.
- * Must be used inside a thread. Caller handles the actual forking.
- */
-function handleForkMessage(args: string): CommandResult {
-  if (!args.trim()) {
-    return {
-      handled: true,
-      response: 'Usage: `/fork-message <message_link> [description]`\n\nCopy a message link (right-click → Copy link) and paste it here to fork from that point.',
-    };
-  }
-
-  // Parse: <link> [description]
-  // Link is first "word" (URL), rest is description
-  const parts = args.trim().split(/\s+/);
-  const messageLink = parts[0];
-  const description = parts.slice(1).join(' ').replace(/^["']|["']$/g, '').trim();
-
-  // Basic validation that it looks like a Slack link
-  if (!messageLink.includes('slack.com/archives/') && !messageLink.includes('.slack.com/archives/')) {
-    return {
-      handled: true,
-      response: '❌ Invalid message link. Please copy a Slack message link (right-click → Copy link).',
-    };
-  }
-
-  return {
-    handled: true,
-    forkMessage: {
-      messageLink,
-      description: description || 'Fork from specific message',
-    },
   };
 }
 

@@ -49,7 +49,7 @@ import {
 } from './model-cache.js';
 import { uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
-import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence, parseSlackMessageLink } from './utils.js';
+import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
 import { parseCommand, UPDATE_RATE_DEFAULT } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { withSlackRetry } from './retry.js';
@@ -1572,90 +1572,6 @@ async function handleMessage(params: {
 
   // Check for slash commands (e.g., /status, /mode, /continue)
   const commandResult = parseCommand(userText, session);
-
-  // Handle /fork-thread command (requires thread context)
-  if (commandResult.forkThread) {
-    if (!threadTs || !originalTs) {
-      // Error: /fork-thread used outside of thread
-      await client.chat.postMessage({
-        channel: channelId,
-        text: '❌ `/fork-thread` can only be used inside a thread.',
-      });
-    } else {
-      await handleForkThread({
-        channelId,
-        sourceThreadTs: threadTs,
-        forkCommandTs: originalTs,
-        description: commandResult.forkThread.description,
-        client,
-      });
-    }
-    // Remove eyes reaction - fork done
-    if (originalTs) {
-      try {
-        await client.reactions.remove({
-          channel: channelId,
-          timestamp: originalTs,
-          name: 'eyes',
-        });
-      } catch (error) {
-        // Ignore errors
-      }
-    }
-    return;
-  }
-
-  // Handle /fork-message command (requires thread context)
-  if (commandResult.forkMessage) {
-    if (!threadTs) {
-      // Error: /fork-message used outside of thread
-      await client.chat.postMessage({
-        channel: channelId,
-        text: '❌ `/fork-message` can only be used inside a thread.',
-      });
-    } else {
-      // Parse the message link
-      const parsedLink = parseSlackMessageLink(commandResult.forkMessage.messageLink);
-      if (!parsedLink) {
-        await client.chat.postMessage({
-          channel: channelId,
-          thread_ts: threadTs,
-          text: '❌ Invalid message link. Please copy a valid Slack message link (right-click → Copy link).',
-        });
-      } else {
-        // Create the point-in-time fork
-        const result = await createForkFromMessage({
-          channelId,
-          sourceThreadTs: threadTs,
-          forkPointMessageTs: parsedLink.messageTs,
-          description: commandResult.forkMessage.description,
-          client,
-          userId: userId || 'unknown',
-        });
-
-        if (!result.success) {
-          await client.chat.postMessage({
-            channel: channelId,
-            thread_ts: threadTs,
-            text: `❌ ${result.error}`,
-          });
-        }
-      }
-    }
-    // Remove eyes reaction
-    if (originalTs) {
-      try {
-        await client.reactions.remove({
-          channel: channelId,
-          timestamp: originalTs,
-          name: 'eyes',
-        });
-      } catch (error) {
-        // Ignore errors
-      }
-    }
-    return;
-  }
 
   // Handle /wait command (rate limit stress test)
   if (commandResult.waitTest) {
