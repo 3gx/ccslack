@@ -2314,31 +2314,12 @@ describe('blocks', () => {
       expect(sectionText).toContain(':clipboard:');
     });
 
-    it('should NOT include Fork here button when no forkInfo', () => {
+    it('should NOT include Fork here button (Fork here is now on response message)', () => {
       const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey);
 
       const buttons = (blocks[1] as any).elements;
       const forkButton = buttons.find((b: any) => b.text.text === 'Fork here');
       expect(forkButton).toBeUndefined();
-    });
-
-    it('should include Fork here button when forkInfo provided', () => {
-      const forkInfo = { messageTs: '1234.567890', threadTs: '1234.000000' };
-      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey, forkInfo);
-
-      const buttons = (blocks[1] as any).elements;
-      const forkButton = buttons.find((b: any) => b.text.text === 'Fork here');
-      expect(forkButton).toBeDefined();
-      expect(forkButton.action_id).toContain('fork_here_');
-      expect(forkButton.value).toBe(JSON.stringify(forkInfo));
-    });
-
-    it('should have three buttons when forkInfo provided', () => {
-      const forkInfo = { messageTs: '1234.567890', threadTs: '1234.000000' };
-      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey, forkInfo);
-
-      const buttons = (blocks[1] as any).elements;
-      expect(buttons).toHaveLength(3);
     });
   });
 

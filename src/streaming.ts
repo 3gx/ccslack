@@ -404,7 +404,8 @@ export async function uploadMarkdownAndPngWithResponse(
   threadTs?: string,
   userId?: string,
   threadCharLimit?: number,
-  stripEmptyTag?: boolean
+  stripEmptyTag?: boolean,
+  forkInfo?: { threadTs: string; conversationKey: string }
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
   const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
 
@@ -417,11 +418,38 @@ export async function uploadMarkdownAndPngWithResponse(
       ? slackFormattedResponse
       : truncateWithClosedFormatting(slackFormattedResponse, limit);
 
+    // Build blocks with Fork here button if in a thread
+    const blocks = forkInfo ? [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: textToPost,
+        },
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: {
+              type: 'plain_text',
+              text: 'Fork here',
+              emoji: true,
+            },
+            action_id: `fork_here_${forkInfo.conversationKey}`,
+            value: JSON.stringify({ threadTs: forkInfo.threadTs }),
+          },
+        ],
+      },
+    ] : undefined;
+
     const textResult = await withSlackRetry(() =>
       client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
         text: textToPost,
+        ...(blocks && { blocks }),
       })
     );
 

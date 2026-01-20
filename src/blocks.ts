@@ -1577,8 +1577,6 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
 export interface CombinedCompletionParams extends StatusPanelParams {
   thinkingBlockCount: number;
   durationMs: number;
-  /** Fork info for "Fork here" button (only in threads) */
-  forkInfo?: { messageTs: string; threadTs: string };
 }
 
 /**
@@ -1586,16 +1584,15 @@ export interface CombinedCompletionParams extends StatusPanelParams {
  * Shows summary with View Log/Download buttons + completion stats.
  */
 export function buildCombinedCompletionBlocks(params: CombinedCompletionParams): Block[] {
-  const { thinkingBlockCount, durationMs, forkInfo, ...statusParams } = params;
+  const { thinkingBlockCount, durationMs, ...statusParams } = params;
   const blocks: Block[] = [];
 
-  // 1. Collapsed activity summary with View Log / Download / Fork here buttons
+  // 1. Collapsed activity summary with View Log / Download buttons
   blocks.push(...buildCollapsedActivityBlocks(
     thinkingBlockCount,
     statusParams.toolsCompleted,
     durationMs,
-    statusParams.conversationKey,
-    forkInfo
+    statusParams.conversationKey
   ));
 
   // 2. Divider
@@ -1734,16 +1731,13 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
 
 /**
  * Build collapsed activity summary blocks for completion.
- * Shows summary with View Log, Download, and optionally Fork here buttons.
- *
- * @param forkInfo - Fork info for "Fork here" button (only passed for threads)
+ * Shows summary with View Log and Download buttons.
  */
 export function buildCollapsedActivityBlocks(
   thinkingBlockCount: number,
   toolsCompleted: number,
   durationMs: number,
-  conversationKey: string,
-  forkInfo?: { messageTs: string; threadTs: string }
+  conversationKey: string
 ): Block[] {
   const durationSec = (durationMs / 1000).toFixed(1);
 
@@ -1774,16 +1768,6 @@ export function buildCollapsedActivityBlocks(
       value: conversationKey,
     },
   ];
-
-  // Add "Fork here" button only for threads
-  if (forkInfo) {
-    buttonElements.push({
-      type: 'button',
-      text: { type: 'plain_text', text: 'Fork here' },
-      action_id: `fork_here_${conversationKey}`,
-      value: JSON.stringify(forkInfo),
-    });
-  }
 
   return [
     {

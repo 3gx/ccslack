@@ -2676,8 +2676,6 @@ async function handleMessage(params: {
                   costUsd: processingState.costUsd,
                   conversationKey: activityLogKey,  // Use activityLogKey for View Log/Download
                   rateLimitHits: processingState.rateLimitHits,
-                  // Add Fork here button only for threads
-                  forkInfo: threadTs ? { messageTs: statusMsgTs, threadTs } : undefined,
                 }),
                 text: 'Complete',
               })
@@ -2734,7 +2732,9 @@ async function handleMessage(params: {
         threadTs,
         userId,
         liveConfig.threadCharLimit,
-        liveConfig.stripEmptyTag
+        liveConfig.stripEmptyTag,
+        // Add Fork here button only for threads
+        threadTs ? { threadTs, conversationKey: activityLogKey } : undefined
       );
 
       if (uploadResult) {
@@ -4134,9 +4134,17 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
   const match = actionId.match(/^fork_here_(.+)$/);
   const conversationKey = match ? match[1] : '';
 
-  // Parse { messageTs, threadTs } from action.value
+  // Get messageTs from the message the button is on (Slack provides this)
+  const bodyWithMessage = body as any;
+  const messageTs = bodyWithMessage.message?.ts;
+  if (!messageTs) {
+    console.error('[ForkHere] Could not get message timestamp from body');
+    return;
+  }
+
+  // Parse { threadTs } from action.value
   const valueStr = 'value' in action ? (action.value || '{}') : '{}';
-  let forkInfo: { messageTs: string; threadTs: string };
+  let forkInfo: { threadTs: string };
   try {
     forkInfo = JSON.parse(valueStr);
   } catch {
@@ -4144,9 +4152,9 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
     return;
   }
 
-  const { messageTs, threadTs } = forkInfo;
-  if (!messageTs || !threadTs) {
-    console.error('[ForkHere] Missing messageTs or threadTs:', forkInfo);
+  const { threadTs } = forkInfo;
+  if (!threadTs) {
+    console.error('[ForkHere] Missing threadTs:', forkInfo);
     return;
   }
 

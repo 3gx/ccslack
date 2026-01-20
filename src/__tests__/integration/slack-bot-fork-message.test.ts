@@ -365,19 +365,20 @@ describe('slack-bot fork_here button handler', () => {
       await handler({
         action: {
           action_id: `fork_here_${conversationKey}`,
-          value: JSON.stringify({ messageTs, threadTs }),
+          value: JSON.stringify({ threadTs }),  // Only threadTs in value
         },
         ack,
         body: {
           user: { id: 'U123' },
           channel: { id: 'C123' },
+          message: { ts: messageTs },  // messageTs comes from body.message.ts
         },
         client: mockClient,
       });
 
       expect(ack).toHaveBeenCalled();
 
-      // Should look up message in messageMap
+      // Should look up message in messageMap using ts from body.message
       expect(findForkPointMessageId).toHaveBeenCalledWith('C123', messageTs);
 
       // Should create fork anchor in main channel
@@ -424,12 +425,13 @@ describe('slack-bot fork_here button handler', () => {
       await handler({
         action: {
           action_id: `fork_here_${conversationKey}`,
-          value: JSON.stringify({ messageTs, threadTs }),
+          value: JSON.stringify({ threadTs }),  // Only threadTs in value
         },
         ack,
         body: {
           user: { id: 'U123' },
           channel: { id: 'C123' },
+          message: { ts: messageTs },  // messageTs comes from body.message.ts
         },
         client: mockClient,
       });
@@ -468,7 +470,7 @@ describe('slack-bot fork_here button handler', () => {
       expect(saveThreadSession).not.toHaveBeenCalled();
     });
 
-    it('should handle missing messageTs/threadTs in forkInfo gracefully', async () => {
+    it('should handle missing threadTs in forkInfo gracefully', async () => {
       const handler = registeredHandlers['action_^fork_here_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
@@ -477,12 +479,38 @@ describe('slack-bot fork_here button handler', () => {
       await handler({
         action: {
           action_id: `fork_here_${conversationKey}`,
-          value: JSON.stringify({ messageTs: '123' }), // Missing threadTs
+          value: JSON.stringify({}), // Missing threadTs
         },
         ack,
         body: {
           user: { id: 'U123' },
           channel: { id: 'C123' },
+          message: { ts: '1111111111.111111' },  // messageTs is present
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Should not create any fork
+      expect(saveThreadSession).not.toHaveBeenCalled();
+    });
+
+    it('should handle missing message.ts in body gracefully', async () => {
+      const handler = registeredHandlers['action_^fork_here_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const conversationKey = 'C123_1000000000.000000';
+
+      await handler({
+        action: {
+          action_id: `fork_here_${conversationKey}`,
+          value: JSON.stringify({ threadTs: '1000000000.000000' }),
+        },
+        ack,
+        body: {
+          user: { id: 'U123' },
+          channel: { id: 'C123' },
+          // No message.ts - simulating edge case
         },
         client: mockClient,
       });
