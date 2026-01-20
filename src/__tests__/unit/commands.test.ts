@@ -53,6 +53,7 @@ describe('commands', () => {
       expect(result.response).toContain('/status');
       expect(result.response).toContain('/mode');
       expect(result.response).toContain('/continue');
+      expect(result.response).toContain('/stop-watching');
       expect(result.response).toContain('/fork');
       expect(result.response).toContain('/resume');
     });
@@ -357,6 +358,30 @@ describe('commands', () => {
 
       expect(contextBlock).toBeDefined();
       expect(contextBlock?.elements?.[0]?.text).toContain(mockSession.workingDir);
+    });
+  });
+
+  describe('/stop-watching', () => {
+    it('should set stopTerminalWatch flag', () => {
+      const result = parseCommand('/stop-watching', mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.stopTerminalWatch).toBe(true);
+    });
+
+    it('should not require a session ID', () => {
+      const sessionWithoutId: Session = { ...mockSession, sessionId: null };
+      const result = parseCommand('/stop-watching', sessionWithoutId);
+
+      expect(result.handled).toBe(true);
+      expect(result.stopTerminalWatch).toBe(true);
+    });
+
+    it('should appear in /help output', () => {
+      const result = parseCommand('/help', mockSession);
+
+      expect(result.response).toContain('/stop-watching');
+      expect(result.response).toContain('Stop watching terminal session');
     });
   });
 

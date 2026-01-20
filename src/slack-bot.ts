@@ -53,6 +53,15 @@ import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './
 import { parseCommand, UPDATE_RATE_DEFAULT } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { withSlackRetry } from './retry.js';
+import {
+  startWatching,
+  stopWatching,
+  isWatching,
+  updateWatchRate,
+  getWatcher,
+  onSessionCleared,
+  stopAllWatchers
+} from './terminal-watcher.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
@@ -719,6 +728,10 @@ async function runClearSession(
       mode: 'default',  // Reset to safe default mode
       planFilePath: null,  // Reset plan file path on clear
     });
+
+    // Stop terminal watcher if active (session is being cleared)
+    onSessionCleared(channelId, threadTs);
+
     console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
 
     await withSlackRetry(() =>
@@ -1299,6 +1312,31 @@ async function handleMessage(params: {
   // For threads: threadTs is unique; for main channel: use originalTs
   const activityLogKey = threadTs ? `${channelId}_${threadTs}` : `${channelId}_${originalTs}`;
 
+  // Auto-stop terminal watcher when user sends a regular message to Claude
+  // Commands don't auto-stop - only /stop-watching explicitly stops watching
+  const isCommand = userText.trim().startsWith('/');
+  if (isWatching(channelId, threadTs) && !isCommand) {
+    console.log(`[TerminalWatcher] Auto-stopping: user sent message in ${conversationKey}`);
+    const watcher = getWatcher(channelId, threadTs);
+    if (watcher) {
+      // Update the /continue message to show stopped
+      try {
+        await client.chat.update({
+          channel: channelId,
+          ts: watcher.statusMsgTs,
+          text: 'Stopped watching',
+          blocks: [{
+            type: 'section',
+            text: { type: 'mrkdwn', text: ':white_check_mark: Stopped watching (you sent a message).' },
+          }],
+        });
+      } catch (e) {
+        // Message may have been deleted
+      }
+    }
+    stopWatching(channelId, threadTs);
+  }
+
   // Get or create session (handle threads differently)
   let session: {
     sessionId: string | null;
@@ -1595,6 +1633,11 @@ async function handleMessage(params: {
       }
     }
 
+    // Update terminal watcher rate if active
+    if (commandResult.sessionUpdate?.updateRateSeconds !== undefined && isWatching(channelId, threadTs)) {
+      updateWatchRate(channelId, threadTs, commandResult.sessionUpdate.updateRateSeconds);
+    }
+
     // Post header showing mode (so user always sees current mode)
     await withSlackRetry(() =>
       client.chat.postMessage({
@@ -1610,11 +1653,35 @@ async function handleMessage(params: {
 
     // Post command response
     if (commandResult.blocks) {
-      await client.chat.postMessage({
+      const response = await client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
         blocks: commandResult.blocks,
         text: 'Command response',
+      });
+
+      // Start terminal watcher if requested (for /continue command)
+      if (commandResult.startTerminalWatch && session?.sessionId && response.ts) {
+        const result = startWatching(channelId, threadTs, session, client, response.ts, userId);
+        if (!result.success) {
+          // Notify user of error
+          await client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: `:warning: Could not start watching: ${result.error}`,
+          });
+        }
+      }
+
+    } else if (commandResult.stopTerminalWatch) {
+      // Stop terminal watcher (for /stop-watching command)
+      const stopped = stopWatching(channelId, threadTs);
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: stopped
+          ? ':white_check_mark: Stopped watching terminal session.'
+          : ':information_source: No active terminal watcher in this conversation.',
       });
     } else if (commandResult.response) {
       await client.chat.postMessage({
@@ -3905,6 +3972,37 @@ app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client })
       });
     } catch (e) {
       console.error('Error posting upload error message:', e);
+    }
+  }
+});
+
+// Handle "Stop Watching" button click for terminal session watcher
+app.action('stop_terminal_watch', async ({ ack, body, client }) => {
+  await ack();
+
+  const channelId = body.channel?.id;
+  if (!channelId) return;
+
+  // Get threadTs from message if in thread
+  const bodyWithMessage = body as any;
+  const threadTs = bodyWithMessage.message?.thread_ts;
+
+  const stopped = stopWatching(channelId, threadTs);
+
+  if (stopped && bodyWithMessage.message?.ts) {
+    // Update the message to show stopped state
+    try {
+      await client.chat.update({
+        channel: channelId,
+        ts: bodyWithMessage.message.ts,
+        text: 'Terminal watching stopped',
+        blocks: [{
+          type: 'section',
+          text: { type: 'mrkdwn', text: ':white_check_mark: Stopped watching terminal session.' },
+        }],
+      });
+    } catch (error) {
+      console.error('[StopWatch] Failed to update message:', error);
     }
   }
 });

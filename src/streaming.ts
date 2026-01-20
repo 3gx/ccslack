@@ -433,11 +433,12 @@ export async function uploadMarkdownAndPngWithResponse(
 
     // Prepare files array - always include markdown
     const timestamp = Date.now();
-    const files: Array<{ content: string | Buffer; filename: string; title: string }> = [
+    const files: Array<{ content: string | Buffer; filename: string; title: string; filetype: string }> = [
       {
         content: cleanMarkdown,
         filename: `response-${timestamp}.md`,
         title: 'Full Response (Markdown)',
+        filetype: 'markdown',
       },
     ];
 
@@ -447,6 +448,7 @@ export async function uploadMarkdownAndPngWithResponse(
         content: pngBuffer,
         filename: `response-${timestamp}.png`,
         title: 'Response Preview',
+        filetype: 'png',
       });
     }
 
@@ -459,6 +461,7 @@ export async function uploadMarkdownAndPngWithResponse(
           file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
           filename: f.filename,
           title: f.title,
+          filetype: f.filetype,
         })),
       } as any)
     );

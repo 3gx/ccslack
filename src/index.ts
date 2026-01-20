@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { startBot } from './slack-bot.js';
 import fs from 'fs';
 import { shutdownBrowser } from './markdown-png.js';
+import { stopAllWatchers } from './terminal-watcher.js';
 
 // Answer directory for MCP <-> Slack communication
 export const ANSWER_DIR = '/tmp/ccslack-answers';
@@ -29,12 +30,14 @@ startBot();
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('Shutting down...');
+  stopAllWatchers();  // Stop all terminal watchers
   await shutdownBrowser();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('Interrupted, shutting down...');
+  stopAllWatchers();  // Stop all terminal watchers
   await shutdownBrowser();
   process.exit(0);
 });

@@ -48,6 +48,10 @@ export interface CommandResult {
   compactSession?: boolean;
   // For /clear command - clears session history
   clearSession?: boolean;
+  // For /continue command - signals to start terminal session watching
+  startTerminalWatch?: boolean;
+  // For /stop-watching command - signals to stop terminal session watching
+  stopTerminalWatch?: boolean;
 }
 
 /**
@@ -83,6 +87,8 @@ export function parseCommand(
       return handleLs(argString, session);
     case 'continue':
       return handleContinue(session);
+    case 'stop-watching':
+      return handleStopWatching();
     case 'fork':
       return handleFork(session);
     case 'fork-thread':
@@ -132,6 +138,7 @@ function handleHelp(): CommandResult {
 \`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
 \`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
 \`/continue\` - Get command to continue session in terminal
+\`/stop-watching\` - Stop watching terminal session
 \`/fork\` - Get command to fork session to terminal
 \`/fork-thread [desc]\` - Fork current thread to new thread
 \`/resume <id>\` - Resume a terminal session in Slack
@@ -376,7 +383,7 @@ function handleMode(modeArg: string, session: Session): CommandResult {
 }
 
 /**
- * /continue - Show command to continue session in terminal
+ * /continue - Show command to continue session in terminal and start watching
  */
 function handleContinue(session: Session): CommandResult {
   if (!session.sessionId) {
@@ -387,16 +394,65 @@ function handleContinue(session: Session): CommandResult {
   }
 
   const command = `claude --resume ${session.sessionId}`;
+  const updateRate = session.updateRateSeconds ?? 2;
 
   return {
     handled: true,
-    blocks: buildTerminalCommandBlocks({
-      title: 'Continue in Terminal',
-      description: 'Run this command to continue your session locally:',
-      command,
-      workingDir: session.workingDir,
-      sessionId: session.sessionId,
-    }),
+    startTerminalWatch: true,
+    blocks: [
+      // Existing terminal command blocks
+      {
+        type: "header",
+        text: { type: "plain_text", text: "Continue in Terminal" },
+      },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "Run this command to continue your session locally:" },
+      },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "```" + command + "```" },
+      },
+      {
+        type: "context",
+        elements: [
+          { type: "mrkdwn", text: `:file_folder: *Working directory:* \`${session.workingDir}\`` },
+        ],
+      },
+      {
+        type: "divider",
+      },
+      // Watching status and stop button
+      {
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
+        }],
+      },
+      {
+        type: "actions",
+        block_id: `terminal_watch_${session.sessionId}`,
+        elements: [{
+          type: "button",
+          text: { type: "plain_text", text: "Stop Watching" },
+          action_id: "stop_terminal_watch",
+          value: JSON.stringify({
+            sessionId: session.sessionId
+          }),
+        }],
+      },
+    ],
+  };
+}
+
+/**
+ * /stop-watching - Stop watching terminal session
+ */
+function handleStopWatching(): CommandResult {
+  return {
+    handled: true,
+    stopTerminalWatch: true,
   };
 }
 
