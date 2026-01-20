@@ -1235,54 +1235,32 @@ describe('blocks', () => {
   });
 
   describe('buildForkAnchorBlocks', () => {
-    it('should build fork anchor with description', () => {
+    it('should build fork anchor with single section block', () => {
       const blocks = buildForkAnchorBlocks({
-        description: 'try async approach',
+        forkPointLink: 'https://slack.com/archives/C123/p1234567890123456?thread_ts=1234567890.123456&cid=C123',
       });
 
-      expect(blocks).toHaveLength(2);
+      expect(blocks).toHaveLength(1);
       expect(blocks[0].type).toBe('section');
-      expect(blocks[1].type).toBe('context');
     });
 
-    it('should include fork emoji and description in section', () => {
-      const blocks = buildForkAnchorBlocks({
-        description: 'explore puppeteer instead',
-      });
+    it('should include fork emoji and link in section', () => {
+      const forkPointLink = 'https://slack.com/archives/C123/p1234567890123456?thread_ts=1234567890.123456&cid=C123';
+      const blocks = buildForkAnchorBlocks({ forkPointLink });
 
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
       expect(sectionBlock?.text?.text).toContain('🔀');
-      expect(sectionBlock?.text?.text).toContain('Forked');
-      expect(sectionBlock?.text?.text).toContain('explore puppeteer instead');
+      expect(sectionBlock?.text?.text).toContain('Point-in-time fork from');
+      expect(sectionBlock?.text?.text).toContain('this message');
+      expect(sectionBlock?.text?.text).toContain(forkPointLink);
     });
 
-    it('should include context indicating forked from thread', () => {
-      const blocks = buildForkAnchorBlocks({
-        description: 'test',
-      });
-
-      const contextBlock = blocks.find((b: any) => b.type === 'context');
-      expect(contextBlock?.elements?.[0]?.text).toContain('Forked from thread');
-    });
-
-    it('should handle empty description', () => {
-      const blocks = buildForkAnchorBlocks({
-        description: '',
-      });
-
-      expect(blocks).toHaveLength(2);
-      const sectionBlock = blocks.find((b: any) => b.type === 'section');
-      expect(sectionBlock?.text?.text).toContain('Forked');
-    });
-
-    it('should handle description with special characters', () => {
-      const blocks = buildForkAnchorBlocks({
-        description: 'try `async/await` pattern & "promises"',
-      });
+    it('should format link as Slack mrkdwn', () => {
+      const forkPointLink = 'https://slack.com/archives/C456/p9876543210987654?thread_ts=9876543210.987654&cid=C456';
+      const blocks = buildForkAnchorBlocks({ forkPointLink });
 
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
-      expect(sectionBlock?.text?.text).toContain('async/await');
-      expect(sectionBlock?.text?.text).toContain('promises');
+      expect(sectionBlock?.text?.text).toBe(`🔀 Point-in-time fork from <${forkPointLink}|this message>`);
     });
   });
 

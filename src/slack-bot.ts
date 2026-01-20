@@ -784,16 +784,15 @@ async function runClearSession(
 }
 
 // Create a fork from a specific message (point-in-time fork)
-// Used by both /fork-message command and "Fork here" button
+// Used by "Fork here" button
 async function createForkFromMessage(params: {
   channelId: string;
   sourceThreadTs: string;   // Source thread where fork was triggered
   forkPointMessageTs: string;  // Message to fork from (via messageMap lookup)
-  description: string;
   client: any;
   userId: string;
 }): Promise<{ success: boolean; error?: string; forkThreadTs?: string }> {
-  const { channelId, sourceThreadTs, forkPointMessageTs, description, client, userId } = params;
+  const { channelId, sourceThreadTs, forkPointMessageTs, client, userId } = params;
 
   // 1. Look up the message in messageMap
   const forkPoint = findForkPointMessageId(channelId, forkPointMessageTs);
@@ -817,17 +816,20 @@ async function createForkFromMessage(params: {
   // 3. Get the main session for inheriting config
   const mainSession = getSession(channelId);
 
-  // 4. Create fork anchor in main channel
+  // 4. Build fork point link (used in anchor and thread messages)
+  const forkPointLink = `https://slack.com/archives/${channelId}/p${forkPointMessageTs.replace('.', '')}?thread_ts=${sourceThreadTs}&cid=${channelId}`;
+
+  // 5. Create fork anchor in main channel
   const anchorMessage = await withSlackRetry(() =>
     client.chat.postMessage({
       channel: channelId,
-      text: `🔀 Forked: ${description}`,
-      blocks: buildForkAnchorBlocks({ description }),
+      text: `🔀 Point-in-time fork from this message`,
+      blocks: buildForkAnchorBlocks({ forkPointLink }),
     })
   );
   const newThreadTs = (anchorMessage as { ts?: string }).ts!;
 
-  // 5. Create forked thread session with point-in-time fork data
+  // 6. Create forked thread session with point-in-time fork data
   saveThreadSession(channelId, newThreadTs, {
     sessionId: null,  // Will be set when SDK creates the forked session
     forkedFrom: sourceSessionId,
@@ -852,23 +854,22 @@ async function createForkFromMessage(params: {
     planFilePath: null,  // Don't inherit plan from parent
   });
 
-  // 6. Post first message in new thread with link to the fork point
-  const forkPointLink = `https://slack.com/archives/${channelId}/p${forkPointMessageTs.replace('.', '')}?thread_ts=${sourceThreadTs}&cid=${channelId}`;
+  // 7. Post first message in new thread with link to the fork point
   await withSlackRetry(() =>
     client.chat.postMessage({
       channel: channelId,
       thread_ts: newThreadTs,
-      text: `_Point-in-time fork from <${forkPointLink}|this message>. Ready to explore: ${description}_\n\nSend a message to continue from that point.`,
+      text: `_Point-in-time fork from <${forkPointLink}|this message>._`,
     })
   );
 
-  // 7. Notify in source thread
+  // 8. Notify in source thread
   const newThreadLink = `https://slack.com/archives/${channelId}/p${newThreadTs.replace('.', '')}`;
   await withSlackRetry(() =>
     client.chat.postMessage({
       channel: channelId,
       thread_ts: sourceThreadTs,
-      text: `_Point-in-time fork created: <${newThreadLink}|${description}>_`,
+      text: `_Point-in-time fork created: <${newThreadLink}|view thread>_`,
     })
   );
 
@@ -3991,7 +3992,6 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
     channelId,
     sourceThreadTs: threadTs,
     forkPointMessageTs: messageTs,
-    description: 'Fork from button',
     client: client as any,
     userId,
   });

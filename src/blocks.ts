@@ -1164,7 +1164,7 @@ export function buildToolApprovalBlocks(params: ToolApprovalBlockParams): Block[
  * Parameters for fork anchor blocks.
  */
 export interface ForkAnchorBlockParams {
-  description: string;
+  forkPointLink: string;
 }
 
 /**
@@ -1172,22 +1172,15 @@ export interface ForkAnchorBlockParams {
  * This message serves as the parent for the new forked thread.
  */
 export function buildForkAnchorBlocks(params: ForkAnchorBlockParams): Block[] {
-  const { description } = params;
+  const { forkPointLink } = params;
 
   return [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `🔀 *Forked:* ${description}`,
+        text: `🔀 Point-in-time fork from <${forkPointLink}|this message>`,
       },
-    },
-    {
-      type: 'context',
-      elements: [{
-        type: 'mrkdwn',
-        text: '_Forked from thread_',
-      }],
     },
   ];
 }
