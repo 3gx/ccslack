@@ -9,6 +9,7 @@ import {
   stopAllWatchers,
 } from '../../terminal-watcher.js';
 import { Session } from '../../session-manager.js';
+import * as sessionManager from '../../session-manager.js';
 import * as sessionReader from '../../session-reader.js';
 import * as streaming from '../../streaming.js';
 
@@ -22,7 +23,7 @@ vi.mock('../../session-reader.js', () => ({
   buildActivityEntriesFromMessage: vi.fn(() => []),  // Default to no activity
 }));
 
-// Mock session-manager (for getSession, getThreadSession, saveMessageMapping, saveActivityLog)
+// Mock session-manager (for getSession, getThreadSession, saveMessageMapping, saveActivityLog, getMessageMapUuids)
 vi.mock('../../session-manager.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../session-manager.js')>();
   return {
@@ -31,6 +32,7 @@ vi.mock('../../session-manager.js', async (importOriginal) => {
     getThreadSession: vi.fn(() => null),
     saveMessageMapping: vi.fn(),
     saveActivityLog: vi.fn(),
+    getMessageMapUuids: vi.fn(() => new Set<string>()),  // Default to empty set (no messages posted yet)
   };
 });
 
@@ -598,6 +600,192 @@ describe('terminal-watcher', () => {
           ]),
         })
       );
+    });
+  });
+
+  describe('offset advancement behavior', () => {
+    it('should not advance offset when posting fails', async () => {
+      const mockMessage = {
+        type: 'user',
+        uuid: 'fail-msg-123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+
+      // Make posting fail
+      mockClient.chat.postMessage.mockRejectedValue(new Error('Rate limited'));
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // First poll - should fail
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Get watcher state to check offset
+      const watcher = getWatcher('channel-1');
+
+      // Offset should NOT have advanced (still at initial 1000)
+      expect(watcher?.fileOffset).toBe(1000);
+    });
+
+    it('should advance offset when all messages post successfully', async () => {
+      const mockMessage = {
+        type: 'user',
+        uuid: 'success-msg-123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+
+      // Make posting succeed
+      mockClient.chat.postMessage.mockResolvedValue({ ts: 'msg-ts' });
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // First poll - should succeed
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Get watcher state to check offset
+      const watcher = getWatcher('channel-1');
+
+      // Offset should have advanced to 2000
+      expect(watcher?.fileOffset).toBe(2000);
+    });
+
+    it('should skip messages already in messageMap', async () => {
+      const mockMessage = {
+        type: 'user',
+        uuid: 'already-posted-123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+
+      // Mock that this message is already posted
+      vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(
+        new Set(['already-posted-123'])
+      );
+
+      mockClient.chat.postMessage.mockResolvedValue({ ts: 'msg-ts' });
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // First poll
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Should NOT have posted the message (it was skipped)
+      // Only the status message move should have posted
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const contentPosts = postCalls.filter(
+        call => (call[0] as any).text?.includes('Terminal Input')
+      );
+      expect(contentPosts.length).toBe(0);
+
+      // Offset should still advance (message was skipped, not failed)
+      const watcher = getWatcher('channel-1');
+      expect(watcher?.fileOffset).toBe(2000);
+    });
+
+    it('should retry failed messages on next poll', async () => {
+      const mockMessage = {
+        type: 'user',
+        uuid: 'retry-msg-123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      };
+
+      // Note: startWatching calls pollForChanges immediately, then on interval
+      // So we need 3 mock values: immediate poll (fail), timer poll (fail check), timer poll (success)
+      vi.mocked(sessionReader.readNewMessages)
+        .mockResolvedValueOnce({ messages: [mockMessage], newOffset: 2000 }) // Immediate poll
+        .mockResolvedValueOnce({ messages: [mockMessage], newOffset: 2000 }) // Re-read on timer poll
+        .mockResolvedValue({ messages: [], newOffset: 2000 }); // Subsequent polls
+
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+
+      // First attempt (immediate poll) fails, second attempt (timer poll) succeeds
+      // Note: moveStatusMessageToBottom also calls postMessage, so we need to account for that
+      mockClient.chat.postMessage
+        .mockRejectedValueOnce(new Error('Rate limited')) // Content message (immediate poll)
+        .mockResolvedValue({ ts: 'msg-ts' }); // All subsequent calls succeed
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // Immediate poll happened - should have failed
+      // Allow microtasks to settle
+      await vi.advanceTimersByTimeAsync(0);
+
+      let watcher = getWatcher('channel-1');
+      expect(watcher?.fileOffset).toBe(1000); // Not advanced after immediate poll failure
+
+      // Timer poll - should succeed (message is re-read because offset didn't advance)
+      await vi.advanceTimersByTimeAsync(2000);
+
+      watcher = getWatcher('channel-1');
+      expect(watcher?.fileOffset).toBe(2000); // Now advanced after successful retry
+    });
+
+    it('should not double-post messages after retry', async () => {
+      const mockMessage = {
+        type: 'user',
+        uuid: 'no-double-post-123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      };
+
+      // Both polls return the same message (simulating re-read after failure)
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+
+      // Track message map state
+      let messageMapUuids = new Set<string>();
+      vi.mocked(sessionManager.getMessageMapUuids).mockImplementation(() => messageMapUuids);
+      vi.mocked(sessionManager.saveMessageMapping).mockImplementation((channelId, ts, mapping) => {
+        messageMapUuids.add(mapping.sdkMessageId);
+      });
+
+      // First attempt succeeds
+      mockClient.chat.postMessage.mockResolvedValue({ ts: 'msg-ts' });
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // First poll - posts message
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Second poll - same message returned but should be skipped (in messageMap)
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Count how many times Terminal Input was posted
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const contentPosts = postCalls.filter(
+        call => (call[0] as any).text?.includes('Terminal Input')
+      );
+
+      // Should only be posted once, not twice
+      expect(contentPosts.length).toBe(1);
     });
   });
 });

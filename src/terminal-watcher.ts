@@ -4,7 +4,7 @@
  */
 
 import { WebClient } from '@slack/web-api';
-import { Session, getSession, getThreadSession, saveMessageMapping, saveActivityLog, ActivityEntry } from './session-manager.js';
+import { Session, getSession, getThreadSession, saveMessageMapping, saveActivityLog, ActivityEntry, getMessageMapUuids } from './session-manager.js';
 import {
   getSessionFilePath,
   getFileSize,
@@ -184,6 +184,10 @@ export function onSessionCleared(channelId: string, threadTs?: string): void {
 
 /**
  * Poll for new messages in the session file.
+ *
+ * Important: Only advances file offset after ALL messages are successfully posted.
+ * This ensures failed messages are retried on the next poll. Messages already
+ * posted (in messageMap) are skipped to avoid duplicates on retry.
  */
 async function pollForChanges(state: WatchState): Promise<void> {
   try {
@@ -194,11 +198,31 @@ async function pollForChanges(state: WatchState): Promise<void> {
       return;
     }
 
-    state.fileOffset = newOffset;
+    // Get UUIDs already posted to Slack (from messageMap)
+    // This prevents duplicates if we re-read messages after a partial failure
+    const alreadyPosted = getMessageMapUuids(state.channelId);
 
-    // Post each message
+    // Track if all messages were successfully posted
+    let allSucceeded = true;
+
+    // Post each message (skip if already posted)
     for (const msg of messages) {
-      await postTerminalMessage(state, msg);
+      if (alreadyPosted.has(msg.uuid)) {
+        // Already posted (from previous attempt or /ff) - skip
+        continue;
+      }
+
+      const success = await postTerminalMessage(state, msg);
+      if (!success) {
+        allSucceeded = false;
+        // Continue trying other messages, but don't advance offset
+      }
+    }
+
+    // Only advance offset if ALL messages were successfully posted
+    // This ensures failed messages are retried on next poll
+    if (allSucceeded) {
+      state.fileOffset = newOffset;
     }
 
     // Move status message to bottom after posting new messages
@@ -278,8 +302,10 @@ async function moveStatusMessageToBottom(state: WatchState): Promise<void> {
  * - Message mapping for thread forking
  *
  * Exported for /ff (fast-forward) command to sync missed terminal messages.
+ *
+ * @returns true if message was successfully posted (and saved to messageMap), false on failure
  */
-export async function postTerminalMessage(state: WatchState, msg: SessionFileMessage): Promise<void> {
+export async function postTerminalMessage(state: WatchState, msg: SessionFileMessage): Promise<boolean> {
   const rawText = extractTextContent(msg);
 
   // Build activity entries for assistant messages (thinking, tool_use, etc.)
@@ -295,10 +321,10 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
   if (!rawText.trim()) {
     if (activityEntries.length > 0) {
       // Activity-only message (thinking/tools but no output text) - post summary with View Log
-      await postActivitySummary(state, msg, activityEntries);
+      return await postActivitySummary(state, msg, activityEntries);
     }
-    // No text and no activity - skip
-    return;
+    // No text and no activity - nothing to post, consider success
+    return true;
   }
 
   if (msg.type === 'user') {
@@ -325,9 +351,12 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
           sessionId: state.sessionId,
           type: 'user',
         });
+        return true;
       }
+      return false;
     } catch (error) {
       console.error(`[TerminalWatcher] Failed to post user message:`, error);
+      return false;
     }
   } else {
     // Assistant output: full bot fidelity with .md + .png
@@ -358,33 +387,35 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
           sessionId: state.sessionId,
           type: 'assistant',
         });
+        return true;
       }
 
-      // Fallback if upload fails
-      if (!uploaded) {
-        let fallbackText = slackText;
-        if (fallbackText.length > charLimit) {
-          fallbackText = truncateWithClosedFormatting(fallbackText, charLimit);
-        }
-        const fallbackResult = await withSlackRetry(() =>
-          state.client.chat.postMessage({
-            channel: state.channelId,
-            thread_ts: state.threadTs,
-            text: prefix + fallbackText,
-          })
-        );
-
-        // Still save mapping even for fallback
-        if (fallbackResult?.ts) {
-          saveMessageMapping(state.channelId, fallbackResult.ts, {
-            sdkMessageId: msg.uuid,
-            sessionId: state.sessionId,
-            type: 'assistant',
-          });
-        }
+      // Fallback if upload fails (returns null)
+      let fallbackText = slackText;
+      if (fallbackText.length > charLimit) {
+        fallbackText = truncateWithClosedFormatting(fallbackText, charLimit);
       }
+      const fallbackResult = await withSlackRetry(() =>
+        state.client.chat.postMessage({
+          channel: state.channelId,
+          thread_ts: state.threadTs,
+          text: prefix + fallbackText,
+        })
+      );
+
+      // Still save mapping even for fallback
+      if (fallbackResult?.ts) {
+        saveMessageMapping(state.channelId, fallbackResult.ts, {
+          sdkMessageId: msg.uuid,
+          sessionId: state.sessionId,
+          type: 'assistant',
+        });
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error(`[TerminalWatcher] Failed to post assistant message:`, error);
+      return false;
     }
   }
 }
@@ -411,12 +442,14 @@ async function notifyWatcherStopped(state: WatchState, reason: string): Promise<
 /**
  * Post an activity summary for messages with activity (thinking/tools) but no text output.
  * Mirrors /ff behavior: posts summary with View Log button for detailed inspection.
+ *
+ * @returns true if successfully posted and saved to messageMap, false on failure
  */
 async function postActivitySummary(
   state: WatchState,
   msg: SessionFileMessage,
   activityEntries: ImportedActivityEntry[]
-): Promise<void> {
+): Promise<boolean> {
   const thinkingCount = activityEntries.filter(e => e.type === 'thinking').length;
   const toolCount = activityEntries.filter(e => e.type === 'tool_start').length;
 
@@ -471,10 +504,12 @@ async function postActivitySummary(
         sessionId: state.sessionId,
         type: msg.type as 'user' | 'assistant',
       });
+      console.log(`[TerminalWatcher] Posted activity summary for ${msg.uuid}: ${parts.join(', ')}`);
+      return true;
     }
-
-    console.log(`[TerminalWatcher] Posted activity summary for ${msg.uuid}: ${parts.join(', ')}`);
+    return false;
   } catch (error) {
     console.error(`[TerminalWatcher] Failed to post activity summary:`, error);
+    return false;
   }
 }
