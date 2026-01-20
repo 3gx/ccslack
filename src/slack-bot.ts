@@ -2884,6 +2884,9 @@ async function handleMessage(params: {
 
     // Post complete response (only if not aborted and we have content)
     // Upload .md/.png files and post text separately (initial_comment doesn't support mrkdwn)
+    // Declare postedMessages outside the fullResponse check so it's accessible for message mapping later
+    let postedMessages: { ts: string }[] = [];
+
     if (!isAborted(conversationKey) && fullResponse) {
       // Get live config values (allows /message-size and /strip-empty-tag to take effect mid-query)
       const liveConfig = getLiveSessionConfig(channelId, threadTs);
@@ -2894,7 +2897,6 @@ async function handleMessage(params: {
         stripEmptyTag: liveConfig.stripEmptyTag,
       });
       const slackResponse = markdownToSlack(strippedResponse);
-      let postedMessages: { ts: string }[] = [];
 
       // Try to upload .md and .png files with response text posted separately
       const uploadResult = await uploadMarkdownAndPngWithResponse(
@@ -2931,11 +2933,22 @@ async function handleMessage(params: {
         }
       }
 
-      // Link assistant message ID to Slack timestamps for message mapping
-      // This enables point-in-time forking for future threads and "Fork here" button
-      // IMPORTANT: Include sessionId so forking after /clear uses correct session
-      if (currentAssistantMessageId && newSessionId && postedMessages.length > 0 && originalTs) {
-        const userMessageTs = originalTs;  // Original user message timestamp
+    }
+
+    // MOVED OUTSIDE fullResponse check: Always track UUID if we have it
+    // This handles: empty responses, intermediate-only posts, activity-only responses
+    //
+    // Why this matters: If we don't track the UUID, /ff will think this is a
+    // terminal message and re-import it, causing duplicates.
+    //
+    // Edge cases:
+    // - newSessionId null: SDK crashed before init - skip (nothing to track)
+    // - currentAssistantMessageId null: No assistant response - skip (nothing to track)
+    // - postedMessages empty: Content posted earlier (intermediate) or nothing to post - use placeholder
+    if (currentAssistantMessageId && newSessionId) {
+      if (postedMessages.length > 0 && originalTs) {
+        // Normal case: map to real Slack timestamps
+        const userMessageTs = originalTs;
 
         // Map ALL split message timestamps to the same SDK message UUID
         postedMessages.forEach((slackMsg, index) => {
@@ -2951,8 +2964,18 @@ async function handleMessage(params: {
 
           console.log(`[Mapping] Linked Slack ts ${slackMsg.ts} → SDK UUID ${currentAssistantMessageId} in session ${newSessionId}${!isFirst ? ' (continuation)' : ''}`);
         });
+      } else {
+        // No final post OR posting failed: still track UUID with placeholder
+        // Placeholder format: _slack_<uuid> (underscore prefix avoids collision with Slack ts)
+        // This prevents /ff from re-importing Slack-originated messages
+        const placeholderTs = `_slack_${currentAssistantMessageId}`;
+        saveMessageMapping(channelId, placeholderTs, {
+          sdkMessageId: currentAssistantMessageId,
+          sessionId: newSessionId,
+          type: 'assistant',
+        });
+        console.log(`[Mapping] Saved placeholder for empty/failed response: ${currentAssistantMessageId}`);
       }
-
     }
 
     // Check if in plan mode and Claude called ExitPlanMode tool
