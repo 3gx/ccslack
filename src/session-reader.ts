@@ -267,27 +267,3 @@ export function buildActivityEntriesFromMessage(msg: SessionFileMessage): Import
 
   return entries;
 }
-
-/**
- * Check if a session file message has text output.
- * Returns true if the message contains actual text content (not just thinking/tools).
- * Used by terminal watcher to determine when an assistant turn is complete.
- */
-export function hasTextOutput(msg: SessionFileMessage): boolean {
-  // User messages are considered complete
-  if (msg.type === 'user') return true;
-
-  const content = msg.message?.content;
-
-  // String content (shouldn't happen for assistant, but handle it)
-  if (typeof content === 'string') {
-    return content.trim().length > 0;
-  }
-
-  // Array content - check for text blocks
-  if (!content) return false;
-
-  return content.some(block =>
-    block.type === 'text' && block.text?.trim()
-  );
-}

@@ -997,14 +997,6 @@ async function handleFastForwardSync(
       client,
       updateRateMs: (effectiveSession.updateRateSeconds ?? 2) * 1000,
       userId,
-      processing: {
-        currentMessageUuid: null,
-        activityLog: [],
-        activityMsgTs: null,
-        status: 'idle',
-        startTime: Date.now(),
-        spinnerIndex: 0,
-      },
     };
 
     // 7. Post each message with pacing and infinite retries
@@ -1078,22 +1070,22 @@ async function handleFastForwardSync(
                 text: summaryText,
                 blocks: [
                   {
-                    type: 'section' as const,
-                    text: { type: 'mrkdwn' as const, text: summaryText },
+                    type: 'section',
+                    text: { type: 'mrkdwn', text: summaryText },
                   },
                   {
-                    type: 'actions' as const,
+                    type: 'actions',
                     block_id: `ff_activity_${msg.uuid}`,
                     elements: [{
-                      type: 'button' as const,
-                      text: { type: 'plain_text' as const, text: 'View Log' },
+                      type: 'button',
+                      text: { type: 'plain_text', text: 'View Log' },
                       action_id: `view_activity_log_${activityKey}`,
                       value: activityKey,
                     }],
                   },
                 ],
               })
-            ) as { ts?: string };
+            );
 
             // Save activity entries for this specific message (for View Log modal)
             // Cast to ActivityEntry[] since ImportedActivityEntry is compatible
