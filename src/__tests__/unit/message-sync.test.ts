@@ -202,7 +202,7 @@ describe('message-sync', () => {
       expect(result.syncedCount).toBe(1);
     });
 
-    it('should skip messages with no text and no activity', async () => {
+    it('should record empty messages (no text, no activity) in messageMap to prevent infinite loop', async () => {
       const mockMessage = {
         type: 'assistant',
         uuid: 'empty-msg-uuid',
@@ -224,11 +224,22 @@ describe('message-sync', () => {
         postTextMessage,
       });
 
-      // Should not post anything
+      // Should not post anything to Slack
       expect(mockClient.chat.postMessage).not.toHaveBeenCalled();
       expect(postTextMessage).not.toHaveBeenCalled();
-      expect(result.syncedCount).toBe(1); // Counts as "synced" (skipped)
+      expect(result.syncedCount).toBe(1); // Counts as "synced" (recorded)
       expect(result.allSucceeded).toBe(true);
+
+      // Should record in messageMap to prevent re-processing on next poll
+      expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
+        'channel-1',
+        'empty_empty-msg-uuid',
+        expect.objectContaining({
+          sdkMessageId: 'empty-msg-uuid',
+          sessionId: 'session-123',
+          type: 'assistant',
+        })
+      );
     });
 
     it('should stop when aborted', async () => {

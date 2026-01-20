@@ -787,5 +787,56 @@ describe('terminal-watcher', () => {
       // Should only be posted once, not twice
       expect(contentPosts.length).toBe(1);
     });
+
+    it('should not re-process empty messages on subsequent polls (prevents infinite loop)', async () => {
+      const emptyMessage = {
+        type: 'user',
+        uuid: 'empty-msg-uuid',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: [] },  // No text content
+      };
+
+      // Return same empty message on every read (simulating no offset advance)
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [emptyMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('');
+      vi.mocked(sessionReader.buildActivityEntriesFromMessage).mockReturnValue([]);
+
+      // Track messageMap state to simulate the deduplication
+      let messageMapUuids = new Set<string>();
+      vi.mocked(sessionManager.getMessageMapUuids).mockImplementation(() => messageMapUuids);
+      vi.mocked(sessionManager.saveMessageMapping).mockImplementation((channelId, ts, mapping) => {
+        messageMapUuids.add(mapping.sdkMessageId);
+      });
+
+      mockClient.chat.postMessage.mockResolvedValue({ ts: 'msg-ts' });
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // First poll - should record empty message in messageMap
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // saveMessageMapping should have been called with the empty message key
+      expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
+        'channel-1',
+        expect.stringContaining('empty-msg-uuid'),
+        expect.objectContaining({ sdkMessageId: 'empty-msg-uuid' })
+      );
+
+      const callCountAfterFirstPoll = (sessionManager.saveMessageMapping as any).mock.calls.length;
+
+      // Second poll - message should be filtered out (in messageMap now)
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // saveMessageMapping should NOT be called again for the same message
+      // (may be called for status message move, but not for the content message)
+      const emptyMsgCalls = (sessionManager.saveMessageMapping as any).mock.calls.filter(
+        (call: any[]) => call[2]?.sdkMessageId === 'empty-msg-uuid'
+      );
+      expect(emptyMsgCalls.length).toBe(1); // Only once, not multiple times
+    });
   });
 });

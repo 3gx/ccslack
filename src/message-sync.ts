@@ -234,7 +234,14 @@ async function postSingleMessage(
     }
   }
 
-  // No text and no activity - nothing to post, consider success
+  // No text and no activity - nothing to post, but still record in messageMap
+  // to prevent re-processing on next poll (offset doesn't advance by design)
+  saveMessageMapping(state.channelId, `empty_${msg.uuid}`, {
+    sdkMessageId: msg.uuid,
+    sessionId: state.sessionId,
+    type: msg.type as 'user' | 'assistant',
+  });
+  console.log(`[MessageSync] Recorded empty message ${msg.uuid} (no text, no activity)`);
   return true;
 }
 
