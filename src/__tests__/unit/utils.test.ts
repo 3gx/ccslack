@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatTimeRemaining, markdownToSlack, normalizeTable, stripMarkdownCodeFence } from '../../utils.js';
+import { formatTimeRemaining, markdownToSlack, normalizeTable, stripMarkdownCodeFence, parseSlackMessageLink } from '../../utils.js';
 
 describe('utils', () => {
   describe('formatTimeRemaining', () => {
@@ -627,6 +627,88 @@ Here are the findings:
       const slackFormatted = markdownToSlack(stripped);
 
       expect(slackFormatted).toBe('*Title*\n\n*Important:* This is key.');
+    });
+  });
+
+  describe('parseSlackMessageLink', () => {
+    it('should parse standard Slack message link', () => {
+      const link = 'https://slack.com/archives/C123ABC/p1705123456789012';
+      const result = parseSlackMessageLink(link);
+
+      expect(result).toEqual({
+        channelId: 'C123ABC',
+        messageTs: '1705123456.789012',
+      });
+    });
+
+    it('should parse workspace-prefixed Slack link', () => {
+      const link = 'https://myworkspace.slack.com/archives/C123ABC/p1705123456789012';
+      const result = parseSlackMessageLink(link);
+
+      expect(result).toEqual({
+        channelId: 'C123ABC',
+        messageTs: '1705123456.789012',
+      });
+    });
+
+    it('should parse DM channel links (D prefix)', () => {
+      const link = 'https://slack.com/archives/D123ABC/p1705123456789012';
+      const result = parseSlackMessageLink(link);
+
+      expect(result).toEqual({
+        channelId: 'D123ABC',
+        messageTs: '1705123456.789012',
+      });
+    });
+
+    it('should parse private channel links (G prefix)', () => {
+      const link = 'https://slack.com/archives/G123ABC/p1705123456789012';
+      const result = parseSlackMessageLink(link);
+
+      expect(result).toEqual({
+        channelId: 'G123ABC',
+        messageTs: '1705123456.789012',
+      });
+    });
+
+    it('should extract thread_ts query parameter', () => {
+      const link = 'https://slack.com/archives/C123ABC/p1705123456789012?thread_ts=1705000000.000000&cid=C123ABC';
+      const result = parseSlackMessageLink(link);
+
+      expect(result).toEqual({
+        channelId: 'C123ABC',
+        messageTs: '1705123456.789012',
+        threadTs: '1705000000.000000',
+      });
+    });
+
+    it('should return null for invalid links', () => {
+      expect(parseSlackMessageLink('not a link')).toBeNull();
+      expect(parseSlackMessageLink('https://google.com')).toBeNull();
+      expect(parseSlackMessageLink('https://slack.com/other/path')).toBeNull();
+    });
+
+    it('should return null for malformed archive links', () => {
+      // Missing timestamp
+      expect(parseSlackMessageLink('https://slack.com/archives/C123')).toBeNull();
+      // Invalid channel prefix
+      expect(parseSlackMessageLink('https://slack.com/archives/X123/p1705123456789012')).toBeNull();
+    });
+
+    it('should return null for too-short timestamps', () => {
+      const link = 'https://slack.com/archives/C123ABC/p12345';
+      const result = parseSlackMessageLink(link);
+      expect(result).toBeNull();
+    });
+
+    it('should handle lowercase channel IDs', () => {
+      const link = 'https://slack.com/archives/c123abc/p1705123456789012';
+      const result = parseSlackMessageLink(link);
+
+      expect(result).toEqual({
+        channelId: 'c123abc',
+        messageTs: '1705123456.789012',
+      });
     });
   });
 });

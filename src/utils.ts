@@ -272,3 +272,55 @@ export function stripMarkdownCodeFence(
   // Second-to-last has no tag (or doesn't exist) → STRIP
   return extractInner() ?? content;
 }
+
+/**
+ * Parse a Slack message link to extract channel ID and message timestamp.
+ *
+ * Slack message link formats:
+ * - https://slack.com/archives/C123ABC/p1705123456789012
+ * - https://workspace.slack.com/archives/C123ABC/p1705123456789012
+ * - https://slack.com/archives/C123ABC/p1705123456789012?thread_ts=1705000000.000000
+ *
+ * @param link - The Slack message link to parse
+ * @returns Parsed info { channelId, messageTs, threadTs? } or null if invalid
+ */
+export function parseSlackMessageLink(
+  link: string
+): { channelId: string; messageTs: string; threadTs?: string } | null {
+  try {
+    // Match archive links with channel ID (C/D/G prefix) and timestamp
+    const archiveMatch = link.match(/\/archives\/([CDG][A-Z0-9]+)\/p(\d+)/i);
+    if (!archiveMatch) {
+      return null;
+    }
+
+    const channelId = archiveMatch[1];
+    const rawTimestamp = archiveMatch[2];
+
+    // Convert p-format timestamp to Slack ts format
+    // p1705123456789012 → 1705123456.789012
+    // The p-format is the ts with the dot removed
+    if (rawTimestamp.length < 7) {
+      return null;  // Too short to be valid
+    }
+
+    // Insert dot before last 6 digits
+    const messageTs = rawTimestamp.slice(0, -6) + '.' + rawTimestamp.slice(-6);
+
+    // Check for thread_ts query parameter
+    let threadTs: string | undefined;
+    try {
+      const url = new URL(link);
+      const threadTsParam = url.searchParams.get('thread_ts');
+      if (threadTsParam) {
+        threadTs = threadTsParam;
+      }
+    } catch {
+      // If URL parsing fails, just skip thread_ts
+    }
+
+    return { channelId, messageTs, threadTs };
+  } catch {
+    return null;
+  }
+}

@@ -49,7 +49,7 @@ import {
 } from './model-cache.js';
 import { uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
-import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
+import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence, parseSlackMessageLink } from './utils.js';
 import { parseCommand, UPDATE_RATE_DEFAULT } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { withSlackRetry } from './retry.js';
@@ -850,6 +850,101 @@ async function handleForkThread(params: {
   );
 }
 
+// Create a fork from a specific message (point-in-time fork)
+// Used by both /fork-message command and "Fork here" button
+async function createForkFromMessage(params: {
+  channelId: string;
+  sourceThreadTs: string;   // Source thread where fork was triggered
+  forkPointMessageTs: string;  // Message to fork from (via messageMap lookup)
+  description: string;
+  client: any;
+  userId: string;
+}): Promise<{ success: boolean; error?: string; forkThreadTs?: string }> {
+  const { channelId, sourceThreadTs, forkPointMessageTs, description, client, userId } = params;
+
+  // 1. Look up the message in messageMap
+  const forkPoint = findForkPointMessageId(channelId, forkPointMessageTs);
+  if (!forkPoint) {
+    return {
+      success: false,
+      error: 'Message not found in conversation history. The message may be too old or from before messageMap tracking was enabled.',
+    };
+  }
+
+  // 2. Verify the source session exists
+  // The forkPoint contains the session ID that this message belongs to
+  const sourceSessionId = forkPoint.sessionId;
+  if (!sourceSessionId) {
+    return {
+      success: false,
+      error: 'Source session not found. Cannot fork without a valid parent session.',
+    };
+  }
+
+  // 3. Get the main session for inheriting config
+  const mainSession = getSession(channelId);
+
+  // 4. Create fork anchor in main channel
+  const anchorMessage = await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: channelId,
+      text: `🔀 Forked: ${description}`,
+      blocks: buildForkAnchorBlocks({ description }),
+    })
+  );
+  const newThreadTs = (anchorMessage as { ts?: string }).ts!;
+
+  // 5. Create forked thread session with point-in-time fork data
+  saveThreadSession(channelId, newThreadTs, {
+    sessionId: null,  // Will be set when SDK creates the forked session
+    forkedFrom: sourceSessionId,
+    forkedFromThreadTs: sourceThreadTs,
+    workingDir: mainSession?.workingDir ?? process.cwd(),
+    mode: mainSession?.mode ?? 'default',
+    model: mainSession?.model,
+    createdAt: Date.now(),
+    lastActiveAt: Date.now(),
+    // Path configuration inherited from main session
+    pathConfigured: mainSession?.pathConfigured ?? false,
+    configuredPath: mainSession?.configuredPath ?? null,
+    configuredBy: mainSession?.configuredBy ?? null,
+    configuredAt: mainSession?.configuredAt ?? null,
+    // Point-in-time forking: store the SDK message ID to fork from
+    resumeSessionAtMessageId: forkPoint.messageId,
+    // Inherit other config
+    maxThinkingTokens: mainSession?.maxThinkingTokens,
+    updateRateSeconds: mainSession?.updateRateSeconds,
+    threadCharLimit: mainSession?.threadCharLimit,
+    stripEmptyTag: mainSession?.stripEmptyTag,
+    planFilePath: null,  // Don't inherit plan from parent
+  });
+
+  // 6. Post first message in new thread with link to the fork point
+  const forkPointLink = `https://slack.com/archives/${channelId}/p${forkPointMessageTs.replace('.', '')}?thread_ts=${sourceThreadTs}&cid=${channelId}`;
+  await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: channelId,
+      thread_ts: newThreadTs,
+      text: `_Point-in-time fork from <${forkPointLink}|this message>. Ready to explore: ${description}_\n\nSend a message to continue from that point.`,
+    })
+  );
+
+  // 7. Notify in source thread
+  const newThreadLink = `https://slack.com/archives/${channelId}/p${newThreadTs.replace('.', '')}`;
+  await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: channelId,
+      thread_ts: sourceThreadTs,
+      text: `_Point-in-time fork created: <${newThreadLink}|${description}>_`,
+    })
+  );
+
+  return {
+    success: true,
+    forkThreadTs: newThreadTs,
+  };
+}
+
 // Start reminder interval for tool approval (matches MCP ask_user behavior)
 function startToolApprovalReminder(
   approvalId: string,
@@ -1510,6 +1605,58 @@ async function handleMessage(params: {
     return;
   }
 
+  // Handle /fork-message command (requires thread context)
+  if (commandResult.forkMessage) {
+    if (!threadTs) {
+      // Error: /fork-message used outside of thread
+      await client.chat.postMessage({
+        channel: channelId,
+        text: '❌ `/fork-message` can only be used inside a thread.',
+      });
+    } else {
+      // Parse the message link
+      const parsedLink = parseSlackMessageLink(commandResult.forkMessage.messageLink);
+      if (!parsedLink) {
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: '❌ Invalid message link. Please copy a valid Slack message link (right-click → Copy link).',
+        });
+      } else {
+        // Create the point-in-time fork
+        const result = await createForkFromMessage({
+          channelId,
+          sourceThreadTs: threadTs,
+          forkPointMessageTs: parsedLink.messageTs,
+          description: commandResult.forkMessage.description,
+          client,
+          userId: userId || 'unknown',
+        });
+
+        if (!result.success) {
+          await client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: `❌ ${result.error}`,
+          });
+        }
+      }
+    }
+    // Remove eyes reaction
+    if (originalTs) {
+      try {
+        await client.reactions.remove({
+          channel: channelId,
+          timestamp: originalTs,
+          name: 'eyes',
+        });
+      } catch (error) {
+        // Ignore errors
+      }
+    }
+    return;
+  }
+
   // Handle /wait command (rate limit stress test)
   if (commandResult.waitTest) {
     await runWaitTest(
@@ -1794,12 +1941,12 @@ async function handleMessage(params: {
     }
   }
 
-  // Capture user message timestamp for message mapping (main channel only)
+  // Capture user message timestamp for message mapping
   // This enables point-in-time thread forking by tracking which SDK messages
   // correspond to which Slack timestamps
   // NOTE: sessionId may be null here (new session or after /clear) - that's fine
   // because user messages are placeholders and we use assistant messages for forking
-  if (!threadTs && originalTs && session.sessionId) {
+  if (originalTs && session.sessionId) {
     saveMessageMapping(channelId, originalTs, {
       sdkMessageId: `user_${originalTs}`,  // Placeholder - user messages don't have SDK IDs
       sessionId: session.sessionId,
@@ -2529,6 +2676,8 @@ async function handleMessage(params: {
                   costUsd: processingState.costUsd,
                   conversationKey: activityLogKey,  // Use activityLogKey for View Log/Download
                   rateLimitHits: processingState.rateLimitHits,
+                  // Add Fork here button only for threads
+                  forkInfo: threadTs ? { messageTs: statusMsgTs, threadTs } : undefined,
                 }),
                 text: 'Complete',
               })
@@ -2609,10 +2758,10 @@ async function handleMessage(params: {
         }
       }
 
-      // Link assistant message ID to Slack timestamps for message mapping (main channel only)
-      // This enables point-in-time thread forking for future threads
+      // Link assistant message ID to Slack timestamps for message mapping
+      // This enables point-in-time forking for future threads and "Fork here" button
       // IMPORTANT: Include sessionId so forking after /clear uses correct session
-      if (currentAssistantMessageId && newSessionId && postedMessages.length > 0 && !threadTs && originalTs) {
+      if (currentAssistantMessageId && newSessionId && postedMessages.length > 0 && originalTs) {
         const userMessageTs = originalTs;  // Original user message timestamp
 
         // Map ALL split message timestamps to the same SDK message UUID
@@ -3972,6 +4121,59 @@ app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client })
       });
     } catch (e) {
       console.error('Error posting upload error message:', e);
+    }
+  }
+});
+
+// Handle "Fork here" button click - creates point-in-time fork from a specific message
+app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  // Extract conversationKey from action_id
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^fork_here_(.+)$/);
+  const conversationKey = match ? match[1] : '';
+
+  // Parse { messageTs, threadTs } from action.value
+  const valueStr = 'value' in action ? (action.value || '{}') : '{}';
+  let forkInfo: { messageTs: string; threadTs: string };
+  try {
+    forkInfo = JSON.parse(valueStr);
+  } catch {
+    console.error('[ForkHere] Invalid forkInfo JSON:', valueStr);
+    return;
+  }
+
+  const { messageTs, threadTs } = forkInfo;
+  if (!messageTs || !threadTs) {
+    console.error('[ForkHere] Missing messageTs or threadTs:', forkInfo);
+    return;
+  }
+
+  // Derive channelId from conversationKey (format: channelId_threadTs)
+  const channelId = conversationKey.split('_')[0];
+  const userId = body.user?.id || 'unknown';
+
+  // Create the point-in-time fork
+  const result = await createForkFromMessage({
+    channelId,
+    sourceThreadTs: threadTs,
+    forkPointMessageTs: messageTs,
+    description: 'Fork from button',
+    client: client as any,
+    userId,
+  });
+
+  if (!result.success) {
+    // Post error message in thread
+    try {
+      await (client as any).chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: `❌ ${result.error}`,
+      });
+    } catch (error) {
+      console.error('[ForkHere] Error posting error message:', error);
     }
   }
 });

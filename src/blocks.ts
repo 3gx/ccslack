@@ -1577,6 +1577,8 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
 export interface CombinedCompletionParams extends StatusPanelParams {
   thinkingBlockCount: number;
   durationMs: number;
+  /** Fork info for "Fork here" button (only in threads) */
+  forkInfo?: { messageTs: string; threadTs: string };
 }
 
 /**
@@ -1584,15 +1586,16 @@ export interface CombinedCompletionParams extends StatusPanelParams {
  * Shows summary with View Log/Download buttons + completion stats.
  */
 export function buildCombinedCompletionBlocks(params: CombinedCompletionParams): Block[] {
-  const { thinkingBlockCount, durationMs, ...statusParams } = params;
+  const { thinkingBlockCount, durationMs, forkInfo, ...statusParams } = params;
   const blocks: Block[] = [];
 
-  // 1. Collapsed activity summary with View Log / Download buttons
+  // 1. Collapsed activity summary with View Log / Download / Fork here buttons
   blocks.push(...buildCollapsedActivityBlocks(
     thinkingBlockCount,
     statusParams.toolsCompleted,
     durationMs,
-    statusParams.conversationKey
+    statusParams.conversationKey,
+    forkInfo
   ));
 
   // 2. Divider
@@ -1731,13 +1734,16 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
 
 /**
  * Build collapsed activity summary blocks for completion.
- * Shows summary with View Log and Download buttons.
+ * Shows summary with View Log, Download, and optionally Fork here buttons.
+ *
+ * @param forkInfo - Fork info for "Fork here" button (only passed for threads)
  */
 export function buildCollapsedActivityBlocks(
   thinkingBlockCount: number,
   toolsCompleted: number,
   durationMs: number,
-  conversationKey: string
+  conversationKey: string,
+  forkInfo?: { messageTs: string; threadTs: string }
 ): Block[] {
   const durationSec = (durationMs / 1000).toFixed(1);
 
@@ -1753,6 +1759,32 @@ export function buildCollapsedActivityBlocks(
     summaryText = `:clipboard: ${thinkingBlockCount} thinking + ${toolsCompleted} tool${toolsCompleted > 1 ? 's' : ''} in ${durationSec}s`;
   }
 
+  // Build button elements
+  const buttonElements: any[] = [
+    {
+      type: 'button',
+      text: { type: 'plain_text', text: 'View Log' },
+      action_id: `view_activity_log_${conversationKey}`,
+      value: conversationKey,
+    },
+    {
+      type: 'button',
+      text: { type: 'plain_text', text: 'Download .txt' },
+      action_id: `download_activity_log_${conversationKey}`,
+      value: conversationKey,
+    },
+  ];
+
+  // Add "Fork here" button only for threads
+  if (forkInfo) {
+    buttonElements.push({
+      type: 'button',
+      text: { type: 'plain_text', text: 'Fork here' },
+      action_id: `fork_here_${conversationKey}`,
+      value: JSON.stringify(forkInfo),
+    });
+  }
+
   return [
     {
       type: 'section',
@@ -1761,20 +1793,7 @@ export function buildCollapsedActivityBlocks(
     {
       type: 'actions',
       block_id: `activity_actions_${conversationKey}`,
-      elements: [
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: 'View Log' },
-          action_id: `view_activity_log_${conversationKey}`,
-          value: conversationKey,
-        },
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: 'Download .txt' },
-          action_id: `download_activity_log_${conversationKey}`,
-          value: conversationKey,
-        },
-      ],
+      elements: buttonElements,
     },
   ];
 }
