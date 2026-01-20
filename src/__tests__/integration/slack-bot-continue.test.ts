@@ -312,25 +312,13 @@ describe('slack-bot /continue command', () => {
     });
   });
 
-  describe('auto-stop watcher on user message', () => {
-    it('should stop watcher when user sends a message', async () => {
+  describe('block messages while watching', () => {
+    it('should block regular messages and show warning', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
       // Mock isWatching to return true
       vi.mocked(isWatching).mockReturnValue(true);
-      vi.mocked(getWatcher).mockReturnValue({
-        conversationKey: 'C123',
-        channelId: 'C123',
-        sessionId: 'session-123',
-        workingDir: '/test',
-        fileOffset: 0,
-        intervalId: null as any,
-        statusMsgTs: 'status-msg-ts',
-        client: mockClient,
-        updateRateMs: 2000,
-        idleCount: 0,
-      });
 
       vi.mocked(getSession).mockReturnValue({
         sessionId: 'existing-session-123',
@@ -350,21 +338,114 @@ describe('slack-bot /continue command', () => {
         say: vi.fn(),
       });
 
-      // Should stop watcher
-      expect(stopWatching).toHaveBeenCalledWith('C123', undefined);
+      // Should NOT stop watcher
+      expect(stopWatching).not.toHaveBeenCalled();
 
-      // Should update status message
-      expect(mockClient.chat.update).toHaveBeenCalledWith(
+      // Should post warning message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           channel: 'C123',
-          ts: 'status-msg-ts',
-          blocks: expect.arrayContaining([
-            expect.objectContaining({
-              text: expect.objectContaining({
-                text: expect.stringContaining('you sent a message'),
-              }),
-            }),
-          ]),
+          text: expect.stringContaining('Cannot run this while watching terminal'),
+        })
+      );
+    });
+
+    it('should block /clear command while watching', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(isWatching).mockReturnValue(true);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { text: '<@BOT123> /clear', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should NOT stop watcher
+      expect(stopWatching).not.toHaveBeenCalled();
+
+      // Should post warning message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          text: expect.stringContaining('Cannot run this while watching terminal'),
+        })
+      );
+    });
+
+    it('should block /mode command while watching', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(isWatching).mockReturnValue(true);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { text: '<@BOT123> /mode', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should post warning message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Cannot run this while watching terminal'),
+        })
+      );
+    });
+
+    it('should block /continue command while already watching', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(isWatching).mockReturnValue(true);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { text: '<@BOT123> /continue', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should post warning message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Cannot run this while watching terminal'),
         })
       );
     });
@@ -502,23 +583,12 @@ describe('slack-bot /continue command', () => {
       );
     });
 
-    it('should NOT trigger auto-stop when /stop-watching command is sent', async () => {
+    it('should allow /stop-watching command while watching', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
       // Watcher is active
       vi.mocked(isWatching).mockReturnValue(true);
-      vi.mocked(getWatcher).mockReturnValue({
-        conversationKey: 'C123',
-        channelId: 'C123',
-        sessionId: 'session-123',
-        workingDir: '/test',
-        fileOffset: 0,
-        intervalId: null as any,
-        statusMsgTs: 'status-msg-ts',
-        client: mockClient,
-        updateRateMs: 2000,
-      });
       vi.mocked(stopWatching).mockReturnValue(true);
 
       vi.mocked(getSession).mockReturnValue({
@@ -539,17 +609,10 @@ describe('slack-bot /continue command', () => {
         say: vi.fn(),
       });
 
-      // stopWatching should be called exactly once (by the command handler, not auto-stop)
+      // stopWatching should be called by the command handler
       expect(stopWatching).toHaveBeenCalledTimes(1);
 
-      // Should NOT update status message with "you sent a message" (that's auto-stop behavior)
-      expect(mockClient.chat.update).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: expect.stringContaining('you sent a message'),
-        })
-      );
-
-      // Should post the command success message
+      // Should post the command success message (not the blocking warning)
       expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           text: expect.stringContaining('Stopped watching terminal session'),
@@ -557,23 +620,12 @@ describe('slack-bot /continue command', () => {
       );
     });
 
-    it('should NOT stop watching when other commands are sent (only /stop-watching stops)', async () => {
+    it('should allow /status command while watching (read-only)', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
       // Watcher is active
       vi.mocked(isWatching).mockReturnValue(true);
-      vi.mocked(getWatcher).mockReturnValue({
-        conversationKey: 'C123',
-        channelId: 'C123',
-        sessionId: 'session-123',
-        workingDir: '/test',
-        fileOffset: 0,
-        intervalId: null as any,
-        statusMsgTs: 'status-msg-ts',
-        client: mockClient,
-        updateRateMs: 2000,
-      });
 
       vi.mocked(getSession).mockReturnValue({
         sessionId: 'existing-session-123',
@@ -587,7 +639,6 @@ describe('slack-bot /continue command', () => {
         configuredAt: Date.now(),
       });
 
-      // Test /status command - should NOT stop watching
       await handler({
         event: { text: '<@BOT123> /status', channel: 'C123', ts: 'original-ts', user: 'U123' },
         client: mockClient,
@@ -597,30 +648,19 @@ describe('slack-bot /continue command', () => {
       // stopWatching should NOT be called for /status
       expect(stopWatching).not.toHaveBeenCalled();
 
-      // Should NOT update status message with "you sent a message"
-      expect(mockClient.chat.update).not.toHaveBeenCalledWith(
+      // Should NOT show blocking warning - should show status blocks instead
+      expect(mockClient.chat.postMessage).not.toHaveBeenCalledWith(
         expect.objectContaining({
-          text: expect.stringContaining('you sent a message'),
+          text: expect.stringContaining('Cannot run this while watching terminal'),
         })
       );
     });
 
-    it('should NOT stop watching for /help command', async () => {
+    it('should allow /help command while watching', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
       vi.mocked(isWatching).mockReturnValue(true);
-      vi.mocked(getWatcher).mockReturnValue({
-        conversationKey: 'C123',
-        channelId: 'C123',
-        sessionId: 'session-123',
-        workingDir: '/test',
-        fileOffset: 0,
-        intervalId: null as any,
-        statusMsgTs: 'status-msg-ts',
-        client: mockClient,
-        updateRateMs: 2000,
-      });
 
       vi.mocked(getSession).mockReturnValue({
         sessionId: 'existing-session-123',
@@ -641,24 +681,19 @@ describe('slack-bot /continue command', () => {
       });
 
       expect(stopWatching).not.toHaveBeenCalled();
+      // Should NOT show blocking warning
+      expect(mockClient.chat.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Cannot run this while watching terminal'),
+        })
+      );
     });
 
-    it('should NOT stop watching for unknown commands (typos)', async () => {
+    it('should allow /ls command while watching', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
       vi.mocked(isWatching).mockReturnValue(true);
-      vi.mocked(getWatcher).mockReturnValue({
-        conversationKey: 'C123',
-        channelId: 'C123',
-        sessionId: 'session-123',
-        workingDir: '/test',
-        fileOffset: 0,
-        intervalId: null as any,
-        statusMsgTs: 'status-msg-ts',
-        client: mockClient,
-        updateRateMs: 2000,
-      });
 
       vi.mocked(getSession).mockReturnValue({
         sessionId: 'existing-session-123',
@@ -672,7 +707,40 @@ describe('slack-bot /continue command', () => {
         configuredAt: Date.now(),
       });
 
-      // Typo in command - should still NOT stop watching
+      await handler({
+        event: { text: '<@BOT123> /ls', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      expect(stopWatching).not.toHaveBeenCalled();
+      // Should NOT show blocking warning
+      expect(mockClient.chat.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Cannot run this while watching terminal'),
+        })
+      );
+    });
+
+    it('should block unknown commands (typos) while watching', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(isWatching).mockReturnValue(true);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Typo in command - should be blocked
       await handler({
         event: { text: '<@BOT123> /stop-watchign', channel: 'C123', ts: 'original-ts', user: 'U123' },
         client: mockClient,
@@ -680,13 +748,22 @@ describe('slack-bot /continue command', () => {
       });
 
       expect(stopWatching).not.toHaveBeenCalled();
+      // Should show blocking warning
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Cannot run this while watching terminal'),
+        })
+      );
     });
   });
 
   describe('watcher cleanup on /clear', () => {
-    it('should call onSessionCleared when /clear is executed', async () => {
+    it('should call onSessionCleared when /clear is executed (when not watching)', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
+
+      // NOT watching - /clear should work
+      vi.mocked(isWatching).mockReturnValue(false);
 
       vi.mocked(getSession).mockReturnValue({
         sessionId: 'existing-session-123',

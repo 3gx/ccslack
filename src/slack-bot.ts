@@ -1341,29 +1341,28 @@ async function handleMessage(params: {
   // For threads: threadTs is unique; for main channel: use originalTs
   const activityLogKey = threadTs ? `${channelId}_${threadTs}` : `${channelId}_${originalTs}`;
 
-  // Auto-stop terminal watcher when user sends a regular message to Claude
-  // Commands don't auto-stop - only /stop-watching explicitly stops watching
-  const isCommand = userText.trim().startsWith('/');
-  if (isWatching(channelId, threadTs) && !isCommand) {
-    console.log(`[TerminalWatcher] Auto-stopping: user sent message in ${conversationKey}`);
-    const watcher = getWatcher(channelId, threadTs);
-    if (watcher) {
-      // Update the /continue message to show stopped
-      try {
-        await client.chat.update({
-          channel: channelId,
-          ts: watcher.statusMsgTs,
-          text: 'Stopped watching',
-          blocks: [{
-            type: 'section',
-            text: { type: 'mrkdwn', text: ':white_check_mark: Stopped watching (you sent a message).' },
-          }],
-        });
-      } catch (e) {
-        // Message may have been deleted
-      }
+  // Block messages and most commands while terminal watcher is active
+  // Only certain read-only/config commands are allowed during watching
+  const ALLOWED_COMMANDS_WHILE_WATCHING = [
+    'stop-watching', 'status', 'context', 'help',
+    'update-rate', 'message-size', 'max-thinking-tokens', 'strip-empty-tag', 'ls'
+  ];
+
+  if (isWatching(channelId, threadTs)) {
+    const isCommand = userText.trim().startsWith('/');
+    const commandName = isCommand ? userText.trim().slice(1).split(/\s+/)[0].toLowerCase() : null;
+    const isAllowedCommand = commandName && ALLOWED_COMMANDS_WHILE_WATCHING.includes(commandName);
+
+    if (!isAllowedCommand) {
+      // Block this message/command - user must /stop-watching first
+      console.log(`[TerminalWatcher] Blocked message while watching: ${conversationKey}`);
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: ':warning: Cannot run this while watching terminal.\nUse `/stop-watching` first, or click the *Stop Watching* button.',
+      });
+      return;
     }
-    stopWatching(channelId, threadTs);
   }
 
   // Get or create session (handle threads differently)
