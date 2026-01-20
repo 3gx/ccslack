@@ -375,7 +375,8 @@ describe('terminal-watcher', () => {
         undefined,  // threadTs
         undefined,  // userId
         500,  // charLimit from session
-        false  // stripEmptyTag
+        false,  // stripEmptyTag
+        undefined  // forkInfo (undefined for main channel, only set for threads)
       );
     });
 
