@@ -1,68 +1,6 @@
-import puppeteer, { Browser, Page } from 'puppeteer';
+import puppeteer, { Browser } from 'puppeteer';
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
-import fs from 'fs';
-
-// Singleton browser instance for long-running process
-let browser: Browser | null = null;
-let isSharedConnection = false; // Track if connected to shared browser
-
-/**
- * Get wsEndpoint file from env var (set by globalSetup).
- * This ensures each test run connects to ITS OWN browser, not a sibling run's.
- */
-function getWsEndpointFile(): string | null {
-  const envFile = process.env.VITEST_PUPPETEER_WS_FILE;
-  if (envFile && fs.existsSync(envFile)) {
-    return envFile;
-  }
-  return null; // Production mode - no env var set
-}
-
-/**
- * Get or create the browser instance
- */
-async function getBrowser(): Promise<Browser> {
-  if (!browser || !browser.connected) {
-    const wsEndpointFile = getWsEndpointFile();
-
-    // In test environment, connect to shared browser
-    if (wsEndpointFile) {
-      try {
-        const wsEndpoint = fs.readFileSync(wsEndpointFile, 'utf-8');
-        browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
-        isSharedConnection = true;
-      } catch {
-        // Connection failed (browser crashed?), fall back to launch
-        browser = await puppeteer.launch({
-          headless: true,
-          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
-        });
-        isSharedConnection = false;
-      }
-    } else {
-      // Production: launch own browser
-      browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
-      });
-      isSharedConnection = false;
-    }
-  }
-  return browser;
-}
-
-/**
- * Shutdown browser (call on process exit).
- * Only closes if we launched it (not shared).
- */
-export async function shutdownBrowser(): Promise<void> {
-  if (browser && !isSharedConnection) {
-    await browser.close();
-  }
-  browser = null;
-  isSharedConnection = false;
-}
 
 // Syntax highlighting function for code blocks
 function highlightCode(code: string, lang: string): string {
@@ -172,6 +110,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
 /**
  * Convert markdown to PNG image.
+ * Launches a fresh browser for each render and closes it after.
  * Returns PNG buffer on success, null on failure.
  */
 export async function markdownToPng(
@@ -183,11 +122,15 @@ export async function markdownToPng(
     return null;
   }
 
-  let page: Page | null = null;
+  let browser: Browser | null = null;
 
   try {
-    const browserInstance = await getBrowser();
-    page = await browserInstance.newPage();
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+    });
+
+    const page = await browser.newPage();
 
     // Convert markdown to HTML
     const htmlContent = md.render(markdown);
@@ -216,8 +159,8 @@ export async function markdownToPng(
     console.warn('PNG render failed:', (err as Error).message);
     return null;
   } finally {
-    if (page) {
-      await page.close().catch(() => {});
+    if (browser) {
+      await browser.close().catch(() => {});
     }
   }
 }
