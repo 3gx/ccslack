@@ -1212,15 +1212,8 @@ export function buildPathSetupBlocks(): Block[] {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: '*Usage:*\n```/path /absolute/path/to/your/project```',
+        text: '*Steps:*\n1. `/ls` - explore current directory\n2. `/cd /absolute/path/to/project` - navigate to desired directory\n3. `/set-current-path` - lock the directory',
       },
-    },
-    {
-      type: 'context',
-      elements: [{
-        type: 'mrkdwn',
-        text: ':bulb: Tip: Use `/ls` to explore the current directory first.',
-      }],
     },
   ];
 }
