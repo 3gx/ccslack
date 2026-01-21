@@ -774,6 +774,38 @@ describe('Session Event Stream - Unit Tests', () => {
       expect(entry!.generatingInProgress).toBe(false);
     });
 
+    it('includes response content in generating ActivityEntry', () => {
+      const event: SessionEvent = {
+        type: 'text',
+        timestamp: 1704067200000,
+        textContent: 'This is the full response from Claude.',
+        charCount: 38,
+      };
+
+      const entry = sessionEventToActivityEntry(event);
+
+      expect(entry).not.toBeNull();
+      expect(entry!.type).toBe('generating');
+      expect(entry!.generatingContent).toBe('This is the full response from Claude.');
+      expect(entry!.generatingTruncated).toBe('This is the full response from Claude.');
+    });
+
+    it('truncates long response content to 500 chars', () => {
+      const longContent = 'X'.repeat(600);
+      const event: SessionEvent = {
+        type: 'text',
+        timestamp: 1704067200000,
+        textContent: longContent,
+        charCount: 600,
+      };
+
+      const entry = sessionEventToActivityEntry(event);
+
+      expect(entry).not.toBeNull();
+      expect(entry!.generatingContent).toBe(longContent); // Full content preserved
+      expect(entry!.generatingTruncated).toBe('X'.repeat(500) + '...'); // Truncated for display
+    });
+
     it('returns null for init event', () => {
       const event: SessionEvent = {
         type: 'init',

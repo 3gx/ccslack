@@ -2061,7 +2061,7 @@ describe('blocks', () => {
       expect(text).toContain('Connection failed');
     });
 
-    it('should format in-progress generating entries with pencil emoji and chunk count', () => {
+    it('should format in-progress generating entries with pencil emoji and char count', () => {
       const entries: ActivityEntry[] = [
         {
           timestamp: Date.now(),
@@ -2076,7 +2076,6 @@ describe('blocks', () => {
       const text = buildActivityLogText(entries, true);
       expect(text).toContain(':pencil:');
       expect(text).toContain('*Generating...*');
-      expect(text).toContain('[25 chunks]');
       expect(text).toContain('[1,500 chars]');
       expect(text).toContain('[2.5s]');
     });
@@ -2207,6 +2206,200 @@ describe('blocks', () => {
 
       const text = buildActivityLogText(entries, true);
       expect(text).toContain('This is my analysis');
+    });
+
+    it('should show preview of response content for completed generating entries', () => {
+      const responseContent = 'Here is the response text from Claude.';
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 10,
+          generatingChars: responseContent.length,
+          generatingInProgress: false,
+          generatingContent: responseContent,
+          generatingTruncated: responseContent,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':pencil:');
+      expect(text).toContain('*Response*');
+      expect(text).toContain(`[${responseContent.length} chars]`);
+      // Should show preview of response content in quote
+      expect(text).toContain('> Here is the response text from Claude.');
+    });
+
+    it('should show preview of response content for in-progress generating entries', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 5,
+          generatingChars: 100,
+          generatingInProgress: true,
+          generatingContent: 'Generating this response...',
+          generatingTruncated: 'Generating this response...',
+          durationMs: 1500,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':pencil:');
+      expect(text).toContain('*Generating...*');
+      expect(text).toContain('[1.5s]');
+      // Should show preview of response content in quote
+      expect(text).toContain('> Generating this response...');
+    });
+
+    it('should truncate long response content preview to 300 chars', () => {
+      const longContent = 'A'.repeat(400);
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 20,
+          generatingChars: 400,
+          generatingInProgress: false,
+          generatingContent: longContent,
+          generatingTruncated: longContent,
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain('[400 chars]');
+      // Should truncate to 300 chars with ...
+      expect(text).toContain('A'.repeat(300) + '...');
+      expect(text).not.toContain('A'.repeat(301));
+    });
+
+    it('should use generatingTruncated when generatingContent is not available', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 8,
+          generatingChars: 200,
+          generatingInProgress: false,
+          generatingTruncated: 'This is truncated content...',
+        },
+      ];
+
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain('> This is truncated content...');
+    });
+  });
+
+  describe('buildActivityLogModalView', () => {
+    it('should show full response content in code block for completed generating', () => {
+      const responseContent = 'This is the full response from Claude with all the details.';
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 15,
+          generatingChars: responseContent.length,
+          generatingInProgress: false,
+          generatingContent: responseContent,
+          generatingTruncated: responseContent,
+          durationMs: 2000,
+        },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, 'test_key');
+      const blocks = view.blocks;
+
+      // Find the section with response content
+      const responseBlock = blocks.find((b: any) =>
+        b.type === 'section' && b.text?.text?.includes(':pencil:') && b.text?.text?.includes('```')
+      );
+
+      expect(responseBlock).toBeDefined();
+      expect(responseBlock.text.text).toContain(':pencil: *Response*');
+      expect(responseBlock.text.text).toContain(`[${responseContent.length} chars]`);
+      expect(responseBlock.text.text).toContain('[2.0s]');
+      expect(responseBlock.text.text).toContain(`\`\`\`${responseContent}\`\`\``);
+    });
+
+    it('should show in progress status for generating entries', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 5,
+          generatingChars: 100,
+          generatingInProgress: true,
+          generatingContent: 'Streaming content...',
+          generatingTruncated: 'Streaming content...',
+          durationMs: 500,
+        },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, 'test_key');
+      const blocks = view.blocks;
+
+      const responseBlock = blocks.find((b: any) =>
+        b.type === 'section' && b.text?.text?.includes(':pencil:')
+      );
+
+      expect(responseBlock).toBeDefined();
+      expect(responseBlock.text.text).toContain('(in progress)');
+    });
+
+    it('should truncate response content at 2800 chars in modal', () => {
+      const longContent = 'B'.repeat(3000);
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 50,
+          generatingChars: 3000,
+          generatingInProgress: false,
+          generatingContent: longContent,
+          generatingTruncated: longContent.substring(0, 500) + '...',
+        },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, 'test_key');
+      const blocks = view.blocks;
+
+      const responseBlock = blocks.find((b: any) =>
+        b.type === 'section' && b.text?.text?.includes(':pencil:')
+      );
+
+      expect(responseBlock).toBeDefined();
+      // Modal should truncate to 2800 chars
+      expect(responseBlock.text.text).toContain('B'.repeat(2800) + '...');
+      expect(responseBlock.text.text).not.toContain('B'.repeat(2801));
+      // Should show full char count in header
+      expect(responseBlock.text.text).toContain('[3000 chars]');
+    });
+
+    it('should fall back to stats when no response content available', () => {
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChunks: 25,
+          generatingChars: 1500,
+          generatingInProgress: false,
+          durationMs: 3000,
+        },
+      ];
+
+      const view = buildActivityLogModalView(entries, 1, 1, 'test_key');
+      const blocks = view.blocks;
+
+      const responseBlock = blocks.find((b: any) =>
+        b.type === 'section' && b.text?.text?.includes(':pencil:')
+      );
+
+      expect(responseBlock).toBeDefined();
+      // Should show stats without code block
+      expect(responseBlock.text.text).toContain(':pencil: *Response*');
+      expect(responseBlock.text.text).toContain('[3.0s]');
+      expect(responseBlock.text.text).toContain('1,500 chars');
+      expect(responseBlock.text.text).not.toContain('```');
     });
   });
 

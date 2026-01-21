@@ -482,6 +482,8 @@ export interface ActivityEntry {
   generatingChunks?: number;
   generatingChars?: number;
   generatingInProgress?: boolean;
+  generatingContent?: string;   // Full response text (stored for modal/download)
+  generatingTruncated?: string; // First 500 chars (for live display)
 }
 
 /**
@@ -528,12 +530,18 @@ export function sessionEventToActivityEntry(event: SessionEvent): ActivityEntry 
     case 'text':
       // Text events become generating entries
       if (event.charCount && event.charCount > 0) {
+        const textContent = event.textContent || '';
+        const generatingTruncated = textContent.length > THINKING_TRUNCATE_LENGTH
+          ? textContent.substring(0, THINKING_TRUNCATE_LENGTH) + '...'
+          : textContent;
         return {
           timestamp: event.timestamp,
           type: 'generating',
           generatingChars: event.charCount,
           generatingChunks: 1, // From JSONL we see complete blocks, not chunks
           generatingInProgress: false,
+          generatingContent: textContent,
+          generatingTruncated,
         };
       }
       return null;

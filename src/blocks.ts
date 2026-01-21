@@ -1236,6 +1236,8 @@ export interface ActivityEntry {
   generatingChunks?: number;    // Number of text chunks received
   generatingChars?: number;     // Total characters generated
   generatingInProgress?: boolean; // True while text is streaming
+  generatingContent?: string;   // Full response text (stored for modal/download)
+  generatingTruncated?: string; // First 500 chars (for live display)
 }
 
 // Constants for activity log display
@@ -1649,14 +1651,36 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
         lines.push(`:x: Error: ${entry.message}`);
         break;
       case 'generating':
-        // Show text generation progress
+        // Show text generation progress with optional content preview
+        const responseText = entry.generatingTruncated || entry.generatingContent || '';
+        const responseCharCount = entry.generatingContent?.length || entry.generatingChars || responseText.length;
         const genDuration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-        const chunkInfo = entry.generatingChunks ? ` [${entry.generatingChunks} chunks]` : '';
-        const charInfo = entry.generatingChars ? ` _[${entry.generatingChars.toLocaleString()} chars]_` : '';
+        const charInfo = responseCharCount > 0 ? ` _[${responseCharCount.toLocaleString()} chars]_` : '';
+
         if (entry.generatingInProgress) {
-          lines.push(`:pencil: *Generating...*${genDuration}${chunkInfo}${charInfo}`);
+          lines.push(`:pencil: *Generating...*${genDuration}${charInfo}`);
+          if (responseText) {
+            // Show preview of response (up to 300 chars)
+            const displayText = responseText.replace(/\n/g, ' ').trim();
+            const preview = displayText.length > 300
+              ? displayText.substring(0, 300) + '...'
+              : displayText;
+            if (preview) {
+              lines.push(`> ${preview}`);
+            }
+          }
         } else {
           lines.push(`:pencil: *Response*${genDuration}${charInfo}`);
+          if (responseText) {
+            // Show preview of completed response (first 300 chars)
+            const displayText = responseText.replace(/\n/g, ' ').trim();
+            const preview = displayText.length > 300
+              ? displayText.substring(0, 300) + '...'
+              : displayText;
+            if (preview) {
+              lines.push(`> ${preview}`);
+            }
+          }
         }
         break;
     }
@@ -1792,14 +1816,32 @@ export function buildActivityLogModalView(
         text: { type: 'mrkdwn', text: `:x: Error: ${entry.message} _${timestamp}_` },
       });
     } else if (entry.type === 'generating') {
-      const duration = entry.durationMs ? ` (${(entry.durationMs / 1000).toFixed(1)}s)` : '';
-      const chunks = entry.generatingChunks ? ` ${entry.generatingChunks} chunks` : '';
-      const chars = entry.generatingChars ? ` ${entry.generatingChars.toLocaleString()} chars` : '';
-      const status = entry.generatingInProgress ? 'in progress' : 'complete';
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: `:pencil: *Response*${duration}${chunks}${chars} (${status}) _${timestamp}_` },
-      });
+      const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+      const status = entry.generatingInProgress ? 'in progress' : '';
+      const statusSuffix = status ? ` (${status})` : '';
+
+      // Show FULL response content in modal (similar to thinking)
+      const responseText = entry.generatingContent || entry.generatingTruncated || '';
+      if (responseText) {
+        // Truncate to avoid Slack's 3000 char limit per block
+        const displayText = responseText.length > 2800
+          ? responseText.substring(0, 2800) + '...'
+          : responseText;
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `:pencil: *Response* [${responseText.length} chars]${duration}${statusSuffix} _${timestamp}_\n\`\`\`${displayText}\`\`\``,
+          },
+        });
+      } else {
+        // Fallback: show just stats if no content available (shouldn't happen)
+        const chars = entry.generatingChars ? ` ${entry.generatingChars.toLocaleString()} chars` : '';
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: `:pencil: *Response*${duration}${chars}${statusSuffix} _${timestamp}_` },
+        });
+      }
     }
   }
 

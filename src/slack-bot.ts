@@ -2405,6 +2405,11 @@ async function handleMessage(params: {
         entry.generatingChunks = generatingChunkCount;
         entry.generatingChars = segmentCharCount;
         entry.durationMs = Date.now() - (generatingStartTime || processingState.startTime);
+        // Store response content for View Log modal (similar to thinking content)
+        entry.generatingContent = currentResponse;
+        entry.generatingTruncated = currentResponse.length > 500
+          ? currentResponse.substring(0, 500) + '...'
+          : currentResponse;
         console.log(`[Activity] Generating complete: ${generatingChunkCount} chunks, ${segmentCharCount} chars`);
         // Reset for next generating block
         generatingChunkCount = 0;

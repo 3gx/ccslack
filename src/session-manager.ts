@@ -112,6 +112,8 @@ export interface ActivityEntry {
   generatingChunks?: number;    // Number of text chunks received
   generatingChars?: number;     // Total characters generated
   generatingInProgress?: boolean; // True while text is streaming
+  generatingContent?: string;   // Full response text (stored for modal/download)
+  generatingTruncated?: string; // First 500 chars (for live display)
 }
 
 /**
