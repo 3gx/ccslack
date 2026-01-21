@@ -34,6 +34,9 @@ export interface WatchState {
   updateRateMs: number;
   userId?: string;  // User who initiated /continue (for ephemeral errors)
   pollInProgress?: boolean;  // Prevents overlapping polls
+  // Activity message tracking per turn (keyed by userInput UUID)
+  // Stores Slack ts for each turn's activity message, enabling update-in-place
+  activityMessages: Map<string, string>;
 }
 
 /**
@@ -99,6 +102,7 @@ export function startWatching(
     client,
     updateRateMs,
     userId,
+    activityMessages: new Map(),
   };
 
   // Start polling - poll immediately, then on interval
@@ -212,6 +216,7 @@ async function pollForChanges(state: WatchState): Promise<void> {
     const syncResult = await syncMessagesFromOffset(syncState, filePath, state.fileOffset, {
       infiniteRetry: false,  // /watch uses limited retries
       postTextMessage: (s, msg) => postTerminalMessage(state, msg),
+      activityMessages: state.activityMessages,  // Pass activity ts map for update-in-place
     });
 
     console.log(`[TerminalWatcher] Poll result: synced=${syncResult.syncedCount}/${syncResult.totalToSync}`);

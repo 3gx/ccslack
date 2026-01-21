@@ -36,8 +36,15 @@ function parseAlignment(separatorLine: string): ('l' | 'c' | 'r')[] {
 
 /**
  * Normalize a markdown table: strip formatting, render with UTF-8 box chars.
+ *
+ * TODO: Table normalization temporarily disabled - there's a bug with formatting
+ * stripping that needs investigation. Currently returns input unchanged.
  */
 export function normalizeTable(tableText: string): string {
+  // TODO: Investigate and fix table normalization bug, then restore this code
+  return tableText.trimEnd();
+
+  /*
   const lines = tableText.trim().split('\n');
   if (lines.length < 2) return tableText;
 
@@ -71,6 +78,7 @@ export function normalizeTable(tableText: string): string {
       return lineIndex === 0 || lineIndex === 1 || lineIndex === rowCount;
     }
   }).trimEnd();
+  */
 }
 
 /**

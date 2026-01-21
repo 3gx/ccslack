@@ -13,6 +13,7 @@ import {
   saveActivityLog,
   getActivityLog,
   clearSyncedMessageUuids,
+  addSlackOriginatedUserUuid,
   Session,
   ThreadSession,
   PermissionMode,
@@ -30,9 +31,9 @@ import {
   buildPathSetupBlocks,
   buildStatusPanelBlocks,
   buildActivityLogText,
-  buildCollapsedActivityBlocks,
   buildCombinedStatusBlocks,
-  buildCombinedCompletionBlocks,
+  buildLiveActivityBlocks,
+  ACTIVITY_LOG_MAX_CHARS,
   formatToolName,
   getToolEmoji,
   buildActivityLogModalView,
@@ -881,6 +882,7 @@ async function handleFastForwardSync(
       client,
       updateRateMs: (effectiveSession.updateRateSeconds ?? 2) * 1000,
       userId,
+      activityMessages: new Map(),  // Track activity ts during sync (update-in-place)
     };
 
     // Track current status message ts (will change as we move it to bottom)
@@ -947,6 +949,7 @@ async function handleFastForwardSync(
       isAborted: () => isFfAborted(conversationKey),
       pacingDelayMs: FF_PACING_DELAY_MS,
       postTextMessage: (s, msg) => postTerminalMessage(watchState, msg),
+      activityMessages: watchState.activityMessages,  // Pass activity ts map for update-in-place
       onProgress: async (synced, total) => {
         lastReportedTotal = total;
         // Update initial status on first message
@@ -2208,9 +2211,9 @@ async function handleMessage(params: {
           channelId,
           threadTs,
           client,
-          () => fullResponse,           // Getter for accumulated response
-          () => { fullResponse = ''; },  // Clear after posting
-          () => isActivelyStreaming      // Check if still in middle of streaming
+          () => currentResponse,           // Getter for current segment response
+          () => { currentResponse = ''; },  // Clear current segment after posting
+          () => isActivelyStreaming         // Check if still in middle of streaming
         );
       }
 
@@ -2228,10 +2231,14 @@ async function handleMessage(params: {
 
       // Post accumulated response BEFORE showing approval prompt (only if still actively streaming)
       // This ensures any explanation Claude generated is visible before the tool approval
-      if (isActivelyStreaming && fullResponse.trim()) {
-        console.log(`Posting accumulated response (${fullResponse.length} chars) before tool approval`);
+      // Note: With interleaved approach, this posts the current segment before approval UI
+      if (isActivelyStreaming && currentResponse.trim()) {
+        console.log(`Posting current segment response (${currentResponse.length} chars) before tool approval`);
 
-        const strippedResponse = stripMarkdownCodeFence(fullResponse);
+        const liveConfig = getLiveSessionConfig(channelId, threadTs);
+        const strippedResponse = stripMarkdownCodeFence(currentResponse, {
+          stripEmptyTag: liveConfig.stripEmptyTag,
+        });
         const slackResponse = markdownToSlack(strippedResponse);
 
         await uploadMarkdownAndPngWithResponse(
@@ -2241,12 +2248,12 @@ async function handleMessage(params: {
           slackResponse,
           threadTs,
           undefined,  // userId
-          500,        // threadCharLimit
-          false       // stripEmptyTag
+          liveConfig.threadCharLimit,
+          liveConfig.stripEmptyTag
         );
 
-        // Clear accumulated response so it's not posted again at the end
-        fullResponse = '';
+        // Clear current segment so it's not posted again (fullResponse keeps total)
+        currentResponse = '';
       }
 
       // Generate unique approval ID
@@ -2315,12 +2322,17 @@ async function handleMessage(params: {
     }
 
     // Collect complete response from SDK (no streaming placeholder needed)
+    // currentResponse: text for current segment (reset after each segment posts)
+    // fullResponse: total accumulated text (for backwards compat and total char tracking)
+    let currentResponse = '';
     let fullResponse = '';
     let isActivelyStreaming = true;  // Flag to track if we're in middle of streaming (before result)
     let newSessionId: string | null = null;
     let modelName: string | undefined;
     const assistantMessageUuids: Set<string> = new Set();  // Track ALL assistant UUIDs for message mapping
     let costUsd: number | undefined;
+    // Track which activity entries have been "frozen" (posted as complete segments)
+    let lastPostedActivityIndex = 0;
 
     // Helper to start an in-progress thinking entry (for live streaming)
     const startThinkingEntry = () => {
@@ -2382,20 +2394,77 @@ async function handleMessage(params: {
     let generatingChunkCount = 0;
     let generatingStartTime: number | null = null;
 
-    // Helper to finalize generating entry (called when tool starts or streaming completes)
-    const finalizeGeneratingEntry = (finalCharCount: number) => {
+    // Helper to finalize generating entry and post segment (called when tool starts or streaming completes)
+    // Posts: 1) frozen activity segment, 2) response text for that segment
+    const finalizeGeneratingEntry = async (segmentCharCount: number) => {
       const entry = processingState.activityLog.find(
         e => e.type === 'generating' && e.generatingInProgress
       );
       if (entry) {
         entry.generatingInProgress = false;
         entry.generatingChunks = generatingChunkCount;
-        entry.generatingChars = finalCharCount;
+        entry.generatingChars = segmentCharCount;
         entry.durationMs = Date.now() - (generatingStartTime || processingState.startTime);
-        console.log(`[Activity] Generating complete: ${generatingChunkCount} chunks, ${finalCharCount} chars`);
+        console.log(`[Activity] Generating complete: ${generatingChunkCount} chunks, ${segmentCharCount} chars`);
         // Reset for next generating block
         generatingChunkCount = 0;
         generatingStartTime = null;
+      }
+
+      // Post the current segment (activity + text) if there's response text
+      if (currentResponse.trim() && !isAborted(conversationKey)) {
+        // 1. Get activity entries for THIS segment (from lastPostedActivityIndex to current end)
+        const segmentActivity = processingState.activityLog.slice(lastPostedActivityIndex);
+
+        // 2. Post frozen activity segment (not in-progress)
+        if (segmentActivity.length > 0) {
+          try {
+            const blocks = buildLiveActivityBlocks(segmentActivity, activityLogKey, false);
+            await withSlackRetry(
+              () => client.chat.postMessage({
+                channel: channelId,
+                thread_ts: threadTs,
+                blocks,
+                text: 'Activity',
+              }),
+              { onRateLimit: handleRateLimit }
+            );
+            console.log(`[Interleaved] Posted activity segment: ${segmentActivity.length} entries`);
+          } catch (error) {
+            console.error('[Interleaved] Error posting activity segment:', error);
+          }
+        }
+
+        // Mark activity as posted
+        lastPostedActivityIndex = processingState.activityLog.length;
+
+        // 3. Post response text for this segment
+        try {
+          const liveConfig = getLiveSessionConfig(channelId, threadTs);
+          const strippedResponse = stripMarkdownCodeFence(currentResponse, {
+            stripEmptyTag: liveConfig.stripEmptyTag,
+          });
+          const slackResponse = markdownToSlack(strippedResponse);
+          // Add prefix for bot response
+          const prefixedResponse = ':speech_balloon: *Response*\n' + slackResponse;
+
+          await uploadMarkdownAndPngWithResponse(
+            client,
+            channelId,
+            strippedResponse,
+            prefixedResponse,
+            threadTs,
+            userId,
+            liveConfig.threadCharLimit,
+            liveConfig.stripEmptyTag
+          );
+          console.log(`[Interleaved] Posted response segment: ${currentResponse.length} chars`);
+        } catch (error) {
+          console.error('[Interleaved] Error posting response segment:', error);
+        }
+
+        // 4. Reset currentResponse for next segment (keep fullResponse for total tracking)
+        currentResponse = '';
       }
     };
 
@@ -2431,10 +2500,10 @@ async function handleMessage(params: {
     };
 
     // Helper to add tool start to activity log
-    const logToolStart = (toolName: string) => {
+    const logToolStart = async (toolName: string) => {
       // Finalize any in-progress generating entry before tool starts
-      // This ensures text before tools gets its own entry, and text after tools gets a new one
-      finalizeGeneratingEntry(fullResponse.length);
+      // This posts the current segment (activity + text) before the tool
+      await finalizeGeneratingEntry(currentResponse.length);
 
       const formattedName = formatToolName(toolName);
       const elapsedMs = Date.now() - processingState.startTime;
@@ -2450,10 +2519,10 @@ async function handleMessage(params: {
     };
 
     // Helper to add tool complete to activity log
-    const logToolComplete = () => {
+    const logToolComplete = async () => {
       // Finalize any in-progress generating entry before tool completes
       // This handles generating entries created DURING tool execution
-      finalizeGeneratingEntry(fullResponse.length);
+      await finalizeGeneratingEntry(currentResponse.length);
 
       const lastToolStart = [...processingState.activityLog].reverse().find(e => e.type === 'tool_start');
       if (lastToolStart) {
@@ -2506,16 +2575,19 @@ async function handleMessage(params: {
 
         const elapsedMs = now - processingState.startTime;
 
-        // Update combined message (activity log + status panel)
+        // Update combined message with CURRENT segment activity only
+        // Completed segments have been posted as separate messages
         if (statusMsgTs) {
           try {
+            // Only show trailing activity (from lastPostedActivityIndex onwards)
+            const trailingActivity = processingState.activityLog.slice(lastPostedActivityIndex);
             await withSlackRetry(
               () =>
                 client.chat.update({
                   channel: channelId,
                   ts: statusMsgTs,
                   blocks: buildCombinedStatusBlocks({
-                    activityLog: processingState.activityLog,
+                    activityLog: trailingActivity,
                     inProgress: true,
                     status: processingState.status,
                     mode: session.mode,
@@ -2563,7 +2635,7 @@ async function handleMessage(params: {
         assistantMessageUuids.add(uuid);
         console.log(`[Mapping] Captured assistant message UUID: ${uuid} (total: ${assistantMessageUuids.size})`);
         // Track generating activity for user visibility (shows text is being streamed)
-        updateGeneratingEntry(fullResponse.length);
+        updateGeneratingEntry(currentResponse.length);
       }
 
       // Capture session ID and model from init message
@@ -2625,7 +2697,11 @@ async function handleMessage(params: {
         const event = (msg as any).event;
 
         // Thinking block started - create in-progress entry for live display
+        // First finalize any accumulated text to create segment boundary
         if (event?.type === 'content_block_start' && event.content_block?.type === 'thinking') {
+          // Post any accumulated text as its own segment before thinking starts
+          // This ensures text→thinking→text produces 3 segments, not 2
+          await finalizeGeneratingEntry(currentResponse.length);
           console.log('[Activity] Thinking block started');
           processingState.currentThinkingIndex = event.index;
           processingState.currentThinkingContent = '';
@@ -2655,10 +2731,19 @@ async function handleMessage(params: {
           // Timer will render updated status at next interval
         }
 
+        // Text streaming - accumulate in real-time for interleaved posting
+        // This ensures currentResponse has content BEFORE tool events trigger finalizeGeneratingEntry
+        if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+          const textChunk = event.delta.text || '';
+          currentResponse += textChunk;
+          fullResponse += textChunk;
+          updateGeneratingEntry(currentResponse.length);
+        }
+
         // Tool use started
         if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
           processingState.currentToolUseIndex = event.index;
-          logToolStart(event.content_block.name);
+          await logToolStart(event.content_block.name);
 
           // Track ExitPlanMode for input accumulation (CLI-fidelity plan approval)
           if (event.content_block.name === 'ExitPlanMode') {
@@ -2696,7 +2781,7 @@ async function handleMessage(params: {
         if (event?.type === 'content_block_stop' &&
             processingState.currentToolUseIndex === event.index &&
             processingState.currentTool) {
-          logToolComplete();
+          await logToolComplete();
 
           // Parse ExitPlanMode input when tool completes
           if (processingState.exitPlanModeIndex === event.index) {
@@ -2756,27 +2841,20 @@ async function handleMessage(params: {
         }
       }
 
-      // Handle assistant content
-      if (msg.type === 'assistant' && 'content' in msg) {
-        const content = (msg as any).content;
-        if (typeof content === 'string') {
-          fullResponse += content;
-        } else if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === 'text') {
-              fullResponse += block.text;
-            }
-          }
-        }
-      }
+      // Note: Text accumulation moved to text_delta handler in stream_event section
+      // This ensures currentResponse has content BEFORE tool events trigger segment posting
 
       // Handle result messages (final response with stats)
       if (msg.type === 'result') {
         const resultMsg = msg as any;
         isActivelyStreaming = false;  // No longer in middle of streaming
 
-        if (resultMsg.result) {
+        // Only use result as fallback if accumulation failed (matches streaming.ts pattern)
+        // This preserves intermediate text outputs that were accumulated via +=
+        // Also update currentResponse for interleaved posting support
+        if (resultMsg.result && !fullResponse) {
           fullResponse = resultMsg.result;
+          currentResponse = resultMsg.result;  // For interleaved posting
         }
         // Extract stats from result message
         processingState.durationMs = resultMsg.duration_ms;
@@ -2801,9 +2879,10 @@ async function handleMessage(params: {
       }
     }
 
-    // Finalize generating entry if we were streaming text
-    if (generatingChunkCount > 0) {
-      finalizeGeneratingEntry(fullResponse.length);
+    // Finalize the final segment (posts remaining activity + currentResponse if any)
+    // This handles the case where the query ends with a response (not a tool)
+    if (generatingChunkCount > 0 || currentResponse.trim()) {
+      await finalizeGeneratingEntry(currentResponse.length);
     }
 
     // Stop the spinner timer now that processing is complete
@@ -2832,29 +2911,50 @@ async function handleMessage(params: {
       await mutex.runExclusive(async () => {
         if (isAborted(conversationKey)) return;
 
-        // Update combined message with collapsed activity summary + completion stats
+        // Post any trailing activity that wasn't part of a segment (activity after last response)
+        const trailingActivity = processingState.activityLog.slice(lastPostedActivityIndex);
+        if (trailingActivity.length > 0) {
+          try {
+            const blocks = buildLiveActivityBlocks(trailingActivity, activityLogKey, false);
+            await withSlackRetry(
+              () => client.chat.postMessage({
+                channel: channelId,
+                thread_ts: threadTs,
+                blocks,
+                text: 'Activity',
+              }),
+              { onRateLimit: handleRateLimit }
+            );
+            console.log(`[Interleaved] Posted trailing activity: ${trailingActivity.length} entries`);
+          } catch (error) {
+            console.error('[Interleaved] Error posting trailing activity:', error);
+          }
+        }
+
+        // Update initial status message to completion state (just stats, no activity log)
         if (statusMsgTs) {
           try {
+            // Build completion blocks: just status panel (activity already posted in segments)
+            const completionBlocks = buildStatusPanelBlocks({
+              status: 'complete',
+              mode: session.mode,
+              model: processingState.model,
+              toolsCompleted: processingState.toolsCompleted,
+              elapsedMs: finalDurationMs,
+              inputTokens: processingState.inputTokens,
+              outputTokens: processingState.outputTokens,
+              contextPercent,
+              compactPercent,
+              costUsd: processingState.costUsd,
+              conversationKey: activityLogKey,
+              rateLimitHits: processingState.rateLimitHits,
+            });
+
             await withSlackRetry(() =>
               client.chat.update({
                 channel: channelId,
                 ts: statusMsgTs,
-                blocks: buildCombinedCompletionBlocks({
-                  thinkingBlockCount: processingState.thinkingBlockCount,
-                  durationMs: finalDurationMs,
-                  status: 'complete',
-                  mode: session.mode,
-                  model: processingState.model,
-                  toolsCompleted: processingState.toolsCompleted,
-                  elapsedMs: finalDurationMs,
-                  inputTokens: processingState.inputTokens,
-                  outputTokens: processingState.outputTokens,
-                  contextPercent,
-                  compactPercent,
-                  costUsd: processingState.costUsd,
-                  conversationKey: activityLogKey,  // Use activityLogKey for View Log/Download
-                  rateLimitHits: processingState.rateLimitHits,
-                }),
+                blocks: completionBlocks,
                 text: 'Complete',
               })
             );
@@ -2887,58 +2987,11 @@ async function handleMessage(params: {
       }
     }
 
-    // Post complete response (only if not aborted and we have content)
-    // Upload .md/.png files and post text separately (initial_comment doesn't support mrkdwn)
-    // Declare postedMessages outside the fullResponse check so it's accessible for message mapping later
-    let postedMessages: { ts: string }[] = [];
-
-    if (!isAborted(conversationKey) && fullResponse) {
-      // Get live config values (allows /message-size and /strip-empty-tag to take effect mid-query)
-      const liveConfig = getLiveSessionConfig(channelId, threadTs);
-
-      // Strip markdown code fence wrapper BEFORE converting to Slack format
-      // Claude sometimes wraps output in ``` or ```markdown fences
-      const strippedResponse = stripMarkdownCodeFence(fullResponse, {
-        stripEmptyTag: liveConfig.stripEmptyTag,
-      });
-      const slackResponse = markdownToSlack(strippedResponse);
-
-      // Try to upload .md and .png files with response text posted separately
-      const uploadResult = await uploadMarkdownAndPngWithResponse(
-        client,
-        channelId,
-        strippedResponse,
-        slackResponse,
-        threadTs,
-        userId,
-        liveConfig.threadCharLimit,
-        liveConfig.stripEmptyTag,
-        // Add Fork here button only for threads
-        threadTs ? { threadTs, conversationKey: activityLogKey } : undefined
-      );
-
-      if (uploadResult) {
-        // Success - files uploaded and text posted with proper mrkdwn formatting
-        postedMessages = uploadResult.postedMessages ?? [];
-        // If no postedMessages but ts exists, use ts for mapping
-        if (postedMessages.length === 0 && uploadResult.ts) {
-          postedMessages = [{ ts: uploadResult.ts }];
-        }
-      } else {
-        // Fallback - post response without file attachment
-        const fallbackResult = await withSlackRetry(() =>
-          client.chat.postMessage({
-            channel: channelId,
-            thread_ts: threadTs,
-            text: slackResponse,
-          })
-        ) as { ts?: string } | undefined;
-        if (fallbackResult?.ts) {
-          postedMessages = [{ ts: fallbackResult.ts }];
-        }
-      }
-
-    }
+    // Response segments are already posted by finalizeGeneratingEntry() during streaming
+    // We no longer post fullResponse at the end to avoid double-posting
+    // postedMessages is empty since segments don't track their ts values
+    // Message mapping will use placeholder mappings for all assistant UUIDs
+    const postedMessages: { ts: string }[] = [];
 
     // CRITICAL: Save message mappings for /ff filtering AFTER query completes
     // At this point, SDK has written all messages to the session file
@@ -2962,6 +3015,8 @@ async function handleMessage(params: {
             sessionId: newSessionId,
             type: 'user',
           });
+          // Track as Slack-originated so /ff skips it (message already visible in Slack)
+          addSlackOriginatedUserUuid(channelId, userUuid, threadTs);
           console.log(`[Mapping] Saved user message UUID: ${userUuid}`);
         } else {
           // Fallback to placeholder if file read fails

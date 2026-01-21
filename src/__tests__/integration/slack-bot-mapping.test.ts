@@ -85,8 +85,10 @@ describe('slack-bot message mapping', () => {
   });
 
   describe('assistant UUID tracking for /ff filtering', () => {
-    it('should map UUID to real Slack timestamp when response has content', async () => {
+    it('should save placeholder mapping for assistant UUID (interleaved posting)', async () => {
       // Setup: Claude returns assistant message with UUID and text content
+      // With interleaved posting, responses are posted per-segment during finalizeGeneratingEntry
+      // without tracking ts, so we use placeholder mappings for /ff filtering
       vi.mocked(startClaudeQuery).mockReturnValue({
         [Symbol.asyncIterator]: async function* () {
           yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
@@ -100,9 +102,6 @@ describe('slack-bot message mapping', () => {
 
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
-
-      // The response ts comes from chat.postMessage (msg123 is default mock value)
-      // NOT from file upload shares
 
       vi.mocked(getSession).mockReturnValue({
         sessionId: 'existing-session',
@@ -126,10 +125,11 @@ describe('slack-bot message mapping', () => {
         client: mockClient,
       });
 
-      // Should save mapping with real Slack timestamp from postMessage (msg123)
+      // With interleaved posting, assistant UUIDs get placeholder mappings
+      // since responses are posted per-segment without ts tracking
       expect(saveMessageMapping).toHaveBeenCalledWith(
         'C123',
-        'msg123',  // Default mock ts from chat.postMessage
+        '_slack_assistant-uuid-123',  // Placeholder key
         expect.objectContaining({
           sdkMessageId: 'assistant-uuid-123',
           sessionId: 'session-123',

@@ -421,7 +421,7 @@ describe('slack-bot mention handlers', () => {
       expect(contextBlock.elements[0].text).toContain('5.0s');
     });
 
-    it('should post response after processing', async () => {
+    it('should post response via interleaved posting', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -431,11 +431,11 @@ describe('slack-bot mention handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-            pathConfigured: true,
-      configuredPath: '/test/dir',
-      configuredBy: 'U123',
-      configuredAt: Date.now(),
-          });
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
 
       const mockMessages = [
         { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
@@ -460,13 +460,16 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should post: 1) combined status message, 2) response
+      // With interleaved posting: 1) combined status message, 2) response text via finalizeGeneratingEntry
+      // Response is posted during finalizeGeneratingEntry (per-segment posting)
       const postCalls = mockClient.chat.postMessage.mock.calls;
-      expect(postCalls.length).toBe(2);
 
-      // Second call should be the response
-      const responseCall = postCalls[1][0];
-      expect(responseCall.text).toBe('Hello from Claude!');
+      // Find the response call (text containing 'Hello from Claude!')
+      const responseCall = postCalls.find((call: any) => call[0].text?.includes('Hello from Claude!'));
+      expect(responseCall).toBeDefined();
+
+      // Verify response has the :speech_balloon: *Response* prefix
+      expect(responseCall[0].text).toContain(':speech_balloon: *Response*');
     });
 
     it('should upload .md file without initial_comment and post text separately', async () => {
@@ -582,8 +585,10 @@ describe('slack-bot mention handlers', () => {
 
       // Should fall back to posting response via chat.postMessage
       const postCalls = mockClient.chat.postMessage.mock.calls;
-      const responseCall = postCalls.find((call: any) => call[0].text === 'Fallback response');
+      const responseCall = postCalls.find((call: any) => call[0].text?.includes('Fallback response'));
       expect(responseCall).toBeDefined();
+      // Verify response has the :speech_balloon: *Response* prefix
+      expect(responseCall[0].text).toContain(':speech_balloon: *Response*');
     });
 
     it('should upload .md file in thread and post text separately', async () => {

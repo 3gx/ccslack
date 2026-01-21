@@ -1,23 +1,33 @@
 /**
  * Message sync module - single source of truth for syncing terminal messages to Slack.
+ * Uses turn-based posting to match bot output fidelity.
  * Used by both /ff (fast-forward) and /watch commands.
  */
 
 import { WebClient } from '@slack/web-api';
+import * as fs from 'fs';
 import {
   readNewMessages,
   SessionFileMessage,
-  buildActivityEntriesFromMessage,
   extractTextContent,
-  ImportedActivityEntry,
+  groupMessagesByTurn,
+  Turn,
+  TurnSegment,
 } from './session-reader.js';
 import {
   getMessageMapUuids,
   saveMessageMapping,
-  saveActivityLog,
-  ActivityEntry,
+  mergeActivityLog,
+  isSlackOriginatedUserUuid,
+  SlackMessageMapping,
 } from './session-manager.js';
+import {
+  readActivityLog,
+  ActivityEntry,
+} from './session-event-stream.js';
+import { buildLiveActivityBlocks } from './blocks.js';
 import { withSlackRetry, withInfiniteRetry, sleep } from './retry.js';
+import { truncateWithClosedFormatting } from './streaming.js';
 
 /**
  * State required for posting messages to Slack.
@@ -46,6 +56,12 @@ export interface SyncOptions {
   pacingDelayMs?: number;
   /** Post function for text messages (allows /watch to use its own postTerminalMessage) */
   postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage) => Promise<boolean>;
+  /** Character limit for text responses */
+  charLimit?: number;
+  /** Whether to strip empty code fence wrappers */
+  stripEmptyTag?: boolean;
+  /** Activity message ts per turn (for update-in-place). Key: userInput UUID, Value: Slack ts */
+  activityMessages?: Map<string, string>;
 }
 
 /**
@@ -64,8 +80,72 @@ export interface SyncResult {
   allSucceeded: boolean;
 }
 
+const SESSIONS_FILE = './sessions.json';
+
+/**
+ * Get the full messageMap for a channel (for finding existing activity Slack ts).
+ */
+function getMessageMap(channelId: string): Record<string, SlackMessageMapping> {
+  if (!fs.existsSync(SESSIONS_FILE)) {
+    return {};
+  }
+
+  try {
+    const content = fs.readFileSync(SESSIONS_FILE, 'utf-8');
+    const store = JSON.parse(content);
+    return store.channels?.[channelId]?.messageMap ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Get activity entries for a turn based on timestamp range.
+ * Filters activity from turn start (userInput) to turn end (next turn or Infinity).
+ */
+function getActivityForTurn(
+  turn: Turn,
+  allTurns: Turn[],
+  turnIndex: number,
+  fullActivityLog: ActivityEntry[]
+): ActivityEntry[] {
+  const turnStart = new Date(turn.userInput.timestamp).getTime();
+
+  // Find next turn's start timestamp (or Infinity if last turn)
+  let turnEnd = Infinity;
+  if (turnIndex + 1 < allTurns.length) {
+    turnEnd = new Date(allTurns[turnIndex + 1].userInput.timestamp).getTime();
+  }
+
+  return fullActivityLog.filter(entry =>
+    entry.timestamp >= turnStart && entry.timestamp < turnEnd
+  );
+}
+
+/**
+ * Calculate turn duration from userInput to last textOutput timestamp.
+ * Falls back to activity span if no text output.
+ */
+function calculateTurnDuration(turn: Turn, activityEntries: ActivityEntry[]): number {
+  // Prefer turn span: userInput timestamp → last textOutput timestamp
+  // This matches bot's Date.now() - processingState.startTime approach
+  if (turn.segments.length > 0) {
+    const start = new Date(turn.userInput.timestamp).getTime();
+    const lastSegment = turn.segments[turn.segments.length - 1];
+    const end = new Date(lastSegment.textOutput.timestamp).getTime();
+    return end - start;
+  }
+
+  // Fallback for activity-only turns (no text output)
+  if (activityEntries.length === 0) return 0;
+  const first = activityEntries[0].timestamp;
+  const last = activityEntries[activityEntries.length - 1].timestamp;
+  return last - first;
+}
+
 /**
  * Sync messages from a session file to Slack, starting at the given offset.
+ * Uses turn-based posting to match bot output fidelity.
  * This is the core function used by both /ff and /watch.
  *
  * @param state - Slack posting state (channel, client, etc.)
@@ -86,6 +166,9 @@ export async function syncMessagesFromOffset(
     onProgress,
     pacingDelayMs = 0,
     postTextMessage,
+    charLimit = 500,
+    stripEmptyTag = false,
+    activityMessages,
   } = options;
 
   // 1. Read messages from file
@@ -101,11 +184,26 @@ export async function syncMessagesFromOffset(
     };
   }
 
-  // 2. Filter by messageMap (skip already-posted messages)
+  // 1b. Read full activity log once (uses FIFO tool matching for tool_complete with duration)
+  const fullActivityLog = await readActivityLog(filePath);
+  console.log(`[MessageSync] Loaded ${fullActivityLog.length} activity entries from session`);
+
+  // 2. Group messages into turns
+  const turns = groupMessagesByTurn(messages);
+  console.log(`[MessageSync] Grouped ${messages.length} messages into ${turns.length} turns`);
+
+  // 3. Get deduplication state
   const alreadyPosted = getMessageMapUuids(state.channelId);
-  const messagesToSync = messages.filter(m => !alreadyPosted.has(m.uuid));
-  console.log(`[MessageSync] Filtered to ${messagesToSync.length} messages (${alreadyPosted.size} already posted)`);
-  if (messagesToSync.length === 0) {
+  const messageMap = getMessageMap(state.channelId);
+
+  // 4. Filter turns - skip only if ALL messages in turn already posted
+  // (partial turns still need processing for recovery/update)
+  const turnsToProcess = turns.filter(turn =>
+    turn.allMessageUuids.some(uuid => !alreadyPosted.has(uuid))
+  );
+  console.log(`[MessageSync] ${turnsToProcess.length} turns to process (${turns.length - turnsToProcess.length} fully posted)`);
+
+  if (turnsToProcess.length === 0) {
     return {
       newOffset,
       syncedCount: 0,
@@ -115,46 +213,59 @@ export async function syncMessagesFromOffset(
     };
   }
 
-  // 3. Post each message
+  // 5. Post each turn
   let syncedCount = 0;
   let wasAborted = false;
   let allSucceeded = true;
 
-  for (let i = 0; i < messagesToSync.length; i++) {
+  for (let i = 0; i < turnsToProcess.length; i++) {
     // Check abort flag
     if (isAborted?.()) {
       wasAborted = true;
-      console.log(`[MessageSync] Sync aborted at message ${i + 1}/${messagesToSync.length}`);
+      console.log(`[MessageSync] Sync aborted at turn ${i + 1}/${turnsToProcess.length}`);
       break;
     }
 
-    const msg = messagesToSync[i];
+    const turn = turnsToProcess[i];
+    const turnIndex = turns.indexOf(turn);
+    const turnActivity = getActivityForTurn(turn, turns, turnIndex, fullActivityLog);
 
-    // Double-check messageMap before posting to prevent race condition
-    // (another sync operation might have posted this message while we were processing)
-    const currentlyPosted = getMessageMapUuids(state.channelId);
-    if (currentlyPosted.has(msg.uuid)) {
-      console.log(`[MessageSync] Skipping ${msg.uuid} - already posted by concurrent operation`);
-      syncedCount++; // Count as success since it's already posted
-      continue;
-    }
+    console.log(`[MessageSync] Processing turn ${i + 1}/${turnsToProcess.length}: user=${turn.userInput.uuid}, segments=${turn.segments.length}, trailingActivity=${turn.trailingActivity.length}, activityEntries=${turnActivity.length}`);
 
-    const success = await postSingleMessage(state, msg, infiniteRetry, postTextMessage);
+    const result = await postTurn(
+      state,
+      turn,
+      turnActivity,
+      alreadyPosted,
+      messageMap,
+      { charLimit, stripEmptyTag, infiniteRetry, postTextMessage, activityMessages }
+    );
 
-    if (success) {
-      syncedCount++;
+    if (result.success) {
+      syncedCount += result.postedUuids.length;
+      // Update alreadyPosted with newly posted UUIDs (for subsequent turns in same /ff run)
+      for (const uuid of result.postedUuids) {
+        alreadyPosted.add(uuid);
+      }
     } else {
       allSucceeded = false;
-      // Continue trying other messages for /watch, but track failure
     }
 
-    // Progress callback
+    // Progress callback (use last message in turn for display)
     if (onProgress) {
-      await onProgress(syncedCount, messagesToSync.length, msg);
+      // Get the last text output from segments, or trailing activity, or user input
+      const lastSegmentOutput = turn.segments.length > 0
+        ? turn.segments[turn.segments.length - 1].textOutput
+        : null;
+      const lastTrailing = turn.trailingActivity.length > 0
+        ? turn.trailingActivity[turn.trailingActivity.length - 1]
+        : null;
+      const displayMsg = lastSegmentOutput || lastTrailing || turn.userInput;
+      await onProgress(syncedCount, turnsToProcess.length, displayMsg);
     }
 
-    // Pacing delay between messages (skip on last)
-    if (pacingDelayMs > 0 && i < messagesToSync.length - 1) {
+    // Pacing delay between turns (skip on last)
+    if (pacingDelayMs > 0 && i < turnsToProcess.length - 1) {
       await sleep(pacingDelayMs);
     }
   }
@@ -162,163 +273,452 @@ export async function syncMessagesFromOffset(
   return {
     newOffset,
     syncedCount,
-    totalToSync: messagesToSync.length,
+    totalToSync: turnsToProcess.length,
     wasAborted,
     allSucceeded,
   };
 }
 
 /**
- * Post a single message to Slack.
- * Handles both text messages and activity-only messages.
- *
- * @param state - Slack posting state
- * @param msg - Session file message to post
- * @param infiniteRetry - Whether to retry forever (true for /ff)
- * @param postTextMessage - Optional custom text message poster (for /watch)
- * @returns true if posted successfully
+ * Get activity entries for a specific segment based on timestamp range.
+ * Filters activity from previous segment end (or turn start) to this segment's text output.
  */
-async function postSingleMessage(
-  state: MessageSyncState,
-  msg: SessionFileMessage,
-  infiniteRetry: boolean,
-  postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage) => Promise<boolean>
-): Promise<boolean> {
-  const textContent = extractTextContent(msg);
-  const activityEntries = buildActivityEntriesFromMessage(msg);
-  const hasText = textContent.trim().length > 0;
+function getActivityForSegment(
+  segmentIndex: number,
+  segments: TurnSegment[],
+  turnStartTime: number,
+  allTurnActivity: ActivityEntry[]
+): ActivityEntry[] {
+  // Determine segment start time
+  const segmentStart = segmentIndex === 0
+    ? turnStartTime
+    : new Date(segments[segmentIndex - 1].textOutput.timestamp).getTime();
 
-  console.log(`[MessageSync] Processing ${msg.uuid} (${msg.type}): hasText=${hasText}, activityEntries=${activityEntries.length}`);
+  // Determine segment end time (this segment's text output timestamp)
+  const segment = segments[segmentIndex];
+  const segmentEnd = new Date(segment.textOutput.timestamp).getTime();
 
-  if (hasText) {
-    // Text message - use provided poster or skip if none
-    if (!postTextMessage) {
-      console.error(`[MessageSync] No postTextMessage function provided for text message ${msg.uuid}`);
-      return false;
-    }
-
-    if (infiniteRetry) {
-      return await withInfiniteRetry(
-        () => postTextMessage(state, msg),
-        {
-          baseDelayMs: 3000,
-          maxDelayMs: 30000,
-          onRetry: (error, attempt, delayMs) => {
-            console.log(`[MessageSync] Message ${msg.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
-          },
-          onSuccess: (attempts) => {
-            if (attempts > 1) {
-              console.log(`[MessageSync] Message ${msg.uuid} succeeded after ${attempts} attempts`);
-            }
-          },
-        }
-      );
-    } else {
-      return await postTextMessage(state, msg);
-    }
-  } else if (activityEntries.length > 0) {
-    // Activity-only message - post summary with View Log button
-    if (infiniteRetry) {
-      return await withInfiniteRetry(
-        () => postActivityOnlyMessage(state, msg, activityEntries),
-        {
-          baseDelayMs: 3000,
-          maxDelayMs: 30000,
-          onRetry: (error, attempt, delayMs) => {
-            console.log(`[MessageSync] Activity ${msg.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
-          },
-        }
-      );
-    } else {
-      return await postActivityOnlyMessage(state, msg, activityEntries);
-    }
-  }
-
-  // No text and no activity - nothing to post, but still record in messageMap
-  // to prevent re-processing on next poll (offset doesn't advance by design)
-  saveMessageMapping(state.channelId, `empty_${msg.uuid}`, {
-    sdkMessageId: msg.uuid,
-    sessionId: state.sessionId,
-    type: msg.type as 'user' | 'assistant',
-  });
-  console.log(`[MessageSync] Recorded empty message ${msg.uuid} (no text, no activity)`);
-  return true;
+  return allTurnActivity.filter(entry =>
+    entry.timestamp >= segmentStart && entry.timestamp <= segmentEnd
+  );
 }
 
 /**
- * Post an activity-only message (thinking/tools but no text output).
- * Creates a summary with View Log button for detailed inspection.
- *
- * @param state - Slack posting state
- * @param msg - Session file message
- * @param activityEntries - Parsed activity entries
- * @returns true if posted successfully
+ * Get trailing activity (after last segment) for in-progress turns.
  */
-async function postActivityOnlyMessage(
+function getTrailingActivity(
+  segments: TurnSegment[],
+  turnStartTime: number,
+  allTurnActivity: ActivityEntry[]
+): ActivityEntry[] {
+  // Trailing activity starts after the last segment's text output (or turn start if no segments)
+  const trailingStart = segments.length > 0
+    ? new Date(segments[segments.length - 1].textOutput.timestamp).getTime()
+    : turnStartTime;
+
+  return allTurnActivity.filter(entry => entry.timestamp > trailingStart);
+}
+
+/**
+ * Post a complete turn to Slack with INTERLEAVED activity + text per segment.
+ *
+ * Key design (CLI-fidelity): Each segment gets its own activity message followed by text.
+ * Trailing activity (in-progress turns) uses update-in-place for /watch live updates.
+ *
+ * Flow:
+ * 1. Post user input
+ * 2. For each segment:
+ *    a. Post activity message (new, not update-in-place)
+ *    b. Post text message
+ * 3. Post/update trailing activity (for in-progress turns)
+ */
+async function postTurn(
+  state: MessageSyncState,
+  turn: Turn,
+  activityEntries: ActivityEntry[],
+  alreadyPosted: Set<string>,
+  _messageMap: Record<string, SlackMessageMapping>,  // Kept for signature compatibility
+  options: {
+    charLimit: number;
+    stripEmptyTag?: boolean;
+    infiniteRetry?: boolean;
+    postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage) => Promise<boolean>;
+    activityMessages?: Map<string, string>;
+  }
+): Promise<{ success: boolean; postedUuids: string[] }> {
+  const postedUuids: string[] = [];
+  const { charLimit, stripEmptyTag, infiniteRetry = false, postTextMessage, activityMessages } = options;
+  const turnKey = turn.userInput.uuid;
+  const activityLogKey = state.conversationKey;
+  const turnStartTime = new Date(turn.userInput.timestamp).getTime();
+
+  // 1. Post user input (skip if already posted - partial turn recovery)
+  if (!alreadyPosted.has(turn.userInput.uuid)) {
+    const inputResult = await postUserInput(state, turn.userInput, infiniteRetry, charLimit);
+    if (inputResult?.ts) {
+      saveMessageMapping(state.channelId, inputResult.ts, {
+        sdkMessageId: turn.userInput.uuid,
+        sessionId: state.sessionId,
+        type: 'user',
+      });
+      postedUuids.push(turn.userInput.uuid);
+    }
+  }
+
+  // 2. Post INTERLEAVED activity + text for each segment
+  for (let i = 0; i < turn.segments.length; i++) {
+    const segment = turn.segments[i];
+
+    // 2a. Get activity entries for THIS segment
+    const segmentActivity = getActivityForSegment(i, turn.segments, turnStartTime, activityEntries);
+
+    // 2b. Post activity message for this segment (if there's activity and not already posted)
+    if (segmentActivity.length > 0) {
+      // Check if segment activity messages are already posted
+      const segmentActivityAlreadyPosted = segment.activityMessages.every(m => alreadyPosted.has(m.uuid));
+
+      if (!segmentActivityAlreadyPosted) {
+        // Post NEW activity message for this segment (not update-in-place)
+        const blocks = buildLiveActivityBlocks(segmentActivity, activityLogKey, false);
+        const activityResult = await postActivitySummary(state, blocks, infiniteRetry);
+
+        if (activityResult?.ts) {
+          // Save activity log (unified with bot)
+          await mergeActivityLog(activityLogKey, segmentActivity);
+
+          // Track activity messages as posted
+          for (const activityMsg of segment.activityMessages) {
+            if (!alreadyPosted.has(activityMsg.uuid)) {
+              const mappingKey = `${activityResult.ts}_${activityMsg.uuid}`;
+              saveMessageMapping(state.channelId, mappingKey, {
+                sdkMessageId: activityMsg.uuid,
+                sessionId: state.sessionId,
+                type: 'assistant',
+              });
+              postedUuids.push(activityMsg.uuid);
+            }
+          }
+        }
+      }
+    }
+
+    // 2c. Post text output for this segment (skip if already posted)
+    if (!alreadyPosted.has(segment.textOutput.uuid)) {
+      let textSuccess = false;
+
+      if (postTextMessage) {
+        if (infiniteRetry) {
+          textSuccess = await withInfiniteRetry(
+            () => postTextMessage(state, segment.textOutput),
+            {
+              baseDelayMs: 3000,
+              maxDelayMs: 30000,
+              onRetry: (error, attempt, delayMs) => {
+                console.log(`[MessageSync] Text ${segment.textOutput.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+              },
+            }
+          );
+        } else {
+          textSuccess = await postTextMessage(state, segment.textOutput);
+        }
+      } else {
+        const textResult = await postTextResponse(state, segment.textOutput, { charLimit, stripEmptyTag }, infiniteRetry);
+        textSuccess = !!textResult?.ts;
+
+        if (textResult?.ts) {
+          saveMessageMapping(state.channelId, textResult.ts, {
+            sdkMessageId: segment.textOutput.uuid,
+            sessionId: state.sessionId,
+            type: 'assistant',
+          });
+        }
+      }
+
+      if (textSuccess) {
+        postedUuids.push(segment.textOutput.uuid);
+      }
+    }
+  }
+
+  // 3. Post/update trailing activity (for in-progress turns only)
+  // Trailing activity uses update-in-place for /watch live updates
+  const trailingActivity = getTrailingActivity(turn.segments, turnStartTime, activityEntries);
+  if (trailingActivity.length > 0) {
+    // Check if we already have a trailing activity message for this turn
+    const existingTs = activityMessages?.get(turnKey);
+    const blocks = buildLiveActivityBlocks(trailingActivity, activityLogKey, true);
+
+    let activityTs: string | undefined;
+
+    if (existingTs) {
+      // UPDATE existing message (for /watch live updates)
+      const updateResult = await updateActivitySummary(state, existingTs, blocks, infiniteRetry);
+      if (updateResult.success) {
+        activityTs = updateResult.ts;
+      } else if (updateResult.messageNotFound) {
+        console.log(`[MessageSync] Trailing activity message ${existingTs} was deleted, posting new`);
+        const postResult = await postActivitySummary(state, blocks, infiniteRetry);
+        activityTs = postResult?.ts;
+      }
+    } else {
+      // POST new message
+      const postResult = await postActivitySummary(state, blocks, infiniteRetry);
+      activityTs = postResult?.ts;
+    }
+
+    // Store the ts for next poll
+    if (activityTs) {
+      activityMessages?.set(turnKey, activityTs);
+
+      // Save activity log (unified with bot)
+      await mergeActivityLog(activityLogKey, trailingActivity);
+
+      // Track trailing activity messages as posted
+      for (const activityMsg of turn.trailingActivity) {
+        if (!alreadyPosted.has(activityMsg.uuid)) {
+          const mappingKey = `${activityTs}_${activityMsg.uuid}`;
+          saveMessageMapping(state.channelId, mappingKey, {
+            sdkMessageId: activityMsg.uuid,
+            sessionId: state.sessionId,
+            type: 'assistant',
+          });
+          postedUuids.push(activityMsg.uuid);
+        }
+      }
+    }
+  }
+
+  return { success: true, postedUuids };
+}
+
+/**
+ * Post user input message with :inbox_tray: prefix.
+ * Truncates long inputs to stay within charLimit.
+ *
+ * Skips messages that originated from Slack bot interactions (/ff should not
+ * re-post user input that's already visible in Slack from @mention).
+ */
+async function postUserInput(
   state: MessageSyncState,
   msg: SessionFileMessage,
-  activityEntries: ImportedActivityEntry[]
-): Promise<boolean> {
-  const thinkingCount = activityEntries.filter(e => e.type === 'thinking').length;
-  const toolCount = activityEntries.filter(e => e.type === 'tool_start').length;
-
-  const parts: string[] = [];
-  if (thinkingCount > 0) parts.push(`${thinkingCount} thinking`);
-  if (toolCount > 0) {
-    const toolNames = activityEntries
-      .filter(e => e.type === 'tool_start')
-      .map(e => e.tool)
-      .join(', ');
-    parts.push(`tools: ${toolNames}`);
+  infiniteRetry: boolean,
+  charLimit: number
+): Promise<{ ts: string } | null> {
+  // Skip user messages that originated from Slack bot interactions
+  // These are already visible in Slack (user typed @Claude Code ...)
+  if (isSlackOriginatedUserUuid(state.channelId, msg.uuid, state.threadTs)) {
+    console.log(`[MessageSync] Skipping Slack-originated user input: ${msg.uuid}`);
+    return { ts: 'skipped' };  // Return success so it's not treated as a failure
   }
 
-  const summaryText = `:brain: *Terminal Activity* (${parts.join(', ')})`;
+  const textContent = extractTextContent(msg);
 
-  // Use a unique key for this message's activity (for the View Log button)
-  const activityKey = `${state.conversationKey}_sync_${msg.uuid}`;
+  // Truncate long user inputs (charLimit applies to content, not prefix)
+  const truncatedContent = textContent.length > charLimit
+    ? truncateWithClosedFormatting(textContent, charLimit)
+    : textContent;
 
-  try {
-    const result = await withSlackRetry(() =>
-      state.client.chat.postMessage({
-        channel: state.channelId,
-        thread_ts: state.threadTs,
-        text: summaryText,
-        blocks: [
-          {
-            type: 'section' as const,
-            text: { type: 'mrkdwn' as const, text: summaryText },
-          },
-          {
-            type: 'actions' as const,
-            block_id: `sync_activity_${msg.uuid}`,
-            elements: [{
-              type: 'button' as const,
-              text: { type: 'plain_text' as const, text: 'View Log' },
-              action_id: `view_activity_log_${activityKey}`,
-              value: activityKey,
-            }],
-          },
-        ],
-      })
-    ) as { ts?: string };
+  const displayText = `:inbox_tray: *Terminal Input*\n${truncatedContent}`;
 
-    // Save activity entries for View Log modal
-    // Cast to ActivityEntry[] since ImportedActivityEntry is compatible
-    await saveActivityLog(activityKey, activityEntries as unknown as ActivityEntry[]);
+  const post = async () => {
+    try {
+      const result = await withSlackRetry(() =>
+        state.client.chat.postMessage({
+          channel: state.channelId,
+          thread_ts: state.threadTs,
+          text: displayText,
+        })
+      ) as { ts?: string };
 
-    // Save mapping for thread forking
-    if (result?.ts) {
-      saveMessageMapping(state.channelId, result.ts, {
-        sdkMessageId: msg.uuid,
-        sessionId: state.sessionId,
-        type: msg.type as 'user' | 'assistant',
-      });
-      console.log(`[MessageSync] Posted activity summary for ${msg.uuid}: ${parts.join(', ')}`);
-      return true;
+      return { ts: result?.ts ?? '' };
+    } catch (error) {
+      console.error(`[MessageSync] Failed to post user input:`, error);
+      return null;
     }
-    return false;
-  } catch (error) {
-    console.error(`[MessageSync] Failed to post activity summary:`, error);
-    return false;
+  };
+
+  if (infiniteRetry) {
+    return await withInfiniteRetry(post, {
+      baseDelayMs: 3000,
+      maxDelayMs: 30000,
+      onRetry: (error, attempt, delayMs) => {
+        console.log(`[MessageSync] User input ${msg.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+      },
+    });
   }
+
+  return await post();
+}
+
+/**
+ * Post activity summary with View Log and Download buttons.
+ */
+async function postActivitySummary(
+  state: MessageSyncState,
+  blocks: any[],
+  infiniteRetry: boolean
+): Promise<{ ts: string } | null> {
+  const post = async () => {
+    try {
+      const result = await withSlackRetry(() =>
+        state.client.chat.postMessage({
+          channel: state.channelId,
+          thread_ts: state.threadTs,
+          blocks,
+          text: 'Activity summary',
+        })
+      ) as { ts?: string };
+
+      return { ts: result?.ts ?? '' };
+    } catch (error) {
+      console.error(`[MessageSync] Failed to post activity summary:`, error);
+      return null;
+    }
+  };
+
+  if (infiniteRetry) {
+    return await withInfiniteRetry(post, {
+      baseDelayMs: 3000,
+      maxDelayMs: 30000,
+      onRetry: (error, attempt, delayMs) => {
+        console.log(`[MessageSync] Activity summary failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+      },
+    });
+  }
+
+  return await post();
+}
+
+/**
+ * Result of updateActivitySummary - distinguishes between success, recoverable failure, and message_not_found.
+ */
+type UpdateActivityResult =
+  | { success: true; ts: string }
+  | { success: false; messageNotFound: boolean };
+
+/**
+ * Check if an error is a Slack "message_not_found" error.
+ */
+function isMessageNotFoundError(error: unknown): boolean {
+  if (error && typeof error === 'object') {
+    const err = error as { data?: { error?: string }; message?: string };
+    return err.data?.error === 'message_not_found' ||
+           (typeof err.message === 'string' && err.message.includes('message_not_found'));
+  }
+  return false;
+}
+
+/**
+ * Update existing activity summary message (for partial turn recovery).
+ * Uses chat.update instead of chat.postMessage.
+ * Returns messageNotFound: true if the message was deleted, allowing caller to post a new one.
+ */
+async function updateActivitySummary(
+  state: MessageSyncState,
+  existingTs: string,
+  blocks: any[],
+  infiniteRetry: boolean
+): Promise<UpdateActivityResult> {
+  const update = async (): Promise<UpdateActivityResult> => {
+    try {
+      await withSlackRetry(() =>
+        state.client.chat.update({
+          channel: state.channelId,
+          ts: existingTs,
+          blocks,
+          text: 'Activity summary updated',
+        })
+      );
+      return { success: true, ts: existingTs };
+    } catch (error) {
+      const notFound = isMessageNotFoundError(error);
+      if (notFound) {
+        console.log(`[MessageSync] Activity message ${existingTs} not found, will post new message`);
+      } else {
+        console.error(`[MessageSync] Failed to update activity:`, error);
+      }
+      return { success: false, messageNotFound: notFound };
+    }
+  };
+
+  if (infiniteRetry) {
+    // For infinite retry, we should NOT retry message_not_found errors
+    // as they will never succeed. Use a custom retry that stops on message_not_found.
+    let lastResult: UpdateActivityResult = { success: false, messageNotFound: false };
+    try {
+      await withInfiniteRetry(
+        async () => {
+          lastResult = await update();
+          if (lastResult.success) {
+            return lastResult;
+          }
+          // Don't retry message_not_found - it's a permanent failure
+          if (lastResult.messageNotFound) {
+            return lastResult;
+          }
+          // Throw to trigger retry for other errors
+          throw new Error('Update failed, retrying');
+        },
+        {
+          baseDelayMs: 3000,
+          maxDelayMs: 30000,
+          onRetry: (error, attempt, delayMs) => {
+            console.log(`[MessageSync] Activity update failed (attempt ${attempt}), retrying in ${delayMs}ms`);
+          },
+        }
+      );
+    } catch {
+      // If retry exhausted or threw, return last result
+    }
+    return lastResult;
+  }
+
+  return await update();
+}
+
+/**
+ * Post text response message.
+ */
+async function postTextResponse(
+  state: MessageSyncState,
+  msg: SessionFileMessage,
+  options: { charLimit: number; stripEmptyTag?: boolean },
+  infiniteRetry: boolean
+): Promise<{ ts: string } | null> {
+  const textContent = extractTextContent(msg);
+  if (!textContent.trim()) return null;
+
+  // Truncate if needed
+  const displayText = textContent.length <= options.charLimit
+    ? textContent
+    : textContent.slice(0, options.charLimit) + '...\n\n_Response truncated. See attachments for full response._';
+
+  const post = async () => {
+    try {
+      const result = await withSlackRetry(() =>
+        state.client.chat.postMessage({
+          channel: state.channelId,
+          thread_ts: state.threadTs,
+          text: displayText,
+        })
+      ) as { ts?: string };
+
+      return { ts: result?.ts ?? '' };
+    } catch (error) {
+      console.error(`[MessageSync] Failed to post text response:`, error);
+      return null;
+    }
+  };
+
+  if (infiniteRetry) {
+    return await withInfiniteRetry(post, {
+      baseDelayMs: 3000,
+      maxDelayMs: 30000,
+      onRetry: (error, attempt, delayMs) => {
+        console.log(`[MessageSync] Text response ${msg.uuid} failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+      },
+    });
+  }
+
+  return await post();
 }

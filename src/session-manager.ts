@@ -54,6 +54,8 @@ export interface Session {
   planFilePath?: string | null;
   // UUIDs of messages synced from terminal via /ff (for resumable fast-forward)
   syncedMessageUuids?: string[];
+  // UUIDs of user messages that originated from Slack bot (to skip in /ff)
+  slackOriginatedUserUuids?: string[];
 }
 
 /**
@@ -89,6 +91,8 @@ export interface ThreadSession {
   planFilePath?: string | null;
   // UUIDs of messages synced from terminal via /ff (for resumable fast-forward)
   syncedMessageUuids?: string[];
+  // UUIDs of user messages that originated from Slack bot (to skip in /ff)
+  slackOriginatedUserUuids?: string[];
 }
 
 /**
@@ -696,6 +700,113 @@ export function clearSyncedMessageUuids(
 }
 
 // ============================================================================
+// Slack-Originated User Message Tracking
+// ============================================================================
+
+/**
+ * Add a user message UUID that originated from Slack bot interaction.
+ * Called after bot processes @mention to track that this user input came from Slack.
+ * Used by /ff to skip posting these messages (they're already in Slack).
+ *
+ * @param channelId - Slack channel ID
+ * @param uuid - User message UUID from session file
+ * @param threadTs - Thread timestamp (optional, for thread sessions)
+ */
+export function addSlackOriginatedUserUuid(
+  channelId: string,
+  uuid: string,
+  threadTs?: string
+): void {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession) {
+    console.warn(`Cannot add Slack-originated UUID: channel ${channelId} not found`);
+    return;
+  }
+
+  if (threadTs) {
+    // Thread session
+    if (!channelSession.threads?.[threadTs]) {
+      console.warn(`Cannot add Slack-originated UUID: thread ${threadTs} not found`);
+      return;
+    }
+    const existing = channelSession.threads[threadTs].slackOriginatedUserUuids ?? [];
+    if (!existing.includes(uuid)) {
+      channelSession.threads[threadTs].slackOriginatedUserUuids = [...existing, uuid];
+      saveSessions(store);
+      console.log(`[SessionManager] Added Slack-originated user UUID: ${uuid} (thread ${threadTs})`);
+    }
+  } else {
+    // Main channel session
+    const existing = channelSession.slackOriginatedUserUuids ?? [];
+    if (!existing.includes(uuid)) {
+      channelSession.slackOriginatedUserUuids = [...existing, uuid];
+      saveSessions(store);
+      console.log(`[SessionManager] Added Slack-originated user UUID: ${uuid} (channel ${channelId})`);
+    }
+  }
+}
+
+/**
+ * Check if a user message UUID originated from Slack bot interaction.
+ * Used by /ff to skip posting messages that are already in Slack.
+ *
+ * @param channelId - Slack channel ID
+ * @param uuid - User message UUID to check
+ * @param threadTs - Thread timestamp (optional, for thread sessions)
+ * @returns True if this message originated from Slack (should be skipped by /ff)
+ */
+export function isSlackOriginatedUserUuid(
+  channelId: string,
+  uuid: string,
+  threadTs?: string
+): boolean {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession) {
+    return false;
+  }
+
+  if (threadTs) {
+    const threadSession = channelSession.threads?.[threadTs];
+    return threadSession?.slackOriginatedUserUuids?.includes(uuid) ?? false;
+  }
+
+  return channelSession.slackOriginatedUserUuids?.includes(uuid) ?? false;
+}
+
+/**
+ * Clear Slack-originated user UUIDs for a channel/thread.
+ * Called when session is cleared via /clear.
+ *
+ * @param channelId - Slack channel ID
+ * @param threadTs - Thread timestamp (optional, for thread sessions)
+ */
+export function clearSlackOriginatedUserUuids(
+  channelId: string,
+  threadTs?: string
+): void {
+  const store = loadSessions();
+  const channelSession = store.channels[channelId];
+
+  if (!channelSession) {
+    return;
+  }
+
+  if (threadTs) {
+    if (channelSession.threads?.[threadTs]) {
+      channelSession.threads[threadTs].slackOriginatedUserUuids = [];
+      saveSessions(store);
+    }
+  } else {
+    channelSession.slackOriginatedUserUuids = [];
+    saveSessions(store);
+  }
+}
+
+// ============================================================================
 // Session Cleanup
 // ============================================================================
 
@@ -858,4 +969,51 @@ export async function getActivityLog(
   }
 
   return channelSession.activityLogs[conversationKey] ?? null;
+}
+
+/**
+ * Merge activity entries into existing log (append, dedupe by timestamp).
+ * Used by /watch and /ff to unify with bot's activity log.
+ *
+ * Deduplication is done by timestamp to handle:
+ * - /ff re-syncing turns that were already partially synced
+ * - /watch updating activity that was already saved
+ *
+ * @param conversationKey - The conversation key (channelId or channelId_threadTs)
+ * @param newEntries - New activity entries to merge
+ */
+export async function mergeActivityLog(
+  conversationKey: string,
+  newEntries: ActivityEntry[]
+): Promise<void> {
+  const existing = await getActivityLog(conversationKey) ?? [];
+
+  // Dedupe by timestamp (avoid duplicates when /ff re-syncs)
+  const existingTimestamps = new Set(existing.map(e => e.timestamp));
+  const uniqueNew = newEntries.filter(e => !existingTimestamps.has(e.timestamp));
+
+  // Merge and sort by timestamp
+  const merged = [...existing, ...uniqueNew].sort((a, b) => a.timestamp - b.timestamp);
+
+  // Save the merged log using the internal save function
+  const store = loadSessions();
+
+  // Extract channelId from conversationKey
+  const channelId = conversationKey.includes('_')
+    ? conversationKey.split('_')[0]
+    : conversationKey;
+
+  const channelSession = store.channels[channelId];
+  if (!channelSession) {
+    console.warn(`Cannot merge activity log - channel ${channelId} has no session`);
+    return;
+  }
+
+  // Initialize activityLogs if needed
+  if (!channelSession.activityLogs) {
+    channelSession.activityLogs = {};
+  }
+
+  channelSession.activityLogs[conversationKey] = merged;
+  saveSessions(store);
 }

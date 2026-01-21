@@ -19,11 +19,16 @@ vi.mock('../../session-reader.js', () => ({
   sessionFileExists: vi.fn(() => true),
   getFileSize: vi.fn(() => 1000),
   readNewMessages: vi.fn(() => Promise.resolve({ messages: [], newOffset: 1000 })),
-  extractTextContent: vi.fn((msg) => msg.message?.content?.[0]?.text || ''),
+  extractTextContent: vi.fn((msg) => {
+    if (typeof msg?.message?.content === 'string') return msg.message.content;
+    return msg?.message?.content?.find((b: any) => b.type === 'text')?.text || '';
+  }),
   buildActivityEntriesFromMessage: vi.fn(() => []),  // Default to no activity
+  groupMessagesByTurn: vi.fn(() => []),  // Default to empty turns
+  isTurnComplete: vi.fn((turn) => turn.trailingActivity.length === 0 && turn.segments.length > 0),
 }));
 
-// Mock session-manager (for getSession, getThreadSession, saveMessageMapping, saveActivityLog, getMessageMapUuids)
+// Mock session-manager (for getSession, getThreadSession, saveMessageMapping, mergeActivityLog, getMessageMapUuids)
 vi.mock('../../session-manager.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../session-manager.js')>();
   return {
@@ -31,8 +36,9 @@ vi.mock('../../session-manager.js', async (importOriginal) => {
     getSession: vi.fn(() => ({ threadCharLimit: 500, stripEmptyTag: false })),
     getThreadSession: vi.fn(() => null),
     saveMessageMapping: vi.fn(),
-    saveActivityLog: vi.fn(),
+    mergeActivityLog: vi.fn(),  // Now using merge instead of save
     getMessageMapUuids: vi.fn(() => new Set<string>()),  // Default to empty set (no messages posted yet)
+    isSlackOriginatedUserUuid: vi.fn(() => false),  // Default: not Slack-originated (terminal input)
   };
 });
 
@@ -51,6 +57,26 @@ vi.mock('../../retry.js', () => ({
 vi.mock('../../streaming.js', () => ({
   uploadMarkdownAndPngWithResponse: vi.fn(() => Promise.resolve({ ts: 'upload-ts' })),
   truncateWithClosedFormatting: vi.fn((text, limit) => text.substring(0, limit) + '\n\n_...truncated. Full response attached._'),
+}));
+
+// Mock session-event-stream
+vi.mock('../../session-event-stream.js', () => ({
+  readActivityLog: vi.fn(() => Promise.resolve([])),
+}));
+
+// Mock blocks
+vi.mock('../../blocks.js', () => ({
+  buildLiveActivityBlocks: vi.fn(() => [
+    { type: 'section', text: { type: 'mrkdwn', text: ':brain: *Thinking...*' } },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Log' } }] },
+  ]),
+}));
+
+// Mock fs
+vi.mock('fs', () => ({
+  existsSync: vi.fn(() => true),
+  readFileSync: vi.fn(() => JSON.stringify({ channels: {} })),
+  writeFileSync: vi.fn(),
 }));
 
 describe('terminal-watcher', () => {
@@ -313,6 +339,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello from terminal');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['123'],
+      }]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
@@ -341,6 +373,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('User input');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['123'],
+      }]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
       await vi.advanceTimersByTimeAsync(2000);
@@ -353,6 +391,13 @@ describe('terminal-watcher', () => {
     });
 
     it('should add prefix for assistant messages', async () => {
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-0',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'prompt' },
+      };
       const mockMessage = {
         type: 'assistant',
         uuid: '123',
@@ -362,10 +407,16 @@ describe('terminal-watcher', () => {
       };
 
       vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockMessage],
+        messages: [mockUserInput, mockMessage],
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Assistant response');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [], textOutput: mockMessage as any }],
+        trailingActivity: [],
+        allMessageUuids: ['user-0', '123'],
+      }]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
       await vi.advanceTimersByTimeAsync(2000);
@@ -385,40 +436,63 @@ describe('terminal-watcher', () => {
     });
 
     it('should post tool-only messages without file attachments', async () => {
-      const mockMessage = {
+      // In turn-based model, a turn starts with user input, tool-only messages are activity
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-0',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'do something' },
+      };
+      const mockToolMessage = {
         type: 'assistant',
         uuid: '123',
-        timestamp: '2024-01-01T00:00:00Z',
+        timestamp: '2024-01-01T00:00:01Z',
         sessionId: 'sess-1',
         message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Read' }] },
       };
 
       vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockMessage],
+        messages: [mockUserInput, mockToolMessage],
         newOffset: 2000,
       });
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('[Tool: Read]');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [],
+        trailingActivity: [mockToolMessage as any],
+        allMessageUuids: ['user-0', '123'],
+      }]);
+      // Need activity entries for activity summary to be posted
+      // Activity timestamp should fall within the turn's time range
+      const { readActivityLog } = await import('../../session-event-stream.js');
+      vi.mocked(readActivityLog).mockResolvedValue([
+        { type: 'tool_complete', tool: 'Read', timestamp: Date.parse('2024-01-01T00:00:01Z') } as any,
+      ]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
       await vi.advanceTimersByTimeAsync(2000);
 
-      // Should NOT use uploadMarkdownAndPngWithResponse for tool-only messages
+      // Should NOT use uploadMarkdownAndPngWithResponse for activity-only turns
       expect(streaming.uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
 
-      // Should use simple chat.postMessage instead
-      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel: 'channel-1',
-          text: expect.stringContaining('[Tool: Read]'),
-        })
-      );
+      // Activity is now posted via buildLiveActivityBlocks for in-progress turns (trailingActivity)
+      const { buildLiveActivityBlocks } = await import('../../blocks.js');
+      expect(buildLiveActivityBlocks).toHaveBeenCalled();
     });
 
     it('should post multiple tool-only messages without file attachments', async () => {
-      const mockMessage = {
+      // In turn-based model, a turn starts with user input, tool-only messages are activity
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-0',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'do something' },
+      };
+      const mockToolMessage = {
         type: 'assistant',
         uuid: '123',
-        timestamp: '2024-01-01T00:00:00Z',
+        timestamp: '2024-01-01T00:00:01Z',
         sessionId: 'sess-1',
         message: { role: 'assistant', content: [
           { type: 'tool_use', name: 'Read' },
@@ -427,30 +501,47 @@ describe('terminal-watcher', () => {
       };
 
       vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockMessage],
+        messages: [mockUserInput, mockToolMessage],
         newOffset: 2000,
       });
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('[Tool: Read]\n[Tool: Write]');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [],
+        trailingActivity: [mockToolMessage as any],
+        allMessageUuids: ['user-0', '123'],
+      }]);
+      // Need activity entries for activity summary to be posted
+      // Activity timestamps should fall within the turn's time range
+      const { readActivityLog } = await import('../../session-event-stream.js');
+      vi.mocked(readActivityLog).mockResolvedValue([
+        { type: 'tool_complete', tool: 'Read', timestamp: Date.parse('2024-01-01T00:00:01Z') } as any,
+        { type: 'tool_complete', tool: 'Write', timestamp: Date.parse('2024-01-01T00:00:01Z') + 1 } as any,
+      ]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
       await vi.advanceTimersByTimeAsync(2000);
 
-      // Should NOT use uploadMarkdownAndPngWithResponse for tool-only messages
+      // Should NOT use uploadMarkdownAndPngWithResponse for activity-only turns
       expect(streaming.uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
 
-      // Should use simple chat.postMessage
-      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: expect.stringContaining('[Tool: Read]'),
-        })
-      );
+      // Activity is now posted via buildLiveActivityBlocks for in-progress turns (trailingActivity)
+      const { buildLiveActivityBlocks } = await import('../../blocks.js');
+      expect(buildLiveActivityBlocks).toHaveBeenCalled();
     });
 
     it('should still use file attachments for mixed content (text + tools)', async () => {
-      const mockMessage = {
+      // In turn-based model, text response gets file attachments
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-0',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'do something' },
+      };
+      const mockTextMessage = {
         type: 'assistant',
         uuid: '123',
-        timestamp: '2024-01-01T00:00:00Z',
+        timestamp: '2024-01-01T00:00:01Z',
         sessionId: 'sess-1',
         message: { role: 'assistant', content: [
           { type: 'text', text: 'Here is the file:' },
@@ -459,15 +550,21 @@ describe('terminal-watcher', () => {
       };
 
       vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockMessage],
+        messages: [mockUserInput, mockTextMessage],
         newOffset: 2000,
       });
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Here is the file:\n[Tool: Read]');
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Here is the file:');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [], textOutput: mockTextMessage as any }],
+        trailingActivity: [],
+        allMessageUuids: ['user-0', '123'],
+      }]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
       await vi.advanceTimersByTimeAsync(2000);
 
-      // Should use uploadMarkdownAndPngWithResponse for mixed content
+      // Should use uploadMarkdownAndPngWithResponse for text output
       expect(streaming.uploadMarkdownAndPngWithResponse).toHaveBeenCalled();
     });
 
@@ -486,6 +583,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue(longText);
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['123'],
+      }]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
@@ -517,6 +620,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello from terminal');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['123'],
+      }]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
@@ -544,6 +653,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello from terminal');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['123'],
+      }]);
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
@@ -583,6 +698,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['123'],
+      }]);
 
       // Track postMessage calls and return different ts based on call content
       let callCount = 0;
@@ -632,27 +753,28 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['123'],
+      }]);
 
       const sessionWithRate = { ...mockSession, updateRateSeconds: 5 };
       startWatching('channel-1', undefined, sessionWithRate, mockClient, 'status-ts');
 
       await vi.advanceTimersByTimeAsync(5000);
 
-      // Should include rate in watching text
-      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          blocks: expect.arrayContaining([
-            expect.objectContaining({
-              type: 'context',
-              elements: expect.arrayContaining([
-                expect.objectContaining({
-                  text: expect.stringContaining('Updates every 5s'),
-                }),
-              ]),
-            }),
-          ]),
-        })
-      );
+      // Should include rate in watching text (may not be the first postMessage call due to activity messages)
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const statusCall = postCalls.find((call: any[]) => {
+        const arg = call[0] as any;
+        return arg.blocks?.some((block: any) =>
+          block.type === 'context' &&
+          block.elements?.some((el: any) => el.text?.includes('Updates every 5s'))
+        );
+      });
+      expect(statusCall).toBeDefined();
     });
 
     it('should handle delete error gracefully and still post new status', async () => {
@@ -669,6 +791,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['123'],
+      }]);
 
       // Simulate delete error (message already deleted)
       mockClient.chat.delete.mockRejectedValue(new Error('message_not_found'));
@@ -765,6 +893,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['already-posted-123'],
+      }]);
 
       // Mock that this message is already posted
       vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(
@@ -846,6 +980,12 @@ describe('terminal-watcher', () => {
         newOffset: 2000,
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['no-double-post-123'],
+      }]);
 
       // Track message map state
       let messageMapUuids = new Set<string>();
@@ -876,6 +1016,8 @@ describe('terminal-watcher', () => {
     });
 
     it('should not re-process empty messages on subsequent polls (prevents infinite loop)', async () => {
+      // In turn-based model, empty user messages don't form turns and are simply ignored
+      // This prevents infinite loops because there's nothing to post or track
       const emptyMessage = {
         type: 'user',
         uuid: 'empty-msg-uuid',
@@ -891,8 +1033,10 @@ describe('terminal-watcher', () => {
       });
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('');
       vi.mocked(sessionReader.buildActivityEntriesFromMessage).mockReturnValue([]);
+      // Empty messages don't form turns (isUserTextInput returns false for empty arrays)
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([]);
 
-      // Track messageMap state to simulate the deduplication
+      // Track messageMap state
       let messageMapUuids = new Set<string>();
       vi.mocked(sessionManager.getMessageMapUuids).mockImplementation(() => messageMapUuids);
       vi.mocked(sessionManager.saveMessageMapping).mockImplementation((channelId, ts, mapping) => {
@@ -903,27 +1047,30 @@ describe('terminal-watcher', () => {
 
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
-      // First poll - should record empty message in messageMap
+      // First poll - no turns formed, nothing to post
       await vi.advanceTimersByTimeAsync(2000);
 
-      // saveMessageMapping should have been called with the empty message key
-      expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
-        'channel-1',
-        expect.stringContaining('empty-msg-uuid'),
-        expect.objectContaining({ sdkMessageId: 'empty-msg-uuid' })
+      // Second poll - same message returned, still no turns, no action
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // In turn-based model, empty messages that don't form turns
+      // are not posted and not tracked - this is fine because:
+      // 1. No posting means no rate limit issues
+      // 2. No tracking means low memory overhead
+      // 3. No infinite loop because we're not stuck trying to post anything
+
+      // Verify no content messages were posted (only status messages if any)
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const contentPosts = postCalls.filter(
+        call => (call[0] as any).text?.includes('Terminal')
       );
+      expect(contentPosts.length).toBe(0);
 
-      const callCountAfterFirstPoll = (sessionManager.saveMessageMapping as any).mock.calls.length;
-
-      // Second poll - message should be filtered out (in messageMap now)
-      await vi.advanceTimersByTimeAsync(2000);
-
-      // saveMessageMapping should NOT be called again for the same message
-      // (may be called for status message move, but not for the content message)
+      // saveMessageMapping should NOT be called for empty messages that don't form turns
       const emptyMsgCalls = (sessionManager.saveMessageMapping as any).mock.calls.filter(
         (call: any[]) => call[2]?.sdkMessageId === 'empty-msg-uuid'
       );
-      expect(emptyMsgCalls.length).toBe(1); // Only once, not multiple times
+      expect(emptyMsgCalls.length).toBe(0);
     });
   });
 });

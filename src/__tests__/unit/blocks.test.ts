@@ -20,9 +20,8 @@ import {
   buildForkAnchorBlocks,
   buildStatusPanelBlocks,
   buildActivityLogText,
-  buildCollapsedActivityBlocks,
   buildCombinedStatusBlocks,
-  buildCombinedCompletionBlocks,
+  buildLiveActivityBlocks,
   buildActivityLogModalView,
   getToolEmoji,
   formatToolName,
@@ -2211,93 +2210,52 @@ describe('blocks', () => {
     });
   });
 
-  describe('buildCollapsedActivityBlocks', () => {
-    const conversationKey = 'C123_thread456';
-
-    it('should show only duration when no thinking or tools', () => {
-      const blocks = buildCollapsedActivityBlocks(0, 0, 5000, conversationKey);
-
-      const sectionText = (blocks[0] as any).text.text;
-      expect(sectionText).toContain('Completed in 5.0s');
-      expect(sectionText).not.toContain('thinking');
-      expect(sectionText).not.toContain('tool');
-    });
-
-    it('should show only thinking count when no tools', () => {
-      const blocks = buildCollapsedActivityBlocks(3, 0, 5000, conversationKey);
-
-      const sectionText = (blocks[0] as any).text.text;
-      expect(sectionText).toContain('3 thinking blocks');
-      expect(sectionText).not.toContain('tool');
-    });
-
-    it('should use singular for 1 thinking block', () => {
-      const blocks = buildCollapsedActivityBlocks(1, 0, 5000, conversationKey);
-
-      const sectionText = (blocks[0] as any).text.text;
-      expect(sectionText).toContain('1 thinking block');
-      expect(sectionText).not.toContain('blocks');
-    });
-
-    it('should show only tools count when no thinking', () => {
-      const blocks = buildCollapsedActivityBlocks(0, 5, 5000, conversationKey);
-
-      const sectionText = (blocks[0] as any).text.text;
-      expect(sectionText).toContain('5 tools completed');
-      expect(sectionText).not.toContain('thinking');
-    });
-
-    it('should use singular for 1 tool', () => {
-      const blocks = buildCollapsedActivityBlocks(0, 1, 5000, conversationKey);
-
-      const sectionText = (blocks[0] as any).text.text;
-      expect(sectionText).toContain('1 tool completed');
-      expect(sectionText).not.toContain('tools');
-    });
-
-    it('should show both thinking and tools when present', () => {
-      const blocks = buildCollapsedActivityBlocks(2, 4, 8000, conversationKey);
-
-      const sectionText = (blocks[0] as any).text.text;
-      expect(sectionText).toContain('2 thinking');
-      expect(sectionText).toContain('4 tools');
-      expect(sectionText).toContain('8.0s');
-    });
+  describe('buildLiveActivityBlocks', () => {
+    const activityKey = 'C123_thread456_seg0';
 
     it('should include View Log button', () => {
-      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey);
+      const entries: ActivityEntry[] = [{
+        timestamp: Date.now(),
+        type: 'thinking',
+        thinkingContent: 'test thinking',
+      }];
+      const blocks = buildLiveActivityBlocks(entries, activityKey);
 
       expect(blocks[1].type).toBe('actions');
       const buttons = (blocks[1] as any).elements;
       const viewLogButton = buttons.find((b: any) => b.text.text === 'View Log');
       expect(viewLogButton).toBeDefined();
       expect(viewLogButton.action_id).toContain('view_activity_log_');
-      expect(viewLogButton.value).toBe(conversationKey);
+      expect(viewLogButton.value).toBe(activityKey);
     });
 
     it('should include Download button', () => {
-      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey);
+      const entries: ActivityEntry[] = [{
+        timestamp: Date.now(),
+        type: 'thinking',
+        thinkingContent: 'test thinking',
+      }];
+      const blocks = buildLiveActivityBlocks(entries, activityKey);
 
       const buttons = (blocks[1] as any).elements;
       const downloadButton = buttons.find((b: any) => b.text.text === 'Download .txt');
       expect(downloadButton).toBeDefined();
       expect(downloadButton.action_id).toContain('download_activity_log_');
-      expect(downloadButton.value).toBe(conversationKey);
+      expect(downloadButton.value).toBe(activityKey);
     });
 
-    it('should include clipboard emoji', () => {
-      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey);
+    it('should show activity text in section', () => {
+      const entries: ActivityEntry[] = [{
+        timestamp: Date.now(),
+        type: 'tool_complete',
+        tool: 'Read',
+        durationMs: 1500,
+      }];
+      const blocks = buildLiveActivityBlocks(entries, activityKey);
 
+      expect(blocks[0].type).toBe('section');
       const sectionText = (blocks[0] as any).text.text;
-      expect(sectionText).toContain(':clipboard:');
-    });
-
-    it('should NOT include Fork here button (Fork here is now on response message)', () => {
-      const blocks = buildCollapsedActivityBlocks(1, 1, 5000, conversationKey);
-
-      const buttons = (blocks[1] as any).elements;
-      const forkButton = buttons.find((b: any) => b.text.text === 'Fork here');
-      expect(forkButton).toBeUndefined();
+      expect(sectionText).toContain('Read');
     });
   });
 
@@ -2797,7 +2755,7 @@ describe('blocks', () => {
 
     it('should respect ACTIVITY_LOG_MAX_CHARS constant', () => {
       // Verify the constant is exported and has expected value
-      expect(ACTIVITY_LOG_MAX_CHARS).toBe(2000);
+      expect(ACTIVITY_LOG_MAX_CHARS).toBe(1000);
     });
   });
 
@@ -2891,107 +2849,4 @@ describe('blocks', () => {
     });
   });
 
-  describe('buildCombinedCompletionBlocks', () => {
-    const baseParams = {
-      status: 'complete' as const,
-      mode: 'bypassPermissions' as const,
-      toolsCompleted: 5,
-      elapsedMs: 10000,
-      conversationKey: 'C123_thread456',
-    };
-
-    it('should return collapsed summary + divider + completion status', () => {
-      const blocks = buildCombinedCompletionBlocks({
-        ...baseParams,
-        thinkingBlockCount: 2,
-        durationMs: 10000,
-      });
-
-      // Should have collapsed activity blocks + divider + status panel blocks
-      expect(blocks.length).toBeGreaterThanOrEqual(4);
-      // First block should be collapsed summary
-      expect(blocks[0].type).toBe('section');
-      expect((blocks[0] as any).text.text).toContain(':clipboard:');
-      // Should have divider
-      expect(blocks.some(b => b.type === 'divider')).toBe(true);
-    });
-
-    it('should not include abort button on completion', () => {
-      const blocks = buildCombinedCompletionBlocks({
-        ...baseParams,
-        thinkingBlockCount: 1,
-        durationMs: 5000,
-      });
-
-      // Find all action blocks
-      const actionBlocks = blocks.filter(b => b.type === 'actions');
-      // Should have actions block for View Log/Download
-      expect(actionBlocks.length).toBeGreaterThan(0);
-      // But none should have abort button
-      for (const block of actionBlocks) {
-        const elements = (block as any).elements || [];
-        const abortButton = elements.find((e: any) => e.action_id?.startsWith('abort_'));
-        expect(abortButton).toBeUndefined();
-      }
-    });
-
-    it('should include View Log and Download buttons', () => {
-      const blocks = buildCombinedCompletionBlocks({
-        ...baseParams,
-        thinkingBlockCount: 1,
-        durationMs: 5000,
-      });
-
-      const actionsBlock = blocks.find(b =>
-        b.type === 'actions' && (b as any).elements?.some((e: any) =>
-          e.action_id?.includes('view_activity_log_')
-        )
-      );
-      expect(actionsBlock).toBeDefined();
-
-      const elements = (actionsBlock as any).elements;
-      const viewLogButton = elements.find((e: any) => e.action_id?.includes('view_activity_log_'));
-      const downloadButton = elements.find((e: any) => e.action_id?.includes('download_activity_log_'));
-
-      expect(viewLogButton).toBeDefined();
-      expect(viewLogButton.text.text).toBe('View Log');
-      expect(downloadButton).toBeDefined();
-      expect(downloadButton.text.text).toBe('Download .txt');
-    });
-
-    it('should show thinking + tools summary in collapsed block', () => {
-      const blocks = buildCombinedCompletionBlocks({
-        ...baseParams,
-        thinkingBlockCount: 3,
-        durationMs: 15000,
-      });
-
-      const summaryText = (blocks[0] as any).text.text;
-      expect(summaryText).toContain('3 thinking');
-      expect(summaryText).toContain('5 tool');
-      expect(summaryText).toContain('15.0s');
-    });
-
-    it('should show completion stats in status panel', () => {
-      const blocks = buildCombinedCompletionBlocks({
-        ...baseParams,
-        thinkingBlockCount: 1,
-        durationMs: 5000,
-        inputTokens: 1000,
-        outputTokens: 500,
-        contextPercent: 25,
-        costUsd: 0.05,
-      });
-
-      // Find context block with stats
-      const statsBlock = blocks.find(b =>
-        b.type === 'context' && (b as any).elements?.[0]?.text?.includes('in / ')
-      );
-      expect(statsBlock).toBeDefined();
-      expect((statsBlock as any).elements[0].text).toContain('1,000 in');
-      expect((statsBlock as any).elements[0].text).toContain('500 out');
-      expect((statsBlock as any).elements[0].text).toContain('25% ctx');
-      expect((statsBlock as any).elements[0].text).toContain('$0.0500');
-    });
-  });
 });

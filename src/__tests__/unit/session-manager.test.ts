@@ -18,6 +18,9 @@ import {
   getSyncedMessageUuids,
   addSyncedMessageUuid,
   clearSyncedMessageUuids,
+  addSlackOriginatedUserUuid,
+  isSlackOriginatedUserUuid,
+  clearSlackOriginatedUserUuids,
 } from '../../session-manager.js';
 import type { Session, ThreadSession, SlackMessageMapping, ActivityEntry } from '../../session-manager.js';
 
@@ -2614,6 +2617,347 @@ describe('session-manager', () => {
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
         clearSyncedMessageUuids('C999');
+
+        expect(fs.writeFileSync).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  // ============================================================================
+  // Slack-Originated User Message Tracking
+  // ============================================================================
+
+  describe('Slack-Originated User UUIDs', () => {
+    describe('addSlackOriginatedUserUuid', () => {
+      it('should add UUID to main channel session', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'sess-1',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        addSlackOriginatedUserUuid('C123', 'uuid-from-slack');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        expect(writtenData.channels['C123'].slackOriginatedUserUuids).toEqual(['uuid-from-slack']);
+      });
+
+      it('should append to existing UUIDs without duplicates', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'sess-1',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              slackOriginatedUserUuids: ['uuid-1'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        addSlackOriginatedUserUuid('C123', 'uuid-2');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        expect(writtenData.channels['C123'].slackOriginatedUserUuids).toEqual(['uuid-1', 'uuid-2']);
+      });
+
+      it('should not add duplicate UUID', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'sess-1',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              slackOriginatedUserUuids: ['uuid-1'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        addSlackOriginatedUserUuid('C123', 'uuid-1');
+
+        // Should not write since UUID already exists
+        expect(fs.writeFileSync).not.toHaveBeenCalled();
+      });
+
+      it('should add UUID to thread session', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              threads: {
+                'thread123': {
+                  sessionId: 'thread-session',
+                  forkedFrom: 'main-session',
+                  workingDir: '/test',
+                  mode: 'plan' as const,
+                  createdAt: Date.now(),
+                  lastActiveAt: Date.now(),
+                  pathConfigured: true,
+                  configuredPath: '/test',
+                  configuredBy: 'U123',
+                  configuredAt: Date.now(),
+                },
+              },
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        addSlackOriginatedUserUuid('C123', 'thread-uuid', 'thread123');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        expect(writtenData.channels['C123'].threads['thread123'].slackOriginatedUserUuids).toEqual(['thread-uuid']);
+      });
+
+      it('should not save if channel not found', () => {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
+
+        addSlackOriginatedUserUuid('C999', 'uuid-1');
+
+        expect(fs.writeFileSync).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('isSlackOriginatedUserUuid', () => {
+      it('should return true for Slack-originated UUID in main channel', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'sess-1',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              slackOriginatedUserUuids: ['uuid-from-slack', 'another-uuid'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        expect(isSlackOriginatedUserUuid('C123', 'uuid-from-slack')).toBe(true);
+        expect(isSlackOriginatedUserUuid('C123', 'another-uuid')).toBe(true);
+      });
+
+      it('should return false for terminal-originated UUID', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'sess-1',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              slackOriginatedUserUuids: ['uuid-from-slack'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        expect(isSlackOriginatedUserUuid('C123', 'uuid-from-terminal')).toBe(false);
+      });
+
+      it('should return true for Slack-originated UUID in thread', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              threads: {
+                'thread123': {
+                  sessionId: 'thread-session',
+                  forkedFrom: 'main-session',
+                  workingDir: '/test',
+                  mode: 'plan' as const,
+                  createdAt: Date.now(),
+                  lastActiveAt: Date.now(),
+                  pathConfigured: true,
+                  configuredPath: '/test',
+                  configuredBy: 'U123',
+                  configuredAt: Date.now(),
+                  slackOriginatedUserUuids: ['thread-slack-uuid'],
+                },
+              },
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        expect(isSlackOriginatedUserUuid('C123', 'thread-slack-uuid', 'thread123')).toBe(true);
+        expect(isSlackOriginatedUserUuid('C123', 'other-uuid', 'thread123')).toBe(false);
+      });
+
+      it('should return false if channel not found', () => {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
+
+        expect(isSlackOriginatedUserUuid('C999', 'any-uuid')).toBe(false);
+      });
+
+      it('should return false if slackOriginatedUserUuids is undefined', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'sess-1',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              // No slackOriginatedUserUuids field
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        expect(isSlackOriginatedUserUuid('C123', 'any-uuid')).toBe(false);
+      });
+    });
+
+    describe('clearSlackOriginatedUserUuids', () => {
+      it('should clear UUIDs from main channel', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'sess-1',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              slackOriginatedUserUuids: ['uuid-1', 'uuid-2'],
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        clearSlackOriginatedUserUuids('C123');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        expect(writtenData.channels['C123'].slackOriginatedUserUuids).toEqual([]);
+      });
+
+      it('should clear UUIDs from thread without affecting main channel', () => {
+        const mockStore = {
+          channels: {
+            'C123': {
+              sessionId: 'main-session',
+              workingDir: '/test',
+              mode: 'plan' as const,
+              createdAt: Date.now(),
+              lastActiveAt: Date.now(),
+              pathConfigured: true,
+              configuredPath: '/test',
+              configuredBy: 'U123',
+              configuredAt: Date.now(),
+              slackOriginatedUserUuids: ['main-uuid'],
+              threads: {
+                'thread123': {
+                  sessionId: 'thread-session',
+                  forkedFrom: 'main-session',
+                  workingDir: '/test',
+                  mode: 'plan' as const,
+                  createdAt: Date.now(),
+                  lastActiveAt: Date.now(),
+                  pathConfigured: true,
+                  configuredPath: '/test',
+                  configuredBy: 'U123',
+                  configuredAt: Date.now(),
+                  slackOriginatedUserUuids: ['thread-uuid-1', 'thread-uuid-2'],
+                },
+              },
+            },
+          },
+        };
+
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+        clearSlackOriginatedUserUuids('C123', 'thread123');
+
+        const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
+        // Thread UUIDs should be cleared
+        expect(writtenData.channels['C123'].threads['thread123'].slackOriginatedUserUuids).toEqual([]);
+        // Main channel UUIDs should be preserved
+        expect(writtenData.channels['C123'].slackOriginatedUserUuids).toEqual(['main-uuid']);
+      });
+
+      it('should do nothing if channel not found', () => {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
+
+        clearSlackOriginatedUserUuids('C999');
 
         expect(fs.writeFileSync).not.toHaveBeenCalled();
       });

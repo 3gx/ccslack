@@ -297,6 +297,128 @@ export function readLastUserMessageUuid(sessionFilePath: string): string | null 
   return null;
 }
 
+// ============================================================================
+// Turn Grouping for /ff Fidelity
+// ============================================================================
+
+/**
+ * A segment represents one activity→output pair within a turn.
+ * Multiple text outputs in one turn create multiple segments.
+ */
+export interface TurnSegment {
+  activityMessages: SessionFileMessage[];  // Activity before this text output
+  textOutput: SessionFileMessage;          // Text that closes this segment
+}
+
+/**
+ * A turn represents one user input and all associated Claude responses.
+ * Used by /ff to post messages in the same pattern as the bot.
+ * Supports multiple text outputs per turn (think → text → think → tools → text).
+ */
+export interface Turn {
+  userInput: SessionFileMessage;           // User message that started turn
+  segments: TurnSegment[];                 // Completed activity→output pairs
+  trailingActivity: SessionFileMessage[];  // Activity after last text (in-progress)
+  allMessageUuids: string[];               // ALL UUIDs in this turn (for deduplication)
+}
+
+/**
+ * Check if turn is complete (no trailing activity - all segments closed).
+ * In-progress turns have trailingActivity (activity after last text).
+ */
+export function isTurnComplete(turn: Turn): boolean {
+  return turn.trailingActivity.length === 0 && turn.segments.length > 0;
+}
+
+/**
+ * Check if user message content is actual user input (not tool_result).
+ * User input: string content OR array with 'text' blocks
+ * Tool result: array with 'tool_result' blocks
+ */
+function isUserTextInput(content: string | ContentBlock[]): boolean {
+  if (typeof content === 'string') return true;
+  if (Array.isArray(content) && content.length > 0) {
+    return content[0].type === 'text';
+  }
+  return false;
+}
+
+/**
+ * Check if assistant message contains only activity (thinking/tools, no text).
+ */
+function isActivityOnlyMessage(msg: SessionFileMessage): boolean {
+  const content = msg.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.every(b => b.type === 'thinking' || b.type === 'tool_use');
+}
+
+/**
+ * Check if assistant message contains text output.
+ */
+function hasTextOutput(msg: SessionFileMessage): boolean {
+  const content = msg.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(b => b.type === 'text' && b.text);
+}
+
+/**
+ * Group messages into turns for turn-based posting.
+ * A new turn starts at each user text input (not tool_result).
+ * When text output is seen, a segment closes and a new one starts.
+ *
+ * @param messages - Array of session file messages
+ * @returns Array of turns with chronological segments
+ */
+export function groupMessagesByTurn(messages: SessionFileMessage[]): Turn[] {
+  const turns: Turn[] = [];
+  let currentTurn: Turn | null = null;
+  let currentSegmentActivity: SessionFileMessage[] = [];
+
+  for (const msg of messages) {
+    if (msg.type === 'user' && msg.message?.content) {
+      if (isUserTextInput(msg.message.content)) {
+        // New turn starts - save previous turn if exists
+        if (currentTurn) {
+          // Move any remaining activity to trailingActivity
+          currentTurn.trailingActivity = currentSegmentActivity;
+          turns.push(currentTurn);
+        }
+        currentTurn = {
+          userInput: msg,
+          segments: [],
+          trailingActivity: [],
+          allMessageUuids: [msg.uuid],
+        };
+        currentSegmentActivity = [];
+      }
+      // tool_result messages don't start new turn - they're part of current turn
+    } else if (msg.type === 'assistant' && currentTurn) {
+      currentTurn.allMessageUuids.push(msg.uuid);
+
+      if (isActivityOnlyMessage(msg)) {
+        // Activity-only message - add to current segment's activity
+        currentSegmentActivity.push(msg);
+      } else if (hasTextOutput(msg)) {
+        // Text output closes current segment
+        currentTurn.segments.push({
+          activityMessages: currentSegmentActivity,
+          textOutput: msg,
+        });
+        currentSegmentActivity = []; // Start fresh for next segment
+      }
+    }
+  }
+
+  // Don't forget the last turn
+  if (currentTurn) {
+    // Move any remaining activity to trailingActivity
+    currentTurn.trailingActivity = currentSegmentActivity;
+    turns.push(currentTurn);
+  }
+
+  return turns;
+}
+
 export function buildActivityEntriesFromMessage(msg: SessionFileMessage): ImportedActivityEntry[] {
   const entries: ImportedActivityEntry[] = [];
   const timestamp = new Date(msg.timestamp).getTime();

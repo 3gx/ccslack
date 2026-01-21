@@ -1243,7 +1243,7 @@ const THINKING_TRUNCATE_LENGTH = 500;
 const MAX_LIVE_ENTRIES = 300;
 const ROLLING_WINDOW_SIZE = 20;
 const MODAL_PAGE_SIZE = 15;
-export const ACTIVITY_LOG_MAX_CHARS = 2000; // 1000 char headroom from 3000 char block limit
+export const ACTIVITY_LOG_MAX_CHARS = 1000; // Reduced from 2000 for cleaner display
 
 /**
  * Parameters for status panel blocks.
@@ -1557,38 +1557,6 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
   return blocks;
 }
 
-/**
- * Parameters for combined completion blocks.
- */
-export interface CombinedCompletionParams extends StatusPanelParams {
-  thinkingBlockCount: number;
-  durationMs: number;
-}
-
-/**
- * Build combined completion blocks (collapsed activity summary + status panel).
- * Shows summary with View Log/Download buttons + completion stats.
- */
-export function buildCombinedCompletionBlocks(params: CombinedCompletionParams): Block[] {
-  const { thinkingBlockCount, durationMs, ...statusParams } = params;
-  const blocks: Block[] = [];
-
-  // 1. Collapsed activity summary with View Log / Download buttons
-  blocks.push(...buildCollapsedActivityBlocks(
-    thinkingBlockCount,
-    statusParams.toolsCompleted,
-    durationMs,
-    statusParams.conversationKey
-  ));
-
-  // 2. Divider
-  blocks.push({ type: 'divider' });
-
-  // 3. Status panel completion
-  blocks.push(...buildStatusPanelBlocks(statusParams));
-
-  return blocks;
-}
 
 /**
  * Build activity log text for live display (during processing).
@@ -1715,55 +1683,45 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
   return result;
 }
 
+
 /**
- * Build collapsed activity summary blocks for completion.
- * Shows summary with View Log and Download buttons.
+ * Build blocks for LIVE activity display (during processing).
+ * Shows rolling activity with thinking previews, tool durations, etc.
+ * Used by /watch and /ff for in-progress turns AND completed turns.
+ * Always includes View Log and Download buttons.
  */
-export function buildCollapsedActivityBlocks(
-  thinkingBlockCount: number,
-  toolsCompleted: number,
-  durationMs: number,
-  conversationKey: string
+export function buildLiveActivityBlocks(
+  activityEntries: ActivityEntry[],
+  activityKey: string,
+  inProgress: boolean = true
 ): Block[] {
-  const durationSec = (durationMs / 1000).toFixed(1);
-
-  // Build summary text based on what happened
-  let summaryText: string;
-  if (toolsCompleted === 0 && thinkingBlockCount === 0) {
-    summaryText = `:clipboard: Completed in ${durationSec}s`;
-  } else if (toolsCompleted === 0) {
-    summaryText = `:clipboard: ${thinkingBlockCount} thinking block${thinkingBlockCount > 1 ? 's' : ''} in ${durationSec}s`;
-  } else if (thinkingBlockCount === 0) {
-    summaryText = `:clipboard: ${toolsCompleted} tool${toolsCompleted > 1 ? 's' : ''} completed in ${durationSec}s`;
-  } else {
-    summaryText = `:clipboard: ${thinkingBlockCount} thinking + ${toolsCompleted} tool${toolsCompleted > 1 ? 's' : ''} in ${durationSec}s`;
-  }
-
-  // Build button elements
-  const buttonElements: any[] = [
-    {
-      type: 'button',
-      text: { type: 'plain_text', text: 'View Log' },
-      action_id: `view_activity_log_${conversationKey}`,
-      value: conversationKey,
-    },
-    {
-      type: 'button',
-      text: { type: 'plain_text', text: 'Download .txt' },
-      action_id: `download_activity_log_${conversationKey}`,
-      value: conversationKey,
-    },
-  ];
+  const activityText = buildActivityLogText(activityEntries, inProgress, ACTIVITY_LOG_MAX_CHARS);
 
   return [
     {
       type: 'section',
-      text: { type: 'mrkdwn', text: summaryText },
+      text: {
+        type: 'mrkdwn',
+        text: activityText,
+      },
     },
     {
       type: 'actions',
-      block_id: `activity_actions_${conversationKey}`,
-      elements: buttonElements,
+      block_id: `activity_actions_${activityKey}`,
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'View Log' },
+          action_id: `view_activity_log_${activityKey}`,
+          value: activityKey,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Download .txt' },
+          action_id: `download_activity_log_${activityKey}`,
+          value: activityKey,
+        },
+      ],
     },
   ];
 }

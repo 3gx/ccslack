@@ -1,6 +1,8 @@
 import puppeteer, { Browser } from 'puppeteer';
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
+import ins from 'markdown-it-ins';
+import mark from 'markdown-it-mark';
 
 // Syntax highlighting function for code blocks
 function highlightCode(code: string, lang: string): string {
@@ -19,13 +21,15 @@ function highlightCode(code: string, lang: string): string {
     .replace(/"/g, '&quot;');
 }
 
-// Configure markdown-it with syntax highlighting
+// Configure markdown-it with syntax highlighting and plugins
 const md: MarkdownIt = new MarkdownIt({
   html: false,
   linkify: true,
   typographer: true,
   highlight: highlightCode,
-});
+})
+  .use(ins)
+  .use(mark);
 
 // HTML template with embedded CSS
 const HTML_TEMPLATE = `<!DOCTYPE html>
@@ -89,18 +93,33 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     li { margin: 4px 0; }
     hr { border: none; height: 1px; background: #d0d7de; margin: 24px 0; }
     a { color: #0969da; text-decoration: none; }
-    strong { font-weight: 600; }
+    /* Text decorations */
+    strong { font-weight: 700; }
     em { font-style: italic; }
-    /* Syntax highlighting */
-    .hljs-comment { color: #6a737d; }
-    .hljs-string { color: #032f62; }
+    s, del { text-decoration: line-through; color: #6a737d; }
+    ins { text-decoration: underline; }
+    mark { background: #fff3b0; padding: 1px 4px; border-radius: 2px; }
+    /* Syntax highlighting - CLI-like colors */
+    .hljs-comment { color: #6a737d; font-style: italic; }
+    .hljs-string { color: #22863a; }
     .hljs-number { color: #005cc5; }
     .hljs-literal { color: #005cc5; }
-    .hljs-keyword { color: #d73a49; }
+    .hljs-keyword { color: #d73a49; font-weight: 600; }
     .hljs-function { color: #6f42c1; }
     .hljs-title { color: #6f42c1; }
     .hljs-attr { color: #005cc5; }
-    .hljs-built_in { color: #005cc5; }
+    .hljs-built_in { color: #e36209; }
+    .hljs-params { color: #24292e; }
+    .hljs-variable { color: #e36209; }
+    .hljs-operator { color: #d73a49; }
+    .hljs-punctuation { color: #24292e; }
+    .hljs-property { color: #005cc5; }
+    .hljs-regexp { color: #22863a; }
+    .hljs-selector-tag { color: #22863a; }
+    .hljs-selector-class { color: #6f42c1; }
+    .hljs-tag { color: #22863a; }
+    .hljs-name { color: #22863a; }
+    .hljs-attribute { color: #005cc5; }
   </style>
 </head>
 <body>
