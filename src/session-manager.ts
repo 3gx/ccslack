@@ -2,6 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import * as crypto from 'crypto';
+import { Mutex } from 'async-mutex';
+
+/**
+ * Mutex for serializing access to sessions.json file.
+ * Prevents race conditions when multiple concurrent operations
+ * try to read-modify-write the file simultaneously.
+ */
+const sessionsMutex = new Mutex();
 
 /**
  * SDK Permission Mode type - matches @anthropic-ai/claude-agent-sdk.
@@ -222,34 +230,36 @@ export function getSession(channelId: string): Session | null {
   return store.channels[channelId] || null;
 }
 
-export function saveSession(channelId: string, session: Partial<Session>): void {
-  const store = loadSessions();
-  const existing = store.channels[channelId];
+export async function saveSession(channelId: string, session: Partial<Session>): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const existing = store.channels[channelId];
 
-  store.channels[channelId] = {
-    sessionId: existing?.sessionId ?? null,
-    previousSessionIds: existing?.previousSessionIds ?? [],  // Preserve previous session history
-    workingDir: existing?.workingDir ?? process.cwd(),
-    mode: existing?.mode ?? 'default',
-    model: existing?.model,  // Preserve selected model
-    createdAt: existing?.createdAt ?? Date.now(),
-    lastActiveAt: Date.now(),
-    pathConfigured: existing?.pathConfigured ?? false,
-    configuredPath: existing?.configuredPath ?? null,
-    configuredBy: existing?.configuredBy ?? null,
-    configuredAt: existing?.configuredAt ?? null,
-    lastUsage: existing?.lastUsage,  // Preserve usage data for /status and /context
-    maxThinkingTokens: existing?.maxThinkingTokens,  // Preserve thinking token config
-    updateRateSeconds: existing?.updateRateSeconds,  // Preserve update rate config
-    threadCharLimit: existing?.threadCharLimit,  // Preserve thread char limit config
-    stripEmptyTag: existing?.stripEmptyTag,  // Preserve strip empty tag config
-    planFilePath: existing?.planFilePath,  // Preserve plan file path for plan mode
-    threads: existing?.threads,  // Preserve existing threads
-    messageMap: existing?.messageMap,  // Preserve message mappings for point-in-time forking
-    activityLogs: existing?.activityLogs,  // Preserve activity logs for View Log modal
-    ...session,
-  };
-  saveSessions(store);
+    store.channels[channelId] = {
+      sessionId: existing?.sessionId ?? null,
+      previousSessionIds: existing?.previousSessionIds ?? [],  // Preserve previous session history
+      workingDir: existing?.workingDir ?? process.cwd(),
+      mode: existing?.mode ?? 'default',
+      model: existing?.model,  // Preserve selected model
+      createdAt: existing?.createdAt ?? Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: existing?.pathConfigured ?? false,
+      configuredPath: existing?.configuredPath ?? null,
+      configuredBy: existing?.configuredBy ?? null,
+      configuredAt: existing?.configuredAt ?? null,
+      lastUsage: existing?.lastUsage,  // Preserve usage data for /status and /context
+      maxThinkingTokens: existing?.maxThinkingTokens,  // Preserve thinking token config
+      updateRateSeconds: existing?.updateRateSeconds,  // Preserve update rate config
+      threadCharLimit: existing?.threadCharLimit,  // Preserve thread char limit config
+      stripEmptyTag: existing?.stripEmptyTag,  // Preserve strip empty tag config
+      planFilePath: existing?.planFilePath,  // Preserve plan file path for plan mode
+      threads: existing?.threads,  // Preserve existing threads
+      messageMap: existing?.messageMap,  // Preserve message mappings for point-in-time forking
+      activityLogs: existing?.activityLogs,  // Preserve activity logs for View Log modal
+      ...session,
+    };
+    saveSessions(store);
+  });
 }
 
 // ============================================================================
@@ -274,62 +284,64 @@ export function getThreadSession(
 /**
  * Save a thread session.
  */
-export function saveThreadSession(
+export async function saveThreadSession(
   channelId: string,
   threadTs: string,
   session: Partial<ThreadSession>
-): void {
-  const store = loadSessions();
-  const channel = store.channels[channelId];
+): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const channel = store.channels[channelId];
 
-  if (!channel) {
-    // No main session exists - create a minimal one
-    store.channels[channelId] = {
-      sessionId: null,
-      workingDir: process.cwd(),
-      mode: 'default',
-      createdAt: Date.now(),
+    if (!channel) {
+      // No main session exists - create a minimal one
+      store.channels[channelId] = {
+        sessionId: null,
+        workingDir: process.cwd(),
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: false,
+        configuredPath: null,
+        configuredBy: null,
+        configuredAt: null,
+        threads: {},
+      };
+    }
+
+    if (!store.channels[channelId].threads) {
+      store.channels[channelId].threads = {};
+    }
+
+    const existingThread = store.channels[channelId].threads![threadTs];
+
+    store.channels[channelId].threads![threadTs] = {
+      sessionId: existingThread?.sessionId ?? null,
+      forkedFrom: existingThread?.forkedFrom ?? null,
+      workingDir: existingThread?.workingDir ?? store.channels[channelId].workingDir,
+      mode: existingThread?.mode ?? store.channels[channelId].mode,
+      model: existingThread?.model ?? store.channels[channelId].model,  // Inherit model from channel
+      createdAt: existingThread?.createdAt ?? Date.now(),
       lastActiveAt: Date.now(),
-      pathConfigured: false,
-      configuredPath: null,
-      configuredBy: null,
-      configuredAt: null,
-      threads: {},
+      // INHERIT path configuration from channel
+      pathConfigured: existingThread?.pathConfigured ?? store.channels[channelId].pathConfigured,
+      configuredPath: existingThread?.configuredPath ?? store.channels[channelId].configuredPath,
+      configuredBy: existingThread?.configuredBy ?? store.channels[channelId].configuredBy,
+      configuredAt: existingThread?.configuredAt ?? store.channels[channelId].configuredAt,
+      lastUsage: existingThread?.lastUsage,  // Preserve usage data for /status and /context
+      // Inherit thinking token config from channel
+      maxThinkingTokens: existingThread?.maxThinkingTokens ?? store.channels[channelId].maxThinkingTokens,
+      // Inherit thread char limit config from channel
+      threadCharLimit: existingThread?.threadCharLimit ?? store.channels[channelId].threadCharLimit,
+      // Inherit strip empty tag config from channel
+      stripEmptyTag: existingThread?.stripEmptyTag ?? store.channels[channelId].stripEmptyTag,
+      // NOT inherited - each thread has its own plan file path
+      planFilePath: existingThread?.planFilePath,
+      ...session,
     };
-  }
 
-  if (!store.channels[channelId].threads) {
-    store.channels[channelId].threads = {};
-  }
-
-  const existingThread = store.channels[channelId].threads![threadTs];
-
-  store.channels[channelId].threads![threadTs] = {
-    sessionId: existingThread?.sessionId ?? null,
-    forkedFrom: existingThread?.forkedFrom ?? null,
-    workingDir: existingThread?.workingDir ?? store.channels[channelId].workingDir,
-    mode: existingThread?.mode ?? store.channels[channelId].mode,
-    model: existingThread?.model ?? store.channels[channelId].model,  // Inherit model from channel
-    createdAt: existingThread?.createdAt ?? Date.now(),
-    lastActiveAt: Date.now(),
-    // INHERIT path configuration from channel
-    pathConfigured: existingThread?.pathConfigured ?? store.channels[channelId].pathConfigured,
-    configuredPath: existingThread?.configuredPath ?? store.channels[channelId].configuredPath,
-    configuredBy: existingThread?.configuredBy ?? store.channels[channelId].configuredBy,
-    configuredAt: existingThread?.configuredAt ?? store.channels[channelId].configuredAt,
-    lastUsage: existingThread?.lastUsage,  // Preserve usage data for /status and /context
-    // Inherit thinking token config from channel
-    maxThinkingTokens: existingThread?.maxThinkingTokens ?? store.channels[channelId].maxThinkingTokens,
-    // Inherit thread char limit config from channel
-    threadCharLimit: existingThread?.threadCharLimit ?? store.channels[channelId].threadCharLimit,
-    // Inherit strip empty tag config from channel
-    stripEmptyTag: existingThread?.stripEmptyTag ?? store.channels[channelId].stripEmptyTag,
-    // NOT inherited - each thread has its own plan file path
-    planFilePath: existingThread?.planFilePath,
-    ...session,
-  };
-
-  saveSessions(store);
+    saveSessions(store);
+  });
 }
 
 /**
@@ -349,11 +361,11 @@ export interface ThreadSessionResult {
  * @param threadTs - Slack thread timestamp
  * @param forkPoint - Fork point info from findForkPointMessageId (messageId + sessionId)
  */
-export function getOrCreateThreadSession(
+export async function getOrCreateThreadSession(
   channelId: string,
   threadTs: string,
   forkPoint?: ForkPointResult | null
-): ThreadSessionResult {
+): Promise<ThreadSessionResult> {
   const existing = getThreadSession(channelId, threadTs);
 
   if (existing) {
@@ -397,7 +409,7 @@ export function getOrCreateThreadSession(
   };
 
   // Save the new thread session
-  saveThreadSession(channelId, threadTs, newThreadSession);
+  await saveThreadSession(channelId, threadTs, newThreadSession);
 
   return {
     session: newThreadSession,
@@ -414,26 +426,28 @@ export function getOrCreateThreadSession(
  * Used for point-in-time thread forking - maps Slack message timestamps
  * to SDK message IDs so threads can fork from a specific point in history.
  */
-export function saveMessageMapping(
+export async function saveMessageMapping(
   channelId: string,
   slackTs: string,
   mapping: SlackMessageMapping
-): void {
-  const store = loadSessions();
-  const channelSession = store.channels[channelId];
+): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const channelSession = store.channels[channelId];
 
-  if (!channelSession) {
-    console.warn(`Cannot save message mapping - channel ${channelId} has no session`);
-    return;
-  }
+    if (!channelSession) {
+      console.warn(`Cannot save message mapping - channel ${channelId} has no session`);
+      return;
+    }
 
-  // Initialize messageMap if needed
-  if (!channelSession.messageMap) {
-    channelSession.messageMap = {};
-  }
+    // Initialize messageMap if needed
+    if (!channelSession.messageMap) {
+      channelSession.messageMap = {};
+    }
 
-  channelSession.messageMap[slackTs] = mapping;
-  saveSessions(store);
+    channelSession.messageMap[slackTs] = mapping;
+    saveSessions(store);
+  });
 }
 
 /**
@@ -641,38 +655,40 @@ export function getSyncedMessageUuids(
  * @param uuid - Message UUID from session file
  * @param threadTs - Thread timestamp (optional, for thread sessions)
  */
-export function addSyncedMessageUuid(
+export async function addSyncedMessageUuid(
   channelId: string,
   uuid: string,
   threadTs?: string
-): void {
-  const store = loadSessions();
-  const channelSession = store.channels[channelId];
+): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const channelSession = store.channels[channelId];
 
-  if (!channelSession) {
-    console.warn(`Cannot add synced UUID: channel ${channelId} not found`);
-    return;
-  }
-
-  if (threadTs) {
-    // Thread session
-    if (!channelSession.threads?.[threadTs]) {
-      console.warn(`Cannot add synced UUID: thread ${threadTs} not found`);
+    if (!channelSession) {
+      console.warn(`Cannot add synced UUID: channel ${channelId} not found`);
       return;
     }
-    const existing = channelSession.threads[threadTs].syncedMessageUuids ?? [];
-    if (!existing.includes(uuid)) {
-      channelSession.threads[threadTs].syncedMessageUuids = [...existing, uuid];
-      saveSessions(store);
+
+    if (threadTs) {
+      // Thread session
+      if (!channelSession.threads?.[threadTs]) {
+        console.warn(`Cannot add synced UUID: thread ${threadTs} not found`);
+        return;
+      }
+      const existing = channelSession.threads[threadTs].syncedMessageUuids ?? [];
+      if (!existing.includes(uuid)) {
+        channelSession.threads[threadTs].syncedMessageUuids = [...existing, uuid];
+        saveSessions(store);
+      }
+    } else {
+      // Main channel session
+      const existing = channelSession.syncedMessageUuids ?? [];
+      if (!existing.includes(uuid)) {
+        channelSession.syncedMessageUuids = [...existing, uuid];
+        saveSessions(store);
+      }
     }
-  } else {
-    // Main channel session
-    const existing = channelSession.syncedMessageUuids ?? [];
-    if (!existing.includes(uuid)) {
-      channelSession.syncedMessageUuids = [...existing, uuid];
-      saveSessions(store);
-    }
-  }
+  });
 }
 
 /**
@@ -682,26 +698,28 @@ export function addSyncedMessageUuid(
  * @param channelId - Slack channel ID
  * @param threadTs - Thread timestamp (optional, for thread sessions)
  */
-export function clearSyncedMessageUuids(
+export async function clearSyncedMessageUuids(
   channelId: string,
   threadTs?: string
-): void {
-  const store = loadSessions();
-  const channelSession = store.channels[channelId];
+): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const channelSession = store.channels[channelId];
 
-  if (!channelSession) {
-    return;
-  }
+    if (!channelSession) {
+      return;
+    }
 
-  if (threadTs) {
-    if (channelSession.threads?.[threadTs]) {
-      channelSession.threads[threadTs].syncedMessageUuids = [];
+    if (threadTs) {
+      if (channelSession.threads?.[threadTs]) {
+        channelSession.threads[threadTs].syncedMessageUuids = [];
+        saveSessions(store);
+      }
+    } else {
+      channelSession.syncedMessageUuids = [];
       saveSessions(store);
     }
-  } else {
-    channelSession.syncedMessageUuids = [];
-    saveSessions(store);
-  }
+  });
 }
 
 // ============================================================================
@@ -713,44 +731,66 @@ export function clearSyncedMessageUuids(
  * Called after bot processes @mention to track that this user input came from Slack.
  * Used by /ff to skip posting these messages (they're already in Slack).
  *
+ * If tracking for a thread that doesn't exist yet, creates a minimal thread entry.
+ * This handles the case where the first message to a thread is being tracked
+ * before the thread session is fully created.
+ *
  * @param channelId - Slack channel ID
  * @param uuid - User message UUID from session file
  * @param threadTs - Thread timestamp (optional, for thread sessions)
  */
-export function addSlackOriginatedUserUuid(
+export async function addSlackOriginatedUserUuid(
   channelId: string,
   uuid: string,
   threadTs?: string
-): void {
-  const store = loadSessions();
-  const channelSession = store.channels[channelId];
+): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const channelSession = store.channels[channelId];
 
-  if (!channelSession) {
-    console.warn(`Cannot add Slack-originated UUID: channel ${channelId} not found`);
-    return;
-  }
-
-  if (threadTs) {
-    // Thread session
-    if (!channelSession.threads?.[threadTs]) {
-      console.warn(`Cannot add Slack-originated UUID: thread ${threadTs} not found`);
+    if (!channelSession) {
+      console.warn(`Cannot add Slack-originated UUID: channel ${channelId} not found`);
       return;
     }
-    const existing = channelSession.threads[threadTs].slackOriginatedUserUuids ?? [];
-    if (!existing.includes(uuid)) {
-      channelSession.threads[threadTs].slackOriginatedUserUuids = [...existing, uuid];
-      saveSessions(store);
-      console.log(`[SessionManager] Added Slack-originated user UUID: ${uuid} (thread ${threadTs})`);
+
+    if (threadTs) {
+      // Thread session - create if doesn't exist (Fix for Issue 3)
+      if (!channelSession.threads) {
+        channelSession.threads = {};
+      }
+      if (!channelSession.threads[threadTs]) {
+        // Create minimal thread entry for UUID tracking
+        // This enables tracking even before formal thread session creation
+        channelSession.threads[threadTs] = {
+          sessionId: null,
+          forkedFrom: null,
+          workingDir: channelSession.workingDir,
+          mode: channelSession.mode,
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+          pathConfigured: channelSession.pathConfigured,
+          configuredPath: channelSession.configuredPath,
+          configuredBy: channelSession.configuredBy,
+          configuredAt: channelSession.configuredAt,
+        } as ThreadSession;
+        console.log(`[SessionManager] Created minimal thread entry for UUID tracking: ${threadTs}`);
+      }
+      const existing = channelSession.threads[threadTs].slackOriginatedUserUuids ?? [];
+      if (!existing.includes(uuid)) {
+        channelSession.threads[threadTs].slackOriginatedUserUuids = [...existing, uuid];
+        saveSessions(store);
+        console.log(`[SessionManager] Added Slack-originated user UUID: ${uuid} (thread ${threadTs})`);
+      }
+    } else {
+      // Main channel session
+      const existing = channelSession.slackOriginatedUserUuids ?? [];
+      if (!existing.includes(uuid)) {
+        channelSession.slackOriginatedUserUuids = [...existing, uuid];
+        saveSessions(store);
+        console.log(`[SessionManager] Added Slack-originated user UUID: ${uuid} (channel ${channelId})`);
+      }
     }
-  } else {
-    // Main channel session
-    const existing = channelSession.slackOriginatedUserUuids ?? [];
-    if (!existing.includes(uuid)) {
-      channelSession.slackOriginatedUserUuids = [...existing, uuid];
-      saveSessions(store);
-      console.log(`[SessionManager] Added Slack-originated user UUID: ${uuid} (channel ${channelId})`);
-    }
-  }
+  });
 }
 
 /**
@@ -789,26 +829,28 @@ export function isSlackOriginatedUserUuid(
  * @param channelId - Slack channel ID
  * @param threadTs - Thread timestamp (optional, for thread sessions)
  */
-export function clearSlackOriginatedUserUuids(
+export async function clearSlackOriginatedUserUuids(
   channelId: string,
   threadTs?: string
-): void {
-  const store = loadSessions();
-  const channelSession = store.channels[channelId];
+): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const channelSession = store.channels[channelId];
 
-  if (!channelSession) {
-    return;
-  }
+    if (!channelSession) {
+      return;
+    }
 
-  if (threadTs) {
-    if (channelSession.threads?.[threadTs]) {
-      channelSession.threads[threadTs].slackOriginatedUserUuids = [];
+    if (threadTs) {
+      if (channelSession.threads?.[threadTs]) {
+        channelSession.threads[threadTs].slackOriginatedUserUuids = [];
+        saveSessions(store);
+      }
+    } else {
+      channelSession.slackOriginatedUserUuids = [];
       saveSessions(store);
     }
-  } else {
-    channelSession.slackOriginatedUserUuids = [];
-    saveSessions(store);
-  }
+  });
 }
 
 // ============================================================================
@@ -855,69 +897,71 @@ function deleteSdkSessionFile(sessionId: string, workingDir: string): void {
  *
  * @param channelId - Slack channel ID (e.g., "C0123456789")
  */
-export function deleteSession(channelId: string): void {
-  const store = loadSessions();
-  const channelSession = store.channels[channelId];
+export async function deleteSession(channelId: string): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const channelSession = store.channels[channelId];
 
-  if (!channelSession) {
-    console.log(`No session found for channel ${channelId}`);
-    return;
-  }
+    if (!channelSession) {
+      console.log(`No session found for channel ${channelId}`);
+      return;
+    }
 
-  console.log(`Deleting sessions for channel ${channelId}...`);
+    console.log(`Deleting sessions for channel ${channelId}...`);
 
-  // Count sessions for logging
-  const threadCount = channelSession.threads
-    ? Object.keys(channelSession.threads).length
-    : 0;
-  const previousCount = channelSession.previousSessionIds?.length ?? 0;
-  const totalSessions = 1 + previousCount + threadCount; // main + previous + threads
+    // Count sessions for logging
+    const threadCount = channelSession.threads
+      ? Object.keys(channelSession.threads).length
+      : 0;
+    const previousCount = channelSession.previousSessionIds?.length ?? 0;
+    const totalSessions = 1 + previousCount + threadCount; // main + previous + threads
 
-  console.log(`  Found ${totalSessions} session(s) to delete:`);
-  console.log(`    - 1 main session`);
-  if (previousCount > 0) {
-    console.log(`    - ${previousCount} previous session(s) (from /clear operations)`);
-  }
-  if (threadCount > 0) {
-    console.log(`    - ${threadCount} thread session(s)`);
-  }
+    console.log(`  Found ${totalSessions} session(s) to delete:`);
+    console.log(`    - 1 main session`);
+    if (previousCount > 0) {
+      console.log(`    - ${previousCount} previous session(s) (from /clear operations)`);
+    }
+    if (threadCount > 0) {
+      console.log(`    - ${threadCount} thread session(s)`);
+    }
 
-  // Delete main session SDK file
-  if (channelSession.sessionId) {
-    console.log(`  Deleting main session: ${channelSession.sessionId}`);
-    deleteSdkSessionFile(channelSession.sessionId, channelSession.workingDir);
-  }
+    // Delete main session SDK file
+    if (channelSession.sessionId) {
+      console.log(`  Deleting main session: ${channelSession.sessionId}`);
+      deleteSdkSessionFile(channelSession.sessionId, channelSession.workingDir);
+    }
 
-  // Delete all previous session SDK files (from /clear operations)
-  if (channelSession.previousSessionIds && channelSession.previousSessionIds.length > 0) {
-    console.log(`  Deleting ${channelSession.previousSessionIds.length} previous session(s)...`);
-    for (const prevId of channelSession.previousSessionIds) {
-      if (prevId) {
-        console.log(`    Previous: ${prevId}`);
-        deleteSdkSessionFile(prevId, channelSession.workingDir);
+    // Delete all previous session SDK files (from /clear operations)
+    if (channelSession.previousSessionIds && channelSession.previousSessionIds.length > 0) {
+      console.log(`  Deleting ${channelSession.previousSessionIds.length} previous session(s)...`);
+      for (const prevId of channelSession.previousSessionIds) {
+        if (prevId) {
+          console.log(`    Previous: ${prevId}`);
+          deleteSdkSessionFile(prevId, channelSession.workingDir);
+        }
       }
     }
-  }
 
-  // Delete all thread session SDK files
-  if (channelSession.threads) {
-    const threadEntries = Object.entries(channelSession.threads);
-    console.log(`  Deleting ${threadEntries.length} thread session(s)...`);
+    // Delete all thread session SDK files
+    if (channelSession.threads) {
+      const threadEntries = Object.entries(channelSession.threads);
+      console.log(`  Deleting ${threadEntries.length} thread session(s)...`);
 
-    threadEntries.forEach(([threadTs, threadSession]) => {
-      if (threadSession.sessionId) {
-        console.log(`    Thread ${threadTs}: ${threadSession.sessionId}`);
-        deleteSdkSessionFile(threadSession.sessionId, channelSession.workingDir);
-      }
-    });
-  }
+      threadEntries.forEach(([threadTs, threadSession]) => {
+        if (threadSession.sessionId) {
+          console.log(`    Thread ${threadTs}: ${threadSession.sessionId}`);
+          deleteSdkSessionFile(threadSession.sessionId, channelSession.workingDir);
+        }
+      });
+    }
 
-  // Delete from sessions.json
-  delete store.channels[channelId];
-  saveSessions(store);
-  console.log(`  ✓ Removed channel ${channelId} from sessions.json`);
+    // Delete from sessions.json
+    delete store.channels[channelId];
+    saveSessions(store);
+    console.log(`  ✓ Removed channel ${channelId} from sessions.json`);
 
-  console.log(`✅ Cleanup complete for channel ${channelId}`);
+    console.log(`✅ Cleanup complete for channel ${channelId}`);
+  });
 }
 
 // ============================================================================
@@ -932,26 +976,28 @@ export async function saveActivityLog(
   conversationKey: string,
   entries: ActivityEntry[]
 ): Promise<void> {
-  const store = loadSessions();
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
 
-  // Extract channelId from conversationKey
-  const channelId = conversationKey.includes('_')
-    ? conversationKey.split('_')[0]
-    : conversationKey;
+    // Extract channelId from conversationKey
+    const channelId = conversationKey.includes('_')
+      ? conversationKey.split('_')[0]
+      : conversationKey;
 
-  const channelSession = store.channels[channelId];
-  if (!channelSession) {
-    console.warn(`Cannot save activity log - channel ${channelId} has no session`);
-    return;
-  }
+    const channelSession = store.channels[channelId];
+    if (!channelSession) {
+      console.warn(`Cannot save activity log - channel ${channelId} has no session`);
+      return;
+    }
 
-  // Initialize activityLogs if needed
-  if (!channelSession.activityLogs) {
-    channelSession.activityLogs = {};
-  }
+    // Initialize activityLogs if needed
+    if (!channelSession.activityLogs) {
+      channelSession.activityLogs = {};
+    }
 
-  channelSession.activityLogs[conversationKey] = entries;
-  saveSessions(store);
+    channelSession.activityLogs[conversationKey] = entries;
+    saveSessions(store);
+  });
 }
 
 /**
@@ -991,36 +1037,38 @@ export async function mergeActivityLog(
   conversationKey: string,
   newEntries: ActivityEntry[]
 ): Promise<void> {
-  const existing = await getActivityLog(conversationKey) ?? [];
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
 
-  // Dedupe by timestamp (avoid duplicates when /ff re-syncs)
-  const existingTimestamps = new Set(existing.map(e => e.timestamp));
-  const uniqueNew = newEntries.filter(e => !existingTimestamps.has(e.timestamp));
+    // Extract channelId from conversationKey
+    const channelId = conversationKey.includes('_')
+      ? conversationKey.split('_')[0]
+      : conversationKey;
 
-  // Merge and sort by timestamp
-  const merged = [...existing, ...uniqueNew].sort((a, b) => a.timestamp - b.timestamp);
+    const channelSession = store.channels[channelId];
+    if (!channelSession) {
+      console.warn(`Cannot merge activity log - channel ${channelId} has no session`);
+      return;
+    }
 
-  // Save the merged log using the internal save function
-  const store = loadSessions();
+    // Get existing from within the mutex (avoid separate read)
+    const existing = channelSession.activityLogs?.[conversationKey] ?? [];
 
-  // Extract channelId from conversationKey
-  const channelId = conversationKey.includes('_')
-    ? conversationKey.split('_')[0]
-    : conversationKey;
+    // Dedupe by timestamp (avoid duplicates when /ff re-syncs)
+    const existingTimestamps = new Set(existing.map(e => e.timestamp));
+    const uniqueNew = newEntries.filter(e => !existingTimestamps.has(e.timestamp));
 
-  const channelSession = store.channels[channelId];
-  if (!channelSession) {
-    console.warn(`Cannot merge activity log - channel ${channelId} has no session`);
-    return;
-  }
+    // Merge and sort by timestamp
+    const merged = [...existing, ...uniqueNew].sort((a, b) => a.timestamp - b.timestamp);
 
-  // Initialize activityLogs if needed
-  if (!channelSession.activityLogs) {
-    channelSession.activityLogs = {};
-  }
+    // Initialize activityLogs if needed
+    if (!channelSession.activityLogs) {
+      channelSession.activityLogs = {};
+    }
 
-  channelSession.activityLogs[conversationKey] = merged;
-  saveSessions(store);
+    channelSession.activityLogs[conversationKey] = merged;
+    saveSessions(store);
+  });
 }
 
 // ============================================================================

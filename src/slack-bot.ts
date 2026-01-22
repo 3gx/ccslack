@@ -47,6 +47,7 @@ import {
   buildStatusDisplayBlocks,
   buildSdkQuestionBlocks,
   buildAnsweredBlocks,
+  buildStopWatchingButton,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -547,7 +548,7 @@ async function runCompactSession(
   } else if (compactBoundaryFound) {
     // Success - update session with new ID if changed
     if (newSessionId && newSessionId !== session.sessionId) {
-      saveSession(channelId, { sessionId: newSessionId });
+      await saveSession(channelId, { sessionId: newSessionId });
       console.log(`[Compact] Session updated: ${session.sessionId} → ${newSessionId}`);
     }
 
@@ -744,7 +745,7 @@ async function runClearSession(
       previousIds.push(session.sessionId);
     }
 
-    saveSession(channelId, {
+    await saveSession(channelId, {
       sessionId: null,  // Next message will start fresh without resuming
       previousSessionIds: previousIds,
       lastUsage: undefined,  // Clear stale usage data so /status and /context show fresh state
@@ -756,7 +757,7 @@ async function runClearSession(
     onSessionCleared(channelId, threadTs);
 
     // Clear synced message UUIDs (for /ff resumability)
-    clearSyncedMessageUuids(channelId, threadTs);
+    await clearSyncedMessageUuids(channelId, threadTs);
 
     // Clear segment activity logs (for View Log isolation)
     clearSegmentActivityLogs(channelId, threadTs);
@@ -1036,17 +1037,7 @@ async function handleFastForwardSync(
               text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
             }],
           },
-          {
-            type: 'actions',
-            block_id: `terminal_watch_${sessionId}`,
-            elements: [{
-              type: 'button',
-              text: { type: 'plain_text', text: '🛑 Stop Watching', emoji: true },
-              action_id: 'stop_terminal_watch',
-              style: 'danger',
-              value: JSON.stringify({ sessionId }),
-            }],
-          },
+          buildStopWatchingButton(sessionId),
         ],
       });
       startWatching(channelId, threadTs, effectiveSession as Session, client, watchStatusMsg.ts as string, userId);
@@ -1123,16 +1114,7 @@ async function handleFastForwardSync(
             text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
           }],
         },
-        {
-          type: 'actions',
-          block_id: `terminal_watch_${sessionId}`,
-          elements: [{
-            type: 'button',
-            text: { type: 'plain_text', text: 'Stop Watching' },
-            action_id: 'stop_terminal_watch',
-            value: JSON.stringify({ sessionId }),
-          }],
-        },
+        buildStopWatchingButton(sessionId),
       ],
     });
 
@@ -1206,7 +1188,7 @@ async function createForkFromMessage(params: {
   const newThreadTs = (anchorMessage as { ts?: string }).ts!;
 
   // 6. Create forked thread session with point-in-time fork data
-  saveThreadSession(channelId, newThreadTs, {
+  await saveThreadSession(channelId, newThreadTs, {
     sessionId: null,  // Will be set when SDK creates the forked session
     forkedFrom: sourceSessionId,
     forkedFromThreadTs: sourceThreadTs,
@@ -1568,7 +1550,7 @@ app.event('channel_deleted', async ({ event }) => {
     console.log(`${'='.repeat(60)}`);
 
     // Delete session (handles both bot records and SDK files)
-    deleteSession(event.channel);
+    await deleteSession(event.channel);
 
     // Clear segment activity logs for the entire channel
     clearSegmentActivityLogs(event.channel);
@@ -1795,7 +1777,7 @@ async function handleMessage(params: {
     // Thread message - use or create forked session
     // Pass forkPoint so getOrCreateThreadSession uses the CORRECT session (from the message)
     // not the current main session (which may be null after /clear)
-    const threadResult = getOrCreateThreadSession(channelId, threadTs, forkPoint);
+    const threadResult = await getOrCreateThreadSession(channelId, threadTs, forkPoint);
     session = {
       sessionId: threadResult.session.sessionId,
       workingDir: threadResult.session.workingDir,
@@ -1852,7 +1834,7 @@ async function handleMessage(params: {
         configuredAt: null,
         planFilePath: null,
       };
-      saveSession(channelId, mainSession);
+      await saveSession(channelId, mainSession);
     }
     session = mainSession;
   }
@@ -1952,7 +1934,7 @@ async function handleMessage(params: {
       if (commandResult.sessionUpdate.pathConfigured) {
         commandResult.sessionUpdate.configuredBy = userId ?? null;
       }
-      saveSession(channelId, commandResult.sessionUpdate);
+      await saveSession(channelId, commandResult.sessionUpdate);
 
       // Live update: If a query is running, update its processingState and SDK settings immediately
       // This allows config commands to take effect without waiting for next query
@@ -2115,7 +2097,7 @@ async function handleMessage(params: {
       });
 
       // Clear invalid model from session
-      saveSession(channelId, { model: undefined });
+      await saveSession(channelId, { model: undefined });
 
       // Remove eyes reaction
       if (originalTs) {
@@ -2166,7 +2148,7 @@ async function handleMessage(params: {
   // NOTE: sessionId may be null here (new session or after /clear) - that's fine
   // because user messages are placeholders and we use assistant messages for forking
   if (originalTs && session.sessionId) {
-    saveMessageMapping(channelId, originalTs, {
+    await saveMessageMapping(channelId, originalTs, {
       sdkMessageId: `user_${originalTs}`,  // Placeholder - user messages don't have SDK IDs
       sessionId: session.sessionId,
       type: 'user',
@@ -2744,10 +2726,10 @@ async function handleMessage(params: {
         // saved so subsequent messages can RESUME instead of trying to fork again
         if (newSessionId) {
           if (threadTs) {
-            saveThreadSession(channelId, threadTs, { sessionId: newSessionId });
+            await saveThreadSession(channelId, threadTs, { sessionId: newSessionId });
             console.log(`[Init] Saved thread session ID: ${newSessionId}`);
           } else {
-            saveSession(channelId, { sessionId: newSessionId });
+            await saveSession(channelId, { sessionId: newSessionId });
             console.log(`[Init] Saved main session ID: ${newSessionId}`);
           }
         }
@@ -2910,9 +2892,9 @@ async function handleMessage(params: {
                 processingState.planFilePath = planPath;
                 // Persist to session for cross-turn access
                 if (threadTs) {
-                  saveThreadSession(channelId, threadTs, { planFilePath: planPath });
+                  await saveThreadSession(channelId, threadTs, { planFilePath: planPath });
                 } else {
-                  saveSession(channelId, { planFilePath: planPath });
+                  await saveSession(channelId, { planFilePath: planPath });
                 }
                 console.log('[PlanFile] Detected and persisted plan file:', planPath);
               }
@@ -3085,10 +3067,10 @@ async function handleMessage(params: {
           model: processingState.model,
         };
         if (threadTs) {
-          saveThreadSession(channelId, threadTs, { lastUsage });
+          await saveThreadSession(channelId, threadTs, { lastUsage });
           console.log(`[Usage] Saved thread lastUsage: ${lastUsage.inputTokens + lastUsage.cacheReadInputTokens}/${lastUsage.contextWindow} tokens (${Math.round((lastUsage.inputTokens + lastUsage.cacheReadInputTokens) / lastUsage.contextWindow * 100)}%)`);
         } else {
-          saveSession(channelId, { lastUsage });
+          await saveSession(channelId, { lastUsage });
           console.log(`[Usage] Saved lastUsage: ${lastUsage.inputTokens + lastUsage.cacheReadInputTokens}/${lastUsage.contextWindow} tokens (${Math.round((lastUsage.inputTokens + lastUsage.cacheReadInputTokens) / lastUsage.contextWindow * 100)}%)`);
         }
       }
@@ -3111,22 +3093,25 @@ async function handleMessage(params: {
         const sessionFilePath = getSessionFilePath(newSessionId, session.workingDir);
         const userUuid = readLastUserMessageUuid(sessionFilePath);
         if (userUuid) {
-          saveMessageMapping(channelId, originalTs, {
+          await saveMessageMapping(channelId, originalTs, {
             sdkMessageId: userUuid,
             sessionId: newSessionId,
             type: 'user',
           });
           // Track as Slack-originated so /ff skips it (message already visible in Slack)
-          addSlackOriginatedUserUuid(channelId, userUuid, threadTs);
+          await addSlackOriginatedUserUuid(channelId, userUuid, threadTs);
           console.log(`[Mapping] Saved user message UUID: ${userUuid}`);
         } else {
           // Fallback to placeholder if file read fails
-          saveMessageMapping(channelId, originalTs, {
-            sdkMessageId: `user_${originalTs}`,
+          const placeholderUuid = `user_${originalTs}`;
+          await saveMessageMapping(channelId, originalTs, {
+            sdkMessageId: placeholderUuid,
             sessionId: newSessionId,
             type: 'user',
           });
-          console.log(`[Mapping] Saved user message placeholder (file read failed): user_${originalTs}`);
+          // FIX: Also track as Slack-originated so /ff skips it (message already visible in Slack)
+          await addSlackOriginatedUserUuid(channelId, placeholderUuid, threadTs);
+          console.log(`[Mapping] Saved user message placeholder (file read failed): ${placeholderUuid}`);
         }
       }
 
@@ -3144,7 +3129,7 @@ async function handleMessage(params: {
           console.log(`[Mapping] Saving placeholders for ${unmappedUuids.length} unmapped UUIDs (${mappedAssistantUuids.size} already mapped)`);
           for (const uuid of unmappedUuids) {
             const placeholderTs = `_slack_${uuid}`;
-            saveMessageMapping(channelId, placeholderTs, {
+            await saveMessageMapping(channelId, placeholderTs, {
               sdkMessageId: uuid,
               sessionId: newSessionId!,
               type: 'assistant',
@@ -3592,7 +3577,7 @@ app.action(/^mode_(plan|default|bypassPermissions|acceptEdits)$/, async ({ actio
 
   if (channelId) {
     // Update session with new mode
-    saveSession(channelId, { mode });
+    await saveSession(channelId, { mode });
 
     // Live update: If a query is running, update SDK mode immediately
     const conversationKey = getConversationKey(channelId, bodyWithChannel.message?.thread_ts);
@@ -3669,7 +3654,7 @@ app.action(/^model_select_(.+)$/, async ({ action, ack, body, client }) => {
   const displayName = modelInfo?.displayName || modelId;
 
   // Save to session
-  saveSession(channelId, { model: modelId });
+  await saveSession(channelId, { model: modelId });
 
   // Update message to confirm
   if (bodyWithChannel.message?.ts) {
@@ -3740,7 +3725,7 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
   const planFilePath = activeQuery?.processingState?.planFilePath;
 
   // Clear session (set sessionId to null) and set bypass mode
-  saveSession(channelId, { sessionId: null, mode: 'bypassPermissions' });
+  await saveSession(channelId, { sessionId: null, mode: 'bypassPermissions' });
 
   const bodyWithChannel = body as any;
   await handleMessage({
@@ -3770,7 +3755,7 @@ app.action(/^plan_accept_edits_(.+)$/, async ({ action, ack, body, client }) => 
   await updateApprovalMessage(body, client, '✅ Proceeding with accept-edits mode...');
 
   // Set acceptEdits mode
-  saveSession(channelId, { mode: 'acceptEdits' });
+  await saveSession(channelId, { mode: 'acceptEdits' });
 
   const bodyWithChannel = body as any;
   await handleMessage({
@@ -3798,7 +3783,7 @@ app.action(/^plan_bypass_(.+)$/, async ({ action, ack, body, client }) => {
   await updateApprovalMessage(body, client, '✅ Proceeding with bypass mode...');
 
   // Set bypassPermissions mode
-  saveSession(channelId, { mode: 'bypassPermissions' });
+  await saveSession(channelId, { mode: 'bypassPermissions' });
 
   const bodyWithChannel = body as any;
   await handleMessage({
@@ -3826,7 +3811,7 @@ app.action(/^plan_manual_(.+)$/, async ({ action, ack, body, client }) => {
   await updateApprovalMessage(body, client, '✅ Proceeding with manual approval mode...');
 
   // Set default (ask) mode
-  saveSession(channelId, { mode: 'default' });
+  await saveSession(channelId, { mode: 'default' });
 
   const bodyWithChannel = body as any;
   await handleMessage({

@@ -28,7 +28,7 @@ describe('thread forking', () => {
   });
 
   describe('getThreadSession', () => {
-    it('should return null if channel does not exist', () => {
+    it('should return null if channel does not exist', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
       const result = getThreadSession('C123', '1234567890.123456');
@@ -36,7 +36,7 @@ describe('thread forking', () => {
       expect(result).toBeNull();
     });
 
-    it('should return null if channel has no threads', () => {
+    it('should return null if channel has no threads', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
         channels: {
@@ -59,7 +59,7 @@ describe('thread forking', () => {
       expect(result).toBeNull();
     });
 
-    it('should return null if thread does not exist', () => {
+    it('should return null if thread does not exist', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
         channels: {
@@ -92,7 +92,7 @@ describe('thread forking', () => {
       expect(result).toBeNull();
     });
 
-    it('should return thread session if it exists', () => {
+    it('should return thread session if it exists', async () => {
       const threadTs = '1234567890.123456';
       const threadSession: ThreadSession = {
         sessionId: 'thread-session-123',
@@ -130,14 +130,14 @@ describe('thread forking', () => {
   });
 
   describe('saveThreadSession', () => {
-    it('should create channel if it does not exist', () => {
+    it('should create channel if it does not exist', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
         channels: {}
       }));
 
       const threadTs = '1234567890.123456';
-      saveThreadSession('C123', threadTs, {
+      await saveThreadSession('C123', threadTs, {
         sessionId: 'new-thread',
         forkedFrom: null,
         workingDir: mockCwd,
@@ -157,7 +157,7 @@ describe('thread forking', () => {
       expect(savedData.channels.C123.threads[threadTs]).toBeDefined();
     });
 
-    it('should create threads object if channel exists but has no threads', () => {
+    it('should create threads object if channel exists but has no threads', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
         channels: {
@@ -176,7 +176,7 @@ describe('thread forking', () => {
       }));
 
       const threadTs = '1234567890.123456';
-      saveThreadSession('C123', threadTs, {
+      await saveThreadSession('C123', threadTs, {
         sessionId: 'new-thread',
         forkedFrom: 'main-session',
       });
@@ -188,7 +188,7 @@ describe('thread forking', () => {
       expect(savedData.channels.C123.threads[threadTs].sessionId).toBe('new-thread');
     });
 
-    it('should preserve existing thread when adding new thread', () => {
+    it('should preserve existing thread when adding new thread', async () => {
       const existingThreadTs = '1111111111.111111';
       const newThreadTs = '2222222222.222222';
 
@@ -219,7 +219,7 @@ describe('thread forking', () => {
         }
       }));
 
-      saveThreadSession('C123', newThreadTs, {
+      await saveThreadSession('C123', newThreadTs, {
         sessionId: 'new-thread',
         forkedFrom: 'main-session',
       });
@@ -231,7 +231,7 @@ describe('thread forking', () => {
       expect(savedData.channels.C123.threads[newThreadTs].sessionId).toBe('new-thread');
     });
 
-    it('should update existing thread session', () => {
+    it('should update existing thread session', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -261,7 +261,7 @@ describe('thread forking', () => {
         }
       }));
 
-      saveThreadSession('C123', threadTs, {
+      await saveThreadSession('C123', threadTs, {
         sessionId: 'forked-session-123',
       });
 
@@ -273,14 +273,14 @@ describe('thread forking', () => {
       expect(savedData.channels.C123.threads[threadTs].createdAt).toBe(3000);
     });
 
-    it('should inherit workingDir from main session when creating new channel', () => {
+    it('should inherit workingDir from main session when creating new channel', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
         channels: {}
       }));
 
       const threadTs = '1234567890.123456';
-      saveThreadSession('C123', threadTs, {
+      await saveThreadSession('C123', threadTs, {
         sessionId: 'new-thread',
       });
 
@@ -291,7 +291,7 @@ describe('thread forking', () => {
       expect(savedData.channels.C123.threads[threadTs].workingDir).toBe(mockCwd);
     });
 
-    it('should update lastActiveAt on save', () => {
+    it('should update lastActiveAt on save', async () => {
       const threadTs = '1234567890.123456';
       const now = Date.now();
 
@@ -322,7 +322,7 @@ describe('thread forking', () => {
         }
       }));
 
-      saveThreadSession('C123', threadTs, {
+      await saveThreadSession('C123', threadTs, {
         mode: 'bypassPermissions',
       });
 
@@ -334,7 +334,7 @@ describe('thread forking', () => {
   });
 
   describe('getOrCreateThreadSession', () => {
-    it('should return existing thread session with isNewFork=false', () => {
+    it('should return existing thread session with isNewFork=false', async () => {
       const threadTs = '1234567890.123456';
       const existingSession: ThreadSession = {
         sessionId: 'existing-thread-session',
@@ -365,13 +365,13 @@ describe('thread forking', () => {
         }
       }));
 
-      const result = getOrCreateThreadSession('C123', threadTs);
+      const result = await getOrCreateThreadSession('C123', threadTs);
 
       expect(result.session).toEqual(existingSession);
       expect(result.isNewFork).toBe(false);
     });
 
-    it('should create new thread session with isNewFork=true when thread does not exist', () => {
+    it('should create new thread session with isNewFork=true when thread does not exist', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -391,7 +391,7 @@ describe('thread forking', () => {
         }
       }));
 
-      const result = getOrCreateThreadSession('C123', threadTs);
+      const result = await getOrCreateThreadSession('C123', threadTs);
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.sessionId).toBeNull();
@@ -400,7 +400,7 @@ describe('thread forking', () => {
       expect(result.session.mode).toBe('bypassPermissions');
     });
 
-    it('should inherit workingDir from main session', () => {
+    it('should inherit workingDir from main session', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -420,12 +420,12 @@ describe('thread forking', () => {
         }
       }));
 
-      const result = getOrCreateThreadSession('C123', threadTs);
+      const result = await getOrCreateThreadSession('C123', threadTs);
 
       expect(result.session.workingDir).toBe('/custom/path');
     });
 
-    it('should inherit mode from main session', () => {
+    it('should inherit mode from main session', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -445,12 +445,12 @@ describe('thread forking', () => {
         }
       }));
 
-      const result = getOrCreateThreadSession('C123', threadTs);
+      const result = await getOrCreateThreadSession('C123', threadTs);
 
       expect(result.session.mode).toBe('default');
     });
 
-    it('should use defaults when no main session exists', () => {
+    it('should use defaults when no main session exists', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -458,7 +458,7 @@ describe('thread forking', () => {
         channels: {}
       }));
 
-      const result = getOrCreateThreadSession('C123', threadTs);
+      const result = await getOrCreateThreadSession('C123', threadTs);
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.sessionId).toBeNull();
@@ -467,7 +467,7 @@ describe('thread forking', () => {
       expect(result.session.mode).toBe('default');
     });
 
-    it('should save new thread session to disk', () => {
+    it('should save new thread session to disk', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -487,7 +487,7 @@ describe('thread forking', () => {
         }
       }));
 
-      getOrCreateThreadSession('C123', threadTs);
+      await getOrCreateThreadSession('C123', threadTs);
 
       expect(fs.writeFileSync).toHaveBeenCalled();
       const savedData = JSON.parse(
@@ -496,7 +496,7 @@ describe('thread forking', () => {
       expect(savedData.channels.C123.threads[threadTs]).toBeDefined();
     });
 
-    it('should set createdAt and lastActiveAt on new thread', () => {
+    it('should set createdAt and lastActiveAt on new thread', async () => {
       const threadTs = '1234567890.123456';
       const beforeTime = Date.now();
 
@@ -517,7 +517,7 @@ describe('thread forking', () => {
         }
       }));
 
-      const result = getOrCreateThreadSession('C123', threadTs);
+      const result = await getOrCreateThreadSession('C123', threadTs);
       const afterTime = Date.now();
 
       expect(result.session.createdAt).toBeGreaterThanOrEqual(beforeTime);
@@ -528,7 +528,7 @@ describe('thread forking', () => {
   });
 
   describe('thread session independence', () => {
-    it('should maintain separate sessions for different threads', () => {
+    it('should maintain separate sessions for different threads', async () => {
       const thread1Ts = '1111111111.111111';
       const thread2Ts = '2222222222.222222';
 
@@ -582,7 +582,7 @@ describe('thread forking', () => {
       expect(thread2?.workingDir).toBe('/different/path');
     });
 
-    it('should not affect main session when modifying thread session', () => {
+    it('should not affect main session when modifying thread session', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -613,7 +613,7 @@ describe('thread forking', () => {
       }));
 
       // Update thread session
-      saveThreadSession('C123', threadTs, {
+      await saveThreadSession('C123', threadTs, {
         workingDir: '/new/thread/path',
         mode: 'bypassPermissions',
       });
@@ -631,7 +631,7 @@ describe('thread forking', () => {
       expect(savedData.channels.C123.threads[threadTs].mode).toBe('bypassPermissions');
     });
 
-    it('should not affect thread sessions when modifying main session', () => {
+    it('should not affect thread sessions when modifying main session', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -662,7 +662,7 @@ describe('thread forking', () => {
       }));
 
       // Update main session
-      saveSession('C123', {
+      await saveSession('C123', {
         workingDir: '/updated/main/path',
         mode: 'default',
       });
@@ -682,7 +682,7 @@ describe('thread forking', () => {
   });
 
   describe('forkedFrom tracking', () => {
-    it('should track parent session ID when forking', () => {
+    it('should track parent session ID when forking', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -702,12 +702,12 @@ describe('thread forking', () => {
         }
       }));
 
-      const result = getOrCreateThreadSession('C123', threadTs);
+      const result = await getOrCreateThreadSession('C123', threadTs);
 
       expect(result.session.forkedFrom).toBe('parent-session-abc123');
     });
 
-    it('should set forkedFrom to null when no parent session exists', () => {
+    it('should set forkedFrom to null when no parent session exists', async () => {
       const threadTs = '1234567890.123456';
 
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -727,14 +727,14 @@ describe('thread forking', () => {
         }
       }));
 
-      const result = getOrCreateThreadSession('C123', threadTs);
+      const result = await getOrCreateThreadSession('C123', threadTs);
 
       expect(result.session.forkedFrom).toBeNull();
     });
   });
 
   describe('thread-to-thread forking', () => {
-    it('should save thread session with forkedFromThreadTs', () => {
+    it('should save thread session with forkedFromThreadTs', async () => {
       const sourceThreadTs = '1111111111.111111';
       const newThreadTs = '2222222222.222222';
 
@@ -766,7 +766,7 @@ describe('thread forking', () => {
       }));
 
       // Create new thread session forked from source thread
-      saveThreadSession('C123', newThreadTs, {
+      await saveThreadSession('C123', newThreadTs, {
         sessionId: null,
         forkedFrom: 'source-thread-session',
         forkedFromThreadTs: sourceThreadTs,
@@ -792,7 +792,7 @@ describe('thread forking', () => {
       expect(newThread.mode).toBe('bypassPermissions');
     });
 
-    it('should preserve source thread session when forking to new thread', () => {
+    it('should preserve source thread session when forking to new thread', async () => {
       const sourceThreadTs = '1111111111.111111';
       const newThreadTs = '2222222222.222222';
 
@@ -824,7 +824,7 @@ describe('thread forking', () => {
       }));
 
       // Create new thread session forked from source thread
-      saveThreadSession('C123', newThreadTs, {
+      await saveThreadSession('C123', newThreadTs, {
         sessionId: null,
         forkedFrom: 'source-thread-session',
         forkedFromThreadTs: sourceThreadTs,
@@ -849,7 +849,7 @@ describe('thread forking', () => {
       expect(sourceThread.forkedFromThreadTs).toBeUndefined();
     });
 
-    it('should allow chain forking (main -> T1 -> T2)', () => {
+    it('should allow chain forking (main -> T1 -> T2)', async () => {
       const thread1Ts = '1111111111.111111';
       const thread2Ts = '2222222222.222222';
 
@@ -881,7 +881,7 @@ describe('thread forking', () => {
       }));
 
       // Fork T1 to T2
-      saveThreadSession('C123', thread2Ts, {
+      await saveThreadSession('C123', thread2Ts, {
         sessionId: null,
         forkedFrom: 'thread1-session',  // Forked from T1's session
         forkedFromThreadTs: thread1Ts,  // Visual reference to T1

@@ -27,6 +27,7 @@ import {
   formatToolName,
   ActivityEntry,
   ACTIVITY_LOG_MAX_CHARS,
+  buildStopWatchingButton,
 } from '../../blocks.js';
 import type { ModelInfo } from '../../model-cache.js';
 import type { LastUsage } from '../../session-manager.js';
@@ -3039,6 +3040,39 @@ describe('blocks', () => {
       // Activity section should show thinking
       expect((blocks[0] as any).text.text).toContain(':brain:');
       expect((blocks[0] as any).text.text).toContain('Thinking');
+    });
+  });
+
+  describe('buildStopWatchingButton', () => {
+    it('should have danger style and emoji', () => {
+      const button = buildStopWatchingButton('session-123');
+
+      expect(button.type).toBe('actions');
+      expect(button.block_id).toBe('terminal_watch_session-123');
+      expect(button.elements).toHaveLength(1);
+
+      const buttonElement = button.elements[0];
+      expect(buttonElement.type).toBe('button');
+      expect(buttonElement.style).toBe('danger');
+      expect(buttonElement.text.text).toContain('🛑');
+      expect(buttonElement.text.text).toContain('Stop Watching');
+      expect(buttonElement.text.emoji).toBe(true);
+      expect(buttonElement.action_id).toBe('stop_terminal_watch');
+    });
+
+    it('should include session ID in value', () => {
+      const button = buildStopWatchingButton('my-test-session');
+      const value = JSON.parse(button.elements[0].value);
+      expect(value.sessionId).toBe('my-test-session');
+    });
+
+    it('should generate unique block_id for each session', () => {
+      const button1 = buildStopWatchingButton('session-aaa');
+      const button2 = buildStopWatchingButton('session-bbb');
+
+      expect(button1.block_id).toBe('terminal_watch_session-aaa');
+      expect(button2.block_id).toBe('terminal_watch_session-bbb');
+      expect(button1.block_id).not.toBe(button2.block_id);
     });
   });
 

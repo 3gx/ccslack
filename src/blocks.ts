@@ -1883,3 +1883,28 @@ export function buildActivityLogModalView(
     blocks,
   };
 }
+
+// ============================================================================
+// Terminal Watcher Blocks
+// ============================================================================
+
+/**
+ * Build a "Stop Watching" button for terminal watch mode.
+ * Used by both /watch and /ff commands to show consistent button styling.
+ *
+ * @param sessionId - The session ID being watched
+ * @returns Block with danger-styled button
+ */
+export function buildStopWatchingButton(sessionId: string): Block {
+  return {
+    type: 'actions',
+    block_id: `terminal_watch_${sessionId}`,
+    elements: [{
+      type: 'button',
+      text: { type: 'plain_text', text: '🛑 Stop Watching', emoji: true },
+      action_id: 'stop_terminal_watch',
+      style: 'danger',
+      value: JSON.stringify({ sessionId }),
+    }],
+  };
+}

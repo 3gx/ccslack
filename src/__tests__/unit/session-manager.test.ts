@@ -64,7 +64,7 @@ describe('session-manager', () => {
   });
 
   describe('loadSessions', () => {
-    it('should return empty store if file does not exist', () => {
+    it('should return empty store if file does not exist', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
       const result = loadSessions();
@@ -73,7 +73,7 @@ describe('session-manager', () => {
       expect(fs.readFileSync).not.toHaveBeenCalled();
     });
 
-    it('should load sessions from file if it exists', () => {
+    it('should load sessions from file if it exists', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -103,7 +103,7 @@ describe('session-manager', () => {
   });
 
   describe('getSession', () => {
-    it('should return null if channel has no session', () => {
+    it('should return null if channel has no session', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
       const result = getSession('C123');
@@ -111,7 +111,7 @@ describe('session-manager', () => {
       expect(result).toBeNull();
     });
 
-    it('should return session if channel has one', () => {
+    it('should return session if channel has one', async () => {
       const mockSession = {
         sessionId: 'sess-456',
         workingDir: '/home/user',
@@ -138,10 +138,10 @@ describe('session-manager', () => {
   });
 
   describe('saveSession', () => {
-    it('should create new session with defaults', () => {
+    it('should create new session with defaults', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
-      saveSession('C123', { sessionId: 'new-sess' });
+      await saveSession('C123', { sessionId: 'new-sess' });
 
       expect(fs.writeFileSync).toHaveBeenCalled();
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
@@ -151,7 +151,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123'].lastActiveAt).toBeDefined();
     });
 
-    it('should merge with existing session', () => {
+    it('should merge with existing session', async () => {
       const existingSession = {
         sessionId: 'old-sess',
         workingDir: '/old/path',
@@ -169,7 +169,7 @@ describe('session-manager', () => {
         channels: { 'C123': existingSession },
       }));
 
-      saveSession('C123', { workingDir: '/new/path' });
+      await saveSession('C123', { workingDir: '/new/path' });
 
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
 
@@ -178,11 +178,11 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123'].createdAt).toBe(1000); // preserved
     });
 
-    it('should update lastActiveAt on every save', () => {
+    it('should update lastActiveAt on every save', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
       const before = Date.now();
-      saveSession('C123', {});
+      await saveSession('C123', {});
       const after = Date.now();
 
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
@@ -192,7 +192,7 @@ describe('session-manager', () => {
       expect(lastActiveAt).toBeLessThanOrEqual(after);
     });
 
-    it('should preserve activityLogs when updating session', () => {
+    it('should preserve activityLogs when updating session', async () => {
       const existingEntries = [
         { timestamp: Date.now(), type: 'tool_start' as const, tool: 'Read' },
         { timestamp: Date.now(), type: 'tool_complete' as const, tool: 'Read', durationMs: 100 },
@@ -218,7 +218,7 @@ describe('session-manager', () => {
       }));
 
       // Update session with new sessionId - activityLogs should be preserved
-      saveSession('C123', { sessionId: 'new-sess' });
+      await saveSession('C123', { sessionId: 'new-sess' });
 
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
 
@@ -228,7 +228,7 @@ describe('session-manager', () => {
   });
 
   describe('saveSessions', () => {
-    it('should write formatted JSON to file', () => {
+    it('should write formatted JSON to file', async () => {
       const store = {
         channels: {
           'C123': {
@@ -263,7 +263,7 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
     });
 
-    it('should delete channel with main session only', () => {
+    it('should delete channel with main session only', async () => {
       // Setup: Create channel with main session
       const mockStore = {
         channels: {
@@ -292,7 +292,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Delete channel
-      deleteSession('C123');
+      await deleteSession('C123');
 
       // Verify SDK file was deleted
       expect(fs.unlinkSync).toHaveBeenCalledWith(
@@ -305,7 +305,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123']).toBeUndefined();
     });
 
-    it('should delete channel with main session and multiple threads', () => {
+    it('should delete channel with main session and multiple threads', async () => {
       // Setup: Create channel with main + 2 threads
       const mockStore = {
         channels: {
@@ -358,7 +358,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Delete channel
-      deleteSession('C123');
+      await deleteSession('C123');
 
       // Verify all 3 SDK files were deleted
       expect(fs.unlinkSync).toHaveBeenCalledTimes(3);
@@ -378,19 +378,19 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123']).toBeUndefined();
     });
 
-    it('should handle deleting non-existent channel safely', () => {
+    it('should handle deleting non-existent channel safely', async () => {
       // Empty store
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
       // Should not throw
-      expect(() => deleteSession('C999')).not.toThrow();
+      await expect(deleteSession('C999')).resolves.not.toThrow();
 
       // Should not attempt to delete any files
       expect(fs.unlinkSync).not.toHaveBeenCalled();
     });
 
-    it('should persist deletion to sessions.json', () => {
+    it('should persist deletion to sessions.json', async () => {
       // Setup: Channel exists
       const mockStore = {
         channels: {
@@ -416,7 +416,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Delete
-      deleteSession('C123');
+      await deleteSession('C123');
 
       // Verify final state written to disk
       const finalWrite = vi.mocked(fs.writeFileSync).mock.calls[vi.mocked(fs.writeFileSync).mock.calls.length - 1];
@@ -425,7 +425,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123']).toBeUndefined();
     });
 
-    it('should handle channel with no sessionId (edge case)', () => {
+    it('should handle channel with no sessionId (edge case)', async () => {
       // Setup: Channel with null sessionId
       const mockStore = {
         channels: {
@@ -447,7 +447,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Should not throw when deleting
-      expect(() => deleteSession('C123')).not.toThrow();
+      await expect(deleteSession('C123')).resolves.not.toThrow();
 
       // Should not attempt to delete SDK file (sessionId is null)
       expect(fs.unlinkSync).not.toHaveBeenCalled();
@@ -458,7 +458,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123']).toBeUndefined();
     });
 
-    it('should continue deleting other sessions when one SDK file deletion fails', () => {
+    it('should continue deleting other sessions when one SDK file deletion fails', async () => {
       // Setup: Channel with main + 2 threads, middle one will fail
       const mockStore = {
         channels: {
@@ -522,7 +522,7 @@ describe('session-manager', () => {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       // Should not throw - error handling should catch and continue
-      expect(() => deleteSession('C123')).not.toThrow();
+      await expect(deleteSession('C123')).resolves.not.toThrow();
 
       // Verify error was logged for the failed file
       expect(consoleSpy).toHaveBeenCalledWith(
@@ -541,7 +541,7 @@ describe('session-manager', () => {
       consoleSpy.mockRestore();
     });
 
-    it('should handle SDK file not found gracefully', () => {
+    it('should handle SDK file not found gracefully', async () => {
       // Setup: Channel exists but SDK file was already deleted externally
       const mockStore = {
         channels: {
@@ -571,7 +571,7 @@ describe('session-manager', () => {
       const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
       // Should not throw
-      expect(() => deleteSession('C123')).not.toThrow();
+      await expect(deleteSession('C123')).resolves.not.toThrow();
 
       // Verify info message was logged (not error)
       expect(consoleSpy).toHaveBeenCalledWith(
@@ -589,7 +589,7 @@ describe('session-manager', () => {
       consoleSpy.mockRestore();
     });
 
-    it('should handle large session history (10+ previous sessions from /clear)', () => {
+    it('should handle large session history (10+ previous sessions from /clear)', async () => {
       // Setup: Channel with many previous sessions (simulating heavy /clear usage)
       const previousIds = Array.from({ length: 12 }, (_, i) => `prev-session-${i + 1}`);
       const mockStore = {
@@ -617,7 +617,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Delete channel
-      deleteSession('C123');
+      await deleteSession('C123');
 
       // Should delete all 13 SDK files (1 current + 12 previous)
       expect(fs.unlinkSync).toHaveBeenCalledTimes(13);
@@ -640,7 +640,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123']).toBeUndefined();
     });
 
-    it('should delete nested thread hierarchy (thread forked from thread)', () => {
+    it('should delete nested thread hierarchy (thread forked from thread)', async () => {
       // Setup: Main → Thread1 → Thread2 (nested fork)
       const mockStore = {
         channels: {
@@ -693,7 +693,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Delete channel
-      deleteSession('C123');
+      await deleteSession('C123');
 
       // Should delete all 3 sessions (main + 2 nested threads)
       expect(fs.unlinkSync).toHaveBeenCalledTimes(3);
@@ -719,16 +719,16 @@ describe('session-manager', () => {
   // ============================================================================
 
   describe('previousSessionIds tracking', () => {
-    it('should initialize previousSessionIds as empty array for new sessions', () => {
+    it('should initialize previousSessionIds as empty array for new sessions', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
-      saveSession('new-channel', { sessionId: 'S1' });
+      await saveSession('new-channel', { sessionId: 'S1' });
 
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
       expect(writtenData.channels['new-channel'].previousSessionIds).toEqual([]);
     });
 
-    it('should preserve previousSessionIds when saving other fields', () => {
+    it('should preserve previousSessionIds when saving other fields', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -750,14 +750,14 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Update session with new sessionId but without previousSessionIds
-      saveSession('C123', { sessionId: 'S3' });
+      await saveSession('C123', { sessionId: 'S3' });
 
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
       expect(writtenData.channels['C123'].sessionId).toBe('S3');
       expect(writtenData.channels['C123'].previousSessionIds).toEqual(['S1']); // preserved
     });
 
-    it('should allow updating previousSessionIds via saveSession', () => {
+    it('should allow updating previousSessionIds via saveSession', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -779,7 +779,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Update both sessionId and previousSessionIds (as /clear does)
-      saveSession('C123', {
+      await saveSession('C123', {
         sessionId: 'S3',
         previousSessionIds: ['S1', 'S2'],
       });
@@ -789,7 +789,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123'].previousSessionIds).toEqual(['S1', 'S2']);
     });
 
-    it('should migrate existing sessions without previousSessionIds field', () => {
+    it('should migrate existing sessions without previousSessionIds field', async () => {
       // Simulate old session format without previousSessionIds
       const oldFormatStore = {
         channels: {
@@ -817,7 +817,7 @@ describe('session-manager', () => {
       expect(result.channels['C123'].previousSessionIds).toEqual([]);
     });
 
-    it('should clear lastUsage when /clear sets sessionId to null', () => {
+    it('should clear lastUsage when /clear sets sessionId to null', async () => {
       // Setup: Session with lastUsage data from previous query
       const mockStore = {
         channels: {
@@ -847,7 +847,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Simulate /clear: set sessionId to null and clear lastUsage
-      saveSession('C123', {
+      await saveSession('C123', {
         sessionId: null,
         previousSessionIds: ['old-session'],
         lastUsage: undefined,
@@ -864,7 +864,7 @@ describe('session-manager', () => {
   describe('deleteSession with previousSessionIds', () => {
     const mockWorkingDir = '/Users/testuser/projects/myapp';
 
-    it('should delete all previous session SDK files', () => {
+    it('should delete all previous session SDK files', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -890,7 +890,7 @@ describe('session-manager', () => {
       });
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      deleteSession('C123');
+      await deleteSession('C123');
 
       // Should delete all 3 SDK files (current + 2 previous)
       expect(fs.unlinkSync).toHaveBeenCalledTimes(3);
@@ -905,7 +905,7 @@ describe('session-manager', () => {
       );
     });
 
-    it('should handle empty previousSessionIds', () => {
+    it('should handle empty previousSessionIds', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -930,7 +930,7 @@ describe('session-manager', () => {
       });
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      deleteSession('C123');
+      await deleteSession('C123');
 
       // Should only delete current session, no previous
       expect(fs.unlinkSync).toHaveBeenCalledTimes(1);
@@ -939,7 +939,7 @@ describe('session-manager', () => {
       );
     });
 
-    it('should delete previous sessions AND thread sessions', () => {
+    it('should delete previous sessions AND thread sessions', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -978,7 +978,7 @@ describe('session-manager', () => {
       });
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      deleteSession('C123');
+      await deleteSession('C123');
 
       // Should delete: S3 (current) + S1, S2 (previous) + T1 (thread) = 4 files
       expect(fs.unlinkSync).toHaveBeenCalledTimes(4);
@@ -1002,7 +1002,7 @@ describe('session-manager', () => {
   // ============================================================================
 
   describe('saveMessageMapping', () => {
-    it('should save message mapping to channel session', () => {
+    it('should save message mapping to channel session', async () => {
       // Setup: Create channel session
       const mockStore = {
         channels: {
@@ -1023,7 +1023,7 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      saveMessageMapping('C123', '1234.001', {
+      await saveMessageMapping('C123', '1234.001', {
         sdkMessageId: 'msg_017pagAKz',
         sessionId: 'main-session-123',
         type: 'assistant',
@@ -1036,7 +1036,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123'].messageMap['1234.001'].type).toBe('assistant');
     });
 
-    it('should handle multiple mappings', () => {
+    it('should handle multiple mappings', async () => {
       // Setup: Channel with existing mapping
       const mockStore = {
         channels: {
@@ -1064,7 +1064,7 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      saveMessageMapping('C123', '1234.002', {
+      await saveMessageMapping('C123', '1234.002', {
         sdkMessageId: 'msg_002',
         sessionId: 'main-session-123',
         type: 'assistant',
@@ -1077,16 +1077,16 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123'].messageMap['1234.002'].parentSlackTs).toBe('1234.001');
     });
 
-    it('should not save if channel does not exist', () => {
+    it('should not save if channel does not exist', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
       // Should not throw
-      expect(() => saveMessageMapping('C999', '1234.001', {
+      await expect(saveMessageMapping('C999', '1234.001', {
         sdkMessageId: 'msg_001',
         sessionId: 'some-session',
         type: 'user',
-      })).not.toThrow();
+      })).resolves.not.toThrow();
 
       // Should not write anything
       expect(fs.writeFileSync).not.toHaveBeenCalled();
@@ -1094,7 +1094,7 @@ describe('session-manager', () => {
   });
 
   describe('getMessageMapping', () => {
-    it('should return mapping if exists', () => {
+    it('should return mapping if exists', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1129,7 +1129,7 @@ describe('session-manager', () => {
       });
     });
 
-    it('should return null if mapping does not exist', () => {
+    it('should return null if mapping does not exist', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1154,7 +1154,7 @@ describe('session-manager', () => {
       expect(mapping).toBeNull();
     });
 
-    it('should return null if channel has no messageMap', () => {
+    it('should return null if channel has no messageMap', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1180,7 +1180,7 @@ describe('session-manager', () => {
   });
 
   describe('findForkPointMessageId', () => {
-    it('should return assistant message ID and sessionId when clicking on bot message', () => {
+    it('should return assistant message ID and sessionId when clicking on bot message', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1214,7 +1214,7 @@ describe('session-manager', () => {
       });
     });
 
-    it('should find LAST assistant message BEFORE user message (not response to it)', () => {
+    it('should find LAST assistant message BEFORE user message (not response to it)', async () => {
       // Timeline: user → bot → user (clicking here) → bot
       const mockStore = {
         channels: {
@@ -1249,7 +1249,7 @@ describe('session-manager', () => {
       });
     });
 
-    it('should return null if no assistant message before the timestamp', () => {
+    it('should return null if no assistant message before the timestamp', async () => {
       // User's first message - no bot response yet
       const mockStore = {
         channels: {
@@ -1277,7 +1277,7 @@ describe('session-manager', () => {
       expect(result).toBeNull();
     });
 
-    it('should work with split messages (continuation)', () => {
+    it('should work with split messages (continuation)', async () => {
       // Long response split into multiple Slack messages
       const mockStore = {
         channels: {
@@ -1310,7 +1310,7 @@ describe('session-manager', () => {
       expect(findForkPointMessageId('C123', '1234.004')).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
     });
 
-    it('should return null if channel has no messageMap', () => {
+    it('should return null if channel has no messageMap', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1334,7 +1334,7 @@ describe('session-manager', () => {
       expect(messageId).toBeNull();
     });
 
-    it('should ignore placeholder ts values (starting with _slack_) when finding fallback', () => {
+    it('should ignore placeholder ts values (starting with _slack_) when finding fallback', async () => {
       // This tests the fix for point-in-time forking: placeholder ts values
       // should not be considered when finding the last assistant message
       const mockStore = {
@@ -1370,7 +1370,7 @@ describe('session-manager', () => {
       });
     });
 
-    it('should find previous assistant when exact ts not found and ignore placeholders', () => {
+    it('should find previous assistant when exact ts not found and ignore placeholders', async () => {
       // User replies to a status message (not in messageMap) - should find last real assistant
       const mockStore = {
         channels: {
@@ -1404,7 +1404,7 @@ describe('session-manager', () => {
       });
     });
 
-    it('should not return future messages even with placeholder filtering', () => {
+    it('should not return future messages even with placeholder filtering', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1434,7 +1434,7 @@ describe('session-manager', () => {
   });
 
   describe('getLastSyncedMessageId', () => {
-    it('should return null when no messageMap entries', () => {
+    it('should return null when no messageMap entries', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1458,7 +1458,7 @@ describe('session-manager', () => {
       expect(result).toBeNull();
     });
 
-    it('should return newest entry by Slack timestamp', () => {
+    it('should return newest entry by Slack timestamp', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1488,7 +1488,7 @@ describe('session-manager', () => {
       expect(result?.sessionId).toBe('main-session-123');
     });
 
-    it('should filter by sessionId when provided', () => {
+    it('should filter by sessionId when provided', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1526,7 +1526,7 @@ describe('session-manager', () => {
       expect(oldResult?.sdkMessageId).toBe('uuid-old-2');
     });
 
-    it('should return null if no messages match sessionId filter', () => {
+    it('should return null if no messages match sessionId filter', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1553,7 +1553,7 @@ describe('session-manager', () => {
       expect(result).toBeNull();
     });
 
-    it('should return null for channel without session', () => {
+    it('should return null for channel without session', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
@@ -1561,7 +1561,7 @@ describe('session-manager', () => {
       expect(result).toBeNull();
     });
 
-    it('should handle empty messageMap', () => {
+    it('should handle empty messageMap', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1588,12 +1588,12 @@ describe('session-manager', () => {
   });
 
   describe('messageMap preservation', () => {
-    it('should preserve messageMap when saveSession is called', () => {
+    it('should preserve messageMap when saveSession is called', async () => {
       // Setup: Start with empty store
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
       // Step 1: Create initial session
-      saveSession('C123', {
+      await saveSession('C123', {
         sessionId: 'sess-1',
         workingDir: '/test',
         mode: 'plan',
@@ -1609,7 +1609,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Step 2: Save a message mapping
-      saveMessageMapping('C123', '1234.001', {
+      await saveMessageMapping('C123', '1234.001', {
         sdkMessageId: 'msg_001',
         sessionId: 'sess-1',
         type: 'assistant',
@@ -1623,7 +1623,7 @@ describe('session-manager', () => {
       expect(currentStore.channels['C123'].messageMap['1234.001'].sdkMessageId).toBe('msg_001');
 
       // Step 3: Save session again (simulating what happens after SDK returns new session ID)
-      saveSession('C123', { sessionId: 'sess-2' });
+      await saveSession('C123', { sessionId: 'sess-2' });
 
       // Get final written data
       const finalStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[2][1] as string);
@@ -1634,11 +1634,11 @@ describe('session-manager', () => {
       expect(finalStore.channels['C123'].sessionId).toBe('sess-2');
     });
 
-    it('should preserve messageMap when saving multiple mappings interleaved with saveSession', () => {
+    it('should preserve messageMap when saving multiple mappings interleaved with saveSession', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
       // Create session
-      saveSession('C123', {
+      await saveSession('C123', {
         sessionId: 'sess-1',
         workingDir: '/test',
         mode: 'plan',
@@ -1653,27 +1653,27 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Save user message mapping
-      saveMessageMapping('C123', '1234.001', { sdkMessageId: 'user_001', sessionId: 'sess-1', type: 'user' });
+      await saveMessageMapping('C123', '1234.001', { sdkMessageId: 'user_001', sessionId: 'sess-1', type: 'user' });
       currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[1][1] as string);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Save assistant message mapping
-      saveMessageMapping('C123', '1234.002', { sdkMessageId: 'msg_001', sessionId: 'sess-1', type: 'assistant' });
+      await saveMessageMapping('C123', '1234.002', { sdkMessageId: 'msg_001', sessionId: 'sess-1', type: 'assistant' });
       currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[2][1] as string);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Save session (this was wiping messageMap before the fix)
-      saveSession('C123', { sessionId: 'sess-1' });
+      await saveSession('C123', { sessionId: 'sess-1' });
       currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[3][1] as string);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Add another user message
-      saveMessageMapping('C123', '1234.003', { sdkMessageId: 'user_002', sessionId: 'sess-1', type: 'user' });
+      await saveMessageMapping('C123', '1234.003', { sdkMessageId: 'user_002', sessionId: 'sess-1', type: 'user' });
       currentStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[4][1] as string);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(currentStore));
 
       // Save session again
-      saveSession('C123', { sessionId: 'sess-1' });
+      await saveSession('C123', { sessionId: 'sess-1' });
       const finalStore = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[5][1] as string);
 
       // All mappings should be preserved
@@ -1685,7 +1685,7 @@ describe('session-manager', () => {
   });
 
   describe('getMessageMapUuids', () => {
-    it('should return empty set when channel does not exist', () => {
+    it('should return empty set when channel does not exist', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
       const result = getMessageMapUuids('C999');
@@ -1694,7 +1694,7 @@ describe('session-manager', () => {
       expect(result.size).toBe(0);
     });
 
-    it('should return empty set when messageMap is empty', () => {
+    it('should return empty set when messageMap is empty', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1721,7 +1721,7 @@ describe('session-manager', () => {
       expect(result.size).toBe(0);
     });
 
-    it('should return all sdkMessageId values from messageMap', () => {
+    it('should return all sdkMessageId values from messageMap', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1755,7 +1755,7 @@ describe('session-manager', () => {
       expect(result.has('uuid-ccc')).toBe(true);
     });
 
-    it('should include UUIDs from multiple sessions (after /clear)', () => {
+    it('should include UUIDs from multiple sessions (after /clear)', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1794,7 +1794,7 @@ describe('session-manager', () => {
   });
 
   describe('getOrCreateThreadSession with ForkPointResult', () => {
-    it('should create thread session with forkPoint (messageId + sessionId)', () => {
+    it('should create thread session with forkPoint (messageId + sessionId)', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1816,7 +1816,7 @@ describe('session-manager', () => {
 
       // Pass ForkPointResult with both messageId and sessionId
       const forkPoint = { messageId: 'msg_017pagAKz', sessionId: 'main-session-123' };
-      const result = getOrCreateThreadSession('C123', '1234.002', forkPoint);
+      const result = await getOrCreateThreadSession('C123', '1234.002', forkPoint);
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
@@ -1824,7 +1824,7 @@ describe('session-manager', () => {
       expect(result.session.forkedFrom).toBe('main-session-123');
     });
 
-    it('should use forkPoint.sessionId even if main session is null (after /clear)', () => {
+    it('should use forkPoint.sessionId even if main session is null (after /clear)', async () => {
       // This tests the "time travel" scenario - forking from message before /clear
       const mockStore = {
         channels: {
@@ -1848,7 +1848,7 @@ describe('session-manager', () => {
 
       // forkPoint has session ID from BEFORE /clear
       const forkPoint = { messageId: 'msg_from_old_session', sessionId: 'old-session-before-clear' };
-      const result = getOrCreateThreadSession('C123', '1234.002', forkPoint);
+      const result = await getOrCreateThreadSession('C123', '1234.002', forkPoint);
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.resumeSessionAtMessageId).toBe('msg_from_old_session');
@@ -1856,7 +1856,7 @@ describe('session-manager', () => {
       expect(result.session.forkedFrom).toBe('old-session-before-clear');
     });
 
-    it('should handle thread creation without fork point', () => {
+    it('should handle thread creation without fork point', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1877,7 +1877,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Create thread without fork point
-      const result = getOrCreateThreadSession('C123', '1234.999', null);
+      const result = await getOrCreateThreadSession('C123', '1234.999', null);
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.resumeSessionAtMessageId).toBeUndefined();
@@ -1885,7 +1885,7 @@ describe('session-manager', () => {
       expect(result.session.forkedFrom).toBe('main-session-123');
     });
 
-    it('should inherit updateRateSeconds from main session', () => {
+    it('should inherit updateRateSeconds from main session', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1906,13 +1906,13 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      const result = getOrCreateThreadSession('C123', '1234.002', null);
+      const result = await getOrCreateThreadSession('C123', '1234.002', null);
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.updateRateSeconds).toBe(5);  // Should inherit from parent
     });
 
-    it('should inherit undefined updateRateSeconds from main session (uses default)', () => {
+    it('should inherit undefined updateRateSeconds from main session (uses default)', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1933,13 +1933,13 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      const result = getOrCreateThreadSession('C123', '1234.002', null);
+      const result = await getOrCreateThreadSession('C123', '1234.002', null);
 
       expect(result.isNewFork).toBe(true);
       expect(result.session.updateRateSeconds).toBeUndefined();  // Should inherit undefined
     });
 
-    it('should return existing thread session with stored resumeSessionAtMessageId', () => {
+    it('should return existing thread session with stored resumeSessionAtMessageId', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -1974,7 +1974,7 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      const result = getOrCreateThreadSession('C123', '1234.002');
+      const result = await getOrCreateThreadSession('C123', '1234.002');
 
       expect(result.isNewFork).toBe(false);
       expect(result.session.sessionId).toBe('thread-session-456');
@@ -2247,7 +2247,7 @@ describe('session-manager', () => {
   });
 
   describe('saveThreadSession with lastUsage', () => {
-    it('should save lastUsage to thread session', () => {
+    it('should save lastUsage to thread session', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -2276,7 +2276,7 @@ describe('session-manager', () => {
         model: 'claude-sonnet-4-5',
       };
 
-      saveThreadSession('C123', 'thread123', { lastUsage });
+      await saveThreadSession('C123', 'thread123', { lastUsage });
 
       // Verify writeFileSync was called with the lastUsage
       expect(fs.writeFileSync).toHaveBeenCalled();
@@ -2284,7 +2284,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123'].threads['thread123'].lastUsage).toEqual(lastUsage);
     });
 
-    it('should preserve existing lastUsage when saving other fields', () => {
+    it('should preserve existing lastUsage when saving other fields', async () => {
       const existingLastUsage = {
         inputTokens: 500,
         outputTokens: 200,
@@ -2328,7 +2328,7 @@ describe('session-manager', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Update mode but not lastUsage
-      saveThreadSession('C123', 'thread123', { mode: 'bypassPermissions' });
+      await saveThreadSession('C123', 'thread123', { mode: 'bypassPermissions' });
 
       // Verify lastUsage was preserved
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
@@ -2336,7 +2336,7 @@ describe('session-manager', () => {
       expect(writtenData.channels['C123'].threads['thread123'].mode).toBe('bypassPermissions');
     });
 
-    it('should allow overwriting lastUsage', () => {
+    it('should allow overwriting lastUsage', async () => {
       const oldUsage = {
         inputTokens: 100,
         outputTokens: 50,
@@ -2387,7 +2387,7 @@ describe('session-manager', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-      saveThreadSession('C123', 'thread123', { lastUsage: newUsage });
+      await saveThreadSession('C123', 'thread123', { lastUsage: newUsage });
 
       const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
       expect(writtenData.channels['C123'].threads['thread123'].lastUsage).toEqual(newUsage);
@@ -2400,7 +2400,7 @@ describe('session-manager', () => {
 
   describe('syncedMessageUuids', () => {
     describe('getSyncedMessageUuids', () => {
-      it('should return empty set when no channel session exists', () => {
+      it('should return empty set when no channel session exists', async () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
@@ -2409,7 +2409,7 @@ describe('session-manager', () => {
         expect(result.size).toBe(0);
       });
 
-      it('should return empty set when no syncedMessageUuids field', () => {
+      it('should return empty set when no syncedMessageUuids field', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2433,7 +2433,7 @@ describe('session-manager', () => {
         expect(result.size).toBe(0);
       });
 
-      it('should return set of synced UUIDs for channel', () => {
+      it('should return set of synced UUIDs for channel', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2461,7 +2461,7 @@ describe('session-manager', () => {
         expect(result.has('uuid-3')).toBe(true);
       });
 
-      it('should return set of synced UUIDs for thread', () => {
+      it('should return set of synced UUIDs for thread', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2511,7 +2511,7 @@ describe('session-manager', () => {
     });
 
     describe('addSyncedMessageUuid', () => {
-      it('should add UUID to channel session', () => {
+      it('should add UUID to channel session', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2531,13 +2531,13 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        addSyncedMessageUuid('C123', 'new-uuid-1');
+        await addSyncedMessageUuid('C123', 'new-uuid-1');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         expect(writtenData.channels['C123'].syncedMessageUuids).toEqual(['new-uuid-1']);
       });
 
-      it('should append UUID to existing list', () => {
+      it('should append UUID to existing list', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2558,13 +2558,13 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        addSyncedMessageUuid('C123', 'uuid-3');
+        await addSyncedMessageUuid('C123', 'uuid-3');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         expect(writtenData.channels['C123'].syncedMessageUuids).toEqual(['uuid-1', 'uuid-2', 'uuid-3']);
       });
 
-      it('should not add duplicate UUID', () => {
+      it('should not add duplicate UUID', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2585,13 +2585,13 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        addSyncedMessageUuid('C123', 'uuid-1');  // Already exists
+        await addSyncedMessageUuid('C123', 'uuid-1');  // Already exists
 
         // Should not call writeFileSync since no change
         expect(fs.writeFileSync).not.toHaveBeenCalled();
       });
 
-      it('should add UUID to thread session', () => {
+      it('should add UUID to thread session', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2625,18 +2625,18 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        addSyncedMessageUuid('C123', 'thread-uuid-1', 'thread123');
+        await addSyncedMessageUuid('C123', 'thread-uuid-1', 'thread123');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         expect(writtenData.channels['C123'].threads['thread123'].syncedMessageUuids).toEqual(['thread-uuid-1']);
       });
 
-      it('should warn if channel not found', () => {
+      it('should warn if channel not found', async () => {
         const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
-        addSyncedMessageUuid('C999', 'uuid-1');
+        await addSyncedMessageUuid('C999', 'uuid-1');
 
         expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Cannot add synced UUID'));
         consoleSpy.mockRestore();
@@ -2644,7 +2644,7 @@ describe('session-manager', () => {
     });
 
     describe('clearSyncedMessageUuids', () => {
-      it('should clear UUIDs for channel', () => {
+      it('should clear UUIDs for channel', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2665,13 +2665,13 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        clearSyncedMessageUuids('C123');
+        await clearSyncedMessageUuids('C123');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         expect(writtenData.channels['C123'].syncedMessageUuids).toEqual([]);
       });
 
-      it('should clear UUIDs for thread', () => {
+      it('should clear UUIDs for thread', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2707,7 +2707,7 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        clearSyncedMessageUuids('C123', 'thread123');
+        await clearSyncedMessageUuids('C123', 'thread123');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         // Thread UUIDs should be cleared
@@ -2716,11 +2716,11 @@ describe('session-manager', () => {
         expect(writtenData.channels['C123'].syncedMessageUuids).toEqual(['main-uuid']);
       });
 
-      it('should do nothing if channel not found', () => {
+      it('should do nothing if channel not found', async () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
-        clearSyncedMessageUuids('C999');
+        await clearSyncedMessageUuids('C999');
 
         expect(fs.writeFileSync).not.toHaveBeenCalled();
       });
@@ -2733,7 +2733,7 @@ describe('session-manager', () => {
 
   describe('Slack-Originated User UUIDs', () => {
     describe('addSlackOriginatedUserUuid', () => {
-      it('should add UUID to main channel session', () => {
+      it('should add UUID to main channel session', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2753,13 +2753,13 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        addSlackOriginatedUserUuid('C123', 'uuid-from-slack');
+        await addSlackOriginatedUserUuid('C123', 'uuid-from-slack');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         expect(writtenData.channels['C123'].slackOriginatedUserUuids).toEqual(['uuid-from-slack']);
       });
 
-      it('should append to existing UUIDs without duplicates', () => {
+      it('should append to existing UUIDs without duplicates', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2780,13 +2780,13 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        addSlackOriginatedUserUuid('C123', 'uuid-2');
+        await addSlackOriginatedUserUuid('C123', 'uuid-2');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         expect(writtenData.channels['C123'].slackOriginatedUserUuids).toEqual(['uuid-1', 'uuid-2']);
       });
 
-      it('should not add duplicate UUID', () => {
+      it('should not add duplicate UUID', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2807,13 +2807,13 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        addSlackOriginatedUserUuid('C123', 'uuid-1');
+        await addSlackOriginatedUserUuid('C123', 'uuid-1');
 
         // Should not write since UUID already exists
         expect(fs.writeFileSync).not.toHaveBeenCalled();
       });
 
-      it('should add UUID to thread session', () => {
+      it('should add UUID to thread session', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2847,24 +2847,24 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        addSlackOriginatedUserUuid('C123', 'thread-uuid', 'thread123');
+        await addSlackOriginatedUserUuid('C123', 'thread-uuid', 'thread123');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         expect(writtenData.channels['C123'].threads['thread123'].slackOriginatedUserUuids).toEqual(['thread-uuid']);
       });
 
-      it('should not save if channel not found', () => {
+      it('should not save if channel not found', async () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
-        addSlackOriginatedUserUuid('C999', 'uuid-1');
+        await addSlackOriginatedUserUuid('C999', 'uuid-1');
 
         expect(fs.writeFileSync).not.toHaveBeenCalled();
       });
     });
 
     describe('isSlackOriginatedUserUuid', () => {
-      it('should return true for Slack-originated UUID in main channel', () => {
+      it('should return true for Slack-originated UUID in main channel', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2889,7 +2889,7 @@ describe('session-manager', () => {
         expect(isSlackOriginatedUserUuid('C123', 'another-uuid')).toBe(true);
       });
 
-      it('should return false for terminal-originated UUID', () => {
+      it('should return false for terminal-originated UUID', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2913,7 +2913,7 @@ describe('session-manager', () => {
         expect(isSlackOriginatedUserUuid('C123', 'uuid-from-terminal')).toBe(false);
       });
 
-      it('should return true for Slack-originated UUID in thread', () => {
+      it('should return true for Slack-originated UUID in thread', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2952,14 +2952,14 @@ describe('session-manager', () => {
         expect(isSlackOriginatedUserUuid('C123', 'other-uuid', 'thread123')).toBe(false);
       });
 
-      it('should return false if channel not found', () => {
+      it('should return false if channel not found', async () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
         expect(isSlackOriginatedUserUuid('C999', 'any-uuid')).toBe(false);
       });
 
-      it('should return false if slackOriginatedUserUuids is undefined', () => {
+      it('should return false if slackOriginatedUserUuids is undefined', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -2985,7 +2985,7 @@ describe('session-manager', () => {
     });
 
     describe('clearSlackOriginatedUserUuids', () => {
-      it('should clear UUIDs from main channel', () => {
+      it('should clear UUIDs from main channel', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -3006,13 +3006,13 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        clearSlackOriginatedUserUuids('C123');
+        await clearSlackOriginatedUserUuids('C123');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         expect(writtenData.channels['C123'].slackOriginatedUserUuids).toEqual([]);
       });
 
-      it('should clear UUIDs from thread without affecting main channel', () => {
+      it('should clear UUIDs from thread without affecting main channel', async () => {
         const mockStore = {
           channels: {
             'C123': {
@@ -3048,7 +3048,7 @@ describe('session-manager', () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
-        clearSlackOriginatedUserUuids('C123', 'thread123');
+        await clearSlackOriginatedUserUuids('C123', 'thread123');
 
         const writtenData = JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[0][1] as string);
         // Thread UUIDs should be cleared
@@ -3057,11 +3057,11 @@ describe('session-manager', () => {
         expect(writtenData.channels['C123'].slackOriginatedUserUuids).toEqual(['main-uuid']);
       });
 
-      it('should do nothing if channel not found', () => {
+      it('should do nothing if channel not found', async () => {
         vi.mocked(fs.existsSync).mockReturnValue(true);
         vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ channels: {} }));
 
-        clearSlackOriginatedUserUuids('C999');
+        await clearSlackOriginatedUserUuids('C999');
 
         expect(fs.writeFileSync).not.toHaveBeenCalled();
       });
@@ -3078,7 +3078,7 @@ describe('session-manager', () => {
     });
 
     describe('generateSegmentKey', () => {
-      it('should create unique keys with UUID', () => {
+      it('should create unique keys with UUID', async () => {
         const key1 = generateSegmentKey('C123', '1234.5678');
         const key2 = generateSegmentKey('C123', '1234.5678');
         const key3 = generateSegmentKey('C123', '9999.9999');
@@ -3093,13 +3093,13 @@ describe('session-manager', () => {
         expect(key3).toMatch(/^C123_9999\.9999_seg_[a-f0-9-]{36}$/);
       });
 
-      it('should work for main channel (no thread)', () => {
+      it('should work for main channel (no thread)', async () => {
         // Main channel uses originalTs as messageTs
         const key = generateSegmentKey('C123', '1234567890.123456');
         expect(key).toMatch(/^C123_1234567890\.123456_seg_[a-f0-9-]{36}$/);
       });
 
-      it('should work with different channel IDs', () => {
+      it('should work with different channel IDs', async () => {
         const key1 = generateSegmentKey('C123', '1234.5678');
         const key2 = generateSegmentKey('C456', '1234.5678');
 
@@ -3109,7 +3109,7 @@ describe('session-manager', () => {
     });
 
     describe('saveSegmentActivityLog and getSegmentActivityLog', () => {
-      it('should save and retrieve segment activity log', () => {
+      it('should save and retrieve segment activity log', async () => {
         const key = generateSegmentKey('C123', '1234.5678');
         const entries: ActivityEntry[] = [
           { timestamp: Date.now(), type: 'thinking', thinkingContent: 'test' },
@@ -3121,7 +3121,7 @@ describe('session-manager', () => {
         expect(retrieved).toEqual(entries);
       });
 
-      it('should return a copy, not the same reference', () => {
+      it('should return a copy, not the same reference', async () => {
         const key = generateSegmentKey('C123', '1234.5678');
         const entries: ActivityEntry[] = [
           { timestamp: Date.now(), type: 'starting' },
@@ -3133,12 +3133,12 @@ describe('session-manager', () => {
         expect(retrieved).not.toBe(entries);
       });
 
-      it('should return null for unknown key', () => {
+      it('should return null for unknown key', async () => {
         const result = getSegmentActivityLog('unknown_key');
         expect(result).toBeNull();
       });
 
-      it('should save multiple segments independently', () => {
+      it('should save multiple segments independently', async () => {
         const key1 = generateSegmentKey('C123', '1234.5678');
         const key2 = generateSegmentKey('C123', '1234.5678');
         const entries1: ActivityEntry[] = [{ timestamp: 1, type: 'starting' }];
@@ -3156,7 +3156,7 @@ describe('session-manager', () => {
     });
 
     describe('updateSegmentActivityLog', () => {
-      it('should replace existing entries', () => {
+      it('should replace existing entries', async () => {
         const key = generateSegmentKey('C123', '1234.5678');
         const entries1: ActivityEntry[] = [{ timestamp: 1, type: 'starting' }];
         const entries2: ActivityEntry[] = [
@@ -3171,7 +3171,7 @@ describe('session-manager', () => {
         expect(getSegmentActivityLog(key)).toHaveLength(2);
       });
 
-      it('should work the same as save for new keys', () => {
+      it('should work the same as save for new keys', async () => {
         const key = generateSegmentKey('C123', '1234.5678');
         const entries: ActivityEntry[] = [{ timestamp: 1, type: 'starting' }];
 
@@ -3181,7 +3181,7 @@ describe('session-manager', () => {
     });
 
     describe('clearSegmentActivityLogs', () => {
-      it('should clear segment logs for a specific thread', () => {
+      it('should clear segment logs for a specific thread', async () => {
         // Create segments for different threads
         const key1 = 'C123_1234.5678_seg_uuid1';
         const key2 = 'C123_1234.5678_seg_uuid2';
@@ -3198,7 +3198,7 @@ describe('session-manager', () => {
         expect(getSegmentActivityLog(key3)).not.toBeNull(); // Different messageTs
       });
 
-      it('should clear all segments for a channel when no threadTs', () => {
+      it('should clear all segments for a channel when no threadTs', async () => {
         const key1 = 'C123_1234.5678_seg_uuid1';
         const key2 = 'C123_9999.9999_seg_uuid2';
         const key3 = 'C456_1234.5678_seg_uuid3';
@@ -3214,7 +3214,7 @@ describe('session-manager', () => {
         expect(getSegmentActivityLog(key3)).not.toBeNull(); // Different channel
       });
 
-      it('should preserve segments in other channels', () => {
+      it('should preserve segments in other channels', async () => {
         const key1 = 'C123_1234.5678_seg_uuid1';
         const key2 = 'C456_1234.5678_seg_uuid2';
 
@@ -3229,7 +3229,7 @@ describe('session-manager', () => {
     });
 
     describe('clearAllSegmentActivityLogs', () => {
-      it('should clear all segment logs', () => {
+      it('should clear all segment logs', async () => {
         const key1 = generateSegmentKey('C123', '1234.5678');
         const key2 = generateSegmentKey('C456', '9999.9999');
 
@@ -3241,6 +3241,145 @@ describe('session-manager', () => {
         expect(getSegmentActivityLog(key1)).toBeNull();
         expect(getSegmentActivityLog(key2)).toBeNull();
       });
+    });
+  });
+
+  describe('concurrent access', () => {
+    it('should not lose UUIDs when adding concurrently', async () => {
+      // Setup: channel exists with existing UUIDs
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'test-session',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            slackOriginatedUserUuids: [],
+          },
+        },
+      };
+
+      // Track all writes to verify all UUIDs are saved
+      const writtenStores: string[] = [];
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+      vi.mocked(fs.writeFileSync).mockImplementation((_path, content) => {
+        writtenStores.push(content as string);
+        // Update mock to return the latest written store
+        vi.mocked(fs.readFileSync).mockReturnValue(content as string);
+      });
+
+      // Action: Call addSlackOriginatedUserUuid 5 times in parallel with different UUIDs
+      const uuids = ['uuid1', 'uuid2', 'uuid3', 'uuid4', 'uuid5'];
+      await Promise.all(uuids.map(uuid => addSlackOriginatedUserUuid('C123', uuid)));
+
+      // Assert: All UUIDs should be present in the final state
+      const finalStore = JSON.parse(writtenStores[writtenStores.length - 1]);
+      const savedUuids = finalStore.channels['C123'].slackOriginatedUserUuids;
+      expect(savedUuids).toHaveLength(5);
+      for (const uuid of uuids) {
+        expect(savedUuids).toContain(uuid);
+      }
+    });
+  });
+
+  describe('addSlackOriginatedUserUuid thread creation', () => {
+    it('should create thread entry if thread does not exist', async () => {
+      // Setup: Channel exists but thread does not
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {},  // No threads yet
+          },
+        },
+      };
+
+      let writtenStore: any = null;
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+      vi.mocked(fs.writeFileSync).mockImplementation((_path, content) => {
+        writtenStore = JSON.parse(content as string);
+        vi.mocked(fs.readFileSync).mockReturnValue(content as string);
+      });
+
+      // Action: Add UUID for a thread that doesn't exist
+      await addSlackOriginatedUserUuid('C123', 'user_uuid_123', '1234.5678');
+
+      // Assert: Thread entry was created
+      expect(writtenStore).not.toBeNull();
+      expect(writtenStore.channels['C123'].threads['1234.5678']).toBeDefined();
+
+      // Assert: Thread has correct structure (minimal entry)
+      const thread = writtenStore.channels['C123'].threads['1234.5678'];
+      expect(thread.sessionId).toBeNull();
+      expect(thread.workingDir).toBe('/test');
+      expect(thread.mode).toBe('plan');
+
+      // Assert: UUID is in thread's slackOriginatedUserUuids
+      expect(thread.slackOriginatedUserUuids).toContain('user_uuid_123');
+    });
+
+    it('should add UUID to existing thread', async () => {
+      // Setup: Channel with existing thread
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            threads: {
+              '1234.5678': {
+                sessionId: 'thread-session',
+                workingDir: '/test',
+                mode: 'plan' as const,
+                createdAt: Date.now(),
+                lastActiveAt: Date.now(),
+                pathConfigured: true,
+                configuredPath: '/test',
+                configuredBy: 'U123',
+                configuredAt: Date.now(),
+                slackOriginatedUserUuids: ['existing_uuid'],
+              },
+            },
+          },
+        },
+      };
+
+      let writtenStore: any = null;
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+      vi.mocked(fs.writeFileSync).mockImplementation((_path, content) => {
+        writtenStore = JSON.parse(content as string);
+        vi.mocked(fs.readFileSync).mockReturnValue(content as string);
+      });
+
+      // Action: Add new UUID to existing thread
+      await addSlackOriginatedUserUuid('C123', 'new_uuid', '1234.5678');
+
+      // Assert: Both UUIDs present
+      const uuids = writtenStore.channels['C123'].threads['1234.5678'].slackOriginatedUserUuids;
+      expect(uuids).toContain('existing_uuid');
+      expect(uuids).toContain('new_uuid');
     });
   });
 });

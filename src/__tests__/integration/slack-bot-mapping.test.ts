@@ -37,6 +37,13 @@ vi.mock('../../session-manager.js', () => ({
   deleteSession: vi.fn(),
   saveActivityLog: vi.fn().mockResolvedValue(undefined),
   getActivityLog: vi.fn().mockResolvedValue(null),
+  addSlackOriginatedUserUuid: vi.fn(),
+  // Segment activity log functions
+  getSegmentActivityLog: vi.fn().mockReturnValue(null),
+  saveSegmentActivityLog: vi.fn(),
+  updateSegmentActivityLog: vi.fn(),
+  generateSegmentKey: vi.fn((channelId, messageTs) => `${channelId}_${messageTs}_seg_mock-uuid`),
+  clearSegmentActivityLogs: vi.fn(),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({
@@ -183,15 +190,19 @@ describe('slack-bot message mapping', () => {
 
       // Should save placeholder mapping with _slack_ prefix
       // This prevents /ff from re-importing this message
-      expect(saveMessageMapping).toHaveBeenCalledWith(
+      const assistantCalls = vi.mocked(saveMessageMapping).mock.calls.filter(
+        call => call[2].type === 'assistant'
+      );
+      expect(assistantCalls).toHaveLength(1);
+      expect(assistantCalls[0]).toEqual([
         'C123',
         '_slack_assistant-uuid-456',
         expect.objectContaining({
           sdkMessageId: 'assistant-uuid-456',
           sessionId: 'session-456',
           type: 'assistant',
-        })
-      );
+        }),
+      ]);
     });
 
     it('should NOT save mapping when no assistant UUID is captured', async () => {
@@ -333,15 +344,19 @@ describe('slack-bot message mapping', () => {
 
       // Should save placeholder mapping when no ts is returned from posting
       // This is critical - the UUID must be tracked to prevent /ff re-import
-      expect(saveMessageMapping).toHaveBeenCalledWith(
+      const assistantCalls = vi.mocked(saveMessageMapping).mock.calls.filter(
+        call => call[2].type === 'assistant'
+      );
+      expect(assistantCalls).toHaveLength(1);
+      expect(assistantCalls[0]).toEqual([
         'C123',
         '_slack_assistant-uuid-no-ts',
         expect.objectContaining({
           sdkMessageId: 'assistant-uuid-no-ts',
           sessionId: 'session-no-ts',
           type: 'assistant',
-        })
-      );
+        }),
+      ]);
     });
   });
 });

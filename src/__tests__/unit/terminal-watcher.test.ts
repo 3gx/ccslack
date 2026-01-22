@@ -70,6 +70,17 @@ vi.mock('../../blocks.js', () => ({
     { type: 'section', text: { type: 'mrkdwn', text: ':brain: *Thinking...*' } },
     { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Log' } }] },
   ]),
+  buildStopWatchingButton: vi.fn((sessionId: string) => ({
+    type: 'actions',
+    block_id: `terminal_watch_${sessionId}`,
+    elements: [{
+      type: 'button',
+      text: { type: 'plain_text', text: '🛑 Stop Watching', emoji: true },
+      action_id: 'stop_terminal_watch',
+      style: 'danger',
+      value: JSON.stringify({ sessionId }),
+    }],
+  })),
 }));
 
 // Mock fs
@@ -123,14 +134,14 @@ describe('terminal-watcher', () => {
   });
 
   describe('startWatching', () => {
-    it('should start watching a valid session', () => {
+    it('should start watching a valid session', async () => {
       const result = startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
       expect(result.success).toBe(true);
       expect(isWatching('channel-1')).toBe(true);
     });
 
-    it('should return error when session has no sessionId', () => {
+    it('should return error when session has no sessionId', async () => {
       const sessionWithoutId = { ...mockSession, sessionId: null };
 
       const result = startWatching('channel-1', undefined, sessionWithoutId, mockClient, 'status-ts');
@@ -140,7 +151,7 @@ describe('terminal-watcher', () => {
       expect(isWatching('channel-1')).toBe(false);
     });
 
-    it('should return error when session file does not exist', () => {
+    it('should return error when session file does not exist', async () => {
       vi.mocked(sessionReader.sessionFileExists).mockReturnValue(false);
 
       const result = startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
@@ -150,7 +161,7 @@ describe('terminal-watcher', () => {
       expect(isWatching('channel-1')).toBe(false);
     });
 
-    it('should stop existing watcher before starting new one', () => {
+    it('should stop existing watcher before starting new one', async () => {
       // Start first watcher
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts-1');
       expect(isWatching('channel-1')).toBe(true);
@@ -162,7 +173,7 @@ describe('terminal-watcher', () => {
       expect(isWatching('channel-1')).toBe(true);
     });
 
-    it('should handle thread conversations separately', () => {
+    it('should handle thread conversations separately', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts-1');
       startWatching('channel-1', 'thread-ts', mockSession, mockClient, 'status-ts-2');
 
@@ -170,7 +181,7 @@ describe('terminal-watcher', () => {
       expect(isWatching('channel-1', 'thread-ts')).toBe(true);
     });
 
-    it('should use session updateRateSeconds for polling interval', () => {
+    it('should use session updateRateSeconds for polling interval', async () => {
       const sessionWithCustomRate = { ...mockSession, updateRateSeconds: 5 };
 
       startWatching('channel-1', undefined, sessionWithCustomRate, mockClient, 'status-ts');
@@ -179,7 +190,7 @@ describe('terminal-watcher', () => {
       expect(watcher?.updateRateMs).toBe(5000);
     });
 
-    it('should default to 2 seconds if updateRateSeconds not set', () => {
+    it('should default to 2 seconds if updateRateSeconds not set', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
       const watcher = getWatcher('channel-1');
@@ -188,7 +199,7 @@ describe('terminal-watcher', () => {
   });
 
   describe('stopWatching', () => {
-    it('should stop an active watcher', () => {
+    it('should stop an active watcher', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
       expect(isWatching('channel-1')).toBe(true);
 
@@ -198,13 +209,13 @@ describe('terminal-watcher', () => {
       expect(isWatching('channel-1')).toBe(false);
     });
 
-    it('should return false when no watcher exists', () => {
+    it('should return false when no watcher exists', async () => {
       const result = stopWatching('nonexistent-channel');
 
       expect(result).toBe(false);
     });
 
-    it('should stop thread watcher independently', () => {
+    it('should stop thread watcher independently', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts-1');
       startWatching('channel-1', 'thread-ts', mockSession, mockClient, 'status-ts-2');
 
@@ -216,17 +227,17 @@ describe('terminal-watcher', () => {
   });
 
   describe('isWatching', () => {
-    it('should return true for active watcher', () => {
+    it('should return true for active watcher', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
       expect(isWatching('channel-1')).toBe(true);
     });
 
-    it('should return false for non-watched channel', () => {
+    it('should return false for non-watched channel', async () => {
       expect(isWatching('channel-1')).toBe(false);
     });
 
-    it('should differentiate between channel and thread', () => {
+    it('should differentiate between channel and thread', async () => {
       startWatching('channel-1', 'thread-ts', mockSession, mockClient, 'status-ts');
 
       expect(isWatching('channel-1')).toBe(false);
@@ -235,7 +246,7 @@ describe('terminal-watcher', () => {
   });
 
   describe('updateWatchRate', () => {
-    it('should update rate for active watcher', () => {
+    it('should update rate for active watcher', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
       const result = updateWatchRate('channel-1', undefined, 5);
@@ -245,7 +256,7 @@ describe('terminal-watcher', () => {
       expect(watcher?.updateRateMs).toBe(5000);
     });
 
-    it('should return false when no watcher exists', () => {
+    it('should return false when no watcher exists', async () => {
       const result = updateWatchRate('nonexistent', undefined, 5);
 
       expect(result).toBe(false);
@@ -253,7 +264,7 @@ describe('terminal-watcher', () => {
   });
 
   describe('getWatcher', () => {
-    it('should return watcher state for active watcher', () => {
+    it('should return watcher state for active watcher', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
       const watcher = getWatcher('channel-1');
@@ -263,7 +274,7 @@ describe('terminal-watcher', () => {
       expect(watcher?.sessionId).toBe('test-session-123');
     });
 
-    it('should return undefined for non-watched channel', () => {
+    it('should return undefined for non-watched channel', async () => {
       const watcher = getWatcher('nonexistent');
 
       expect(watcher).toBeUndefined();
@@ -289,7 +300,7 @@ describe('terminal-watcher', () => {
       );
     });
 
-    it('should do nothing when no watcher exists', () => {
+    it('should do nothing when no watcher exists', async () => {
       onSessionCleared('nonexistent');
 
       expect(mockClient.chat.update).not.toHaveBeenCalled();
@@ -297,7 +308,7 @@ describe('terminal-watcher', () => {
   });
 
   describe('stopAllWatchers', () => {
-    it('should stop all active watchers', () => {
+    it('should stop all active watchers', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts-1');
       startWatching('channel-2', undefined, mockSession, mockClient, 'status-ts-2');
       startWatching('channel-1', 'thread-ts', mockSession, mockClient, 'status-ts-3');

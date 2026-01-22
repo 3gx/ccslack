@@ -45,7 +45,7 @@ describe('point-in-time thread forking integration', () => {
   });
 
   describe('full workflow: message mapping to thread fork', () => {
-    it('should create thread session that forks from specific message', () => {
+    it('should create thread session that forks from specific message', async () => {
       // Setup: Channel with conversation history
       const mockStore = {
         channels: {
@@ -69,14 +69,14 @@ describe('point-in-time thread forking integration', () => {
       expect(forkPoint).toEqual({ messageId: 'msg_017pagAKz', sessionId: 'main-session-123' });
 
       // Step 2: Create thread session at message B
-      const threadResult = getOrCreateThreadSession('C123', '1234.002', forkPoint);
+      const threadResult = await getOrCreateThreadSession('C123', '1234.002', forkPoint);
 
       expect(threadResult.isNewFork).toBe(true);
       expect(threadResult.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
       expect(threadResult.session.forkedFrom).toBe('main-session-123');
     });
 
-    it('should handle user replying to their own user message', () => {
+    it('should handle user replying to their own user message', async () => {
       // Scenario: User replies to their user message, not a bot message
       // Should fork from the LAST assistant message BEFORE that user message
       const mockStore = {
@@ -103,11 +103,11 @@ describe('point-in-time thread forking integration', () => {
       expect(forkPoint).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
 
       // Create thread
-      const threadResult = getOrCreateThreadSession('C123', '1234.003', forkPoint);
+      const threadResult = await getOrCreateThreadSession('C123', '1234.003', forkPoint);
       expect(threadResult.session.resumeSessionAtMessageId).toBe('msg_001');
     });
 
-    it('should handle split messages (long responses)', () => {
+    it('should handle split messages (long responses)', async () => {
       // Scenario: Bot response split into 3 Slack messages
       const mockStore = {
         channels: {
@@ -134,7 +134,7 @@ describe('point-in-time thread forking integration', () => {
       expect(findForkPointMessageId('C123', '1234.004')).toEqual({ messageId: 'msg_001', sessionId: 'main-session-123' });
     });
 
-    it('should gracefully handle old channels without message mappings', () => {
+    it('should gracefully handle old channels without message mappings', async () => {
       // Scenario: Old channel that existed before point-in-time forking was implemented
       const mockStore = {
         channels: {
@@ -153,12 +153,12 @@ describe('point-in-time thread forking integration', () => {
       expect(forkPoint).toBeNull();
 
       // Thread should still be created, but without resumeSessionAtMessageId
-      const threadResult = getOrCreateThreadSession('C123', '1234.002', null);
+      const threadResult = await getOrCreateThreadSession('C123', '1234.002', null);
       expect(threadResult.isNewFork).toBe(true);
       expect(threadResult.session.resumeSessionAtMessageId).toBeUndefined();
     });
 
-    it('should handle forking from first message (no prior assistant messages)', () => {
+    it('should handle forking from first message (no prior assistant messages)', async () => {
       // Scenario: User's very first message in channel
       const mockStore = {
         channels: {
@@ -181,7 +181,7 @@ describe('point-in-time thread forking integration', () => {
   });
 
   describe('session storage and persistence', () => {
-    it('should persist resumeSessionAtMessageId in thread session', () => {
+    it('should persist resumeSessionAtMessageId in thread session', async () => {
       const mockStore = {
         channels: {
           'C123': {
@@ -195,7 +195,7 @@ describe('point-in-time thread forking integration', () => {
 
       // Create thread with fork point (now uses ForkPointResult format)
       const forkPoint = { messageId: 'msg_017pagAKz', sessionId: 'main-session-123' };
-      getOrCreateThreadSession('C123', '1234.002', forkPoint);
+      await getOrCreateThreadSession('C123', '1234.002', forkPoint);
 
       // Verify it was written to disk
       const writeCall = vi.mocked(fs.writeFileSync).mock.calls[0];
@@ -205,7 +205,7 @@ describe('point-in-time thread forking integration', () => {
       expect(writtenData.channels['C123'].threads['1234.002'].forkedFrom).toBe('main-session-123');
     });
 
-    it('should preserve resumeSessionAtMessageId when returning existing thread', () => {
+    it('should preserve resumeSessionAtMessageId when returning existing thread', async () => {
       // Thread already exists with resumeSessionAtMessageId
       const mockStore = {
         channels: {
@@ -234,7 +234,7 @@ describe('point-in-time thread forking integration', () => {
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
 
       // Get existing thread
-      const threadResult = getOrCreateThreadSession('C123', '1234.002');
+      const threadResult = await getOrCreateThreadSession('C123', '1234.002');
 
       expect(threadResult.isNewFork).toBe(false);
       expect(threadResult.session.resumeSessionAtMessageId).toBe('msg_017pagAKz');
@@ -242,7 +242,7 @@ describe('point-in-time thread forking integration', () => {
   });
 
   describe('fork after /clear - time travel scenario', () => {
-    it('should fork from OLD session when replying to message from before /clear', () => {
+    it('should fork from OLD session when replying to message from before /clear', async () => {
       // This is the critical bug fix test:
       // 1. User has session S1 with messages
       // 2. User runs /clear - main session becomes null, S1 tracked in previousSessionIds
@@ -284,7 +284,7 @@ describe('point-in-time thread forking integration', () => {
       });
 
       // Create thread using the fork point
-      const threadResult = getOrCreateThreadSession('C123', '1234.002', forkPoint);
+      const threadResult = await getOrCreateThreadSession('C123', '1234.002', forkPoint);
 
       expect(threadResult.isNewFork).toBe(true);
       expect(threadResult.session.resumeSessionAtMessageId).toBe('msg_from_S1');
@@ -292,7 +292,7 @@ describe('point-in-time thread forking integration', () => {
       expect(threadResult.session.forkedFrom).toBe('old-session-S1');
     });
 
-    it('should still work for messages after /clear (uses current session)', () => {
+    it('should still work for messages after /clear (uses current session)', async () => {
       // After /clear, new messages get new session S2
       const mockStore = {
         channels: {

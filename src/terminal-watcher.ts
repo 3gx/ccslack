@@ -16,6 +16,7 @@ import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
+import { buildStopWatchingButton } from './blocks.js';
 
 /**
  * State for an active terminal watcher.
@@ -249,17 +250,7 @@ function buildStatusBlocks(state: WatchState): any[] {
         text: `:eye: Watching for terminal activity... Updates every ${updateRateSeconds}s`,
       }],
     },
-    {
-      type: 'actions',
-      block_id: `terminal_watch_${state.sessionId}`,
-      elements: [{
-        type: 'button',
-        text: { type: 'plain_text', text: '🛑 Stop Watching', emoji: true },
-        action_id: 'stop_terminal_watch',
-        style: 'danger',
-        value: JSON.stringify({ sessionId: state.sessionId }),
-      }],
-    },
+    buildStopWatchingButton(state.sessionId),
   ];
 }
 
@@ -346,7 +337,7 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
 
       // Save mapping for thread forking
       if (result?.ts) {
-        saveMessageMapping(state.channelId, result.ts, {
+        await saveMessageMapping(state.channelId, result.ts, {
           sdkMessageId: msg.uuid,
           sessionId: state.sessionId,
           type: 'user',
@@ -381,7 +372,7 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
         );
 
         if (result?.ts) {
-          saveMessageMapping(state.channelId, result.ts, {
+          await saveMessageMapping(state.channelId, result.ts, {
             sdkMessageId: msg.uuid,
             sessionId: state.sessionId,
             type: 'assistant',
@@ -418,7 +409,7 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
 
       // Save mapping for thread forking
       if (uploaded?.ts) {
-        saveMessageMapping(state.channelId, uploaded.ts, {
+        await saveMessageMapping(state.channelId, uploaded.ts, {
           sdkMessageId: msg.uuid,
           sessionId: state.sessionId,
           type: 'assistant',
@@ -441,7 +432,7 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
 
       // Still save mapping even for fallback
       if (fallbackResult?.ts) {
-        saveMessageMapping(state.channelId, fallbackResult.ts, {
+        await saveMessageMapping(state.channelId, fallbackResult.ts, {
           sdkMessageId: msg.uuid,
           sessionId: state.sessionId,
           type: 'assistant',

@@ -360,7 +360,7 @@ async function postTurn(
   if (!alreadyPosted.has(turn.userInput.uuid)) {
     const inputResult = await postUserInput(state, turn.userInput, infiniteRetry, charLimit);
     if (inputResult?.ts) {
-      saveMessageMapping(state.channelId, inputResult.ts, {
+      await saveMessageMapping(state.channelId, inputResult.ts, {
         sdkMessageId: turn.userInput.uuid,
         sessionId: state.sessionId,
         type: 'user',
@@ -401,7 +401,7 @@ async function postTurn(
           for (const activityMsg of segment.activityMessages) {
             if (!alreadyPosted.has(activityMsg.uuid)) {
               const mappingKey = `${activityResult.ts}_${activityMsg.uuid}`;
-              saveMessageMapping(state.channelId, mappingKey, {
+              await saveMessageMapping(state.channelId, mappingKey, {
                 sdkMessageId: activityMsg.uuid,
                 sessionId: state.sessionId,
                 type: 'assistant',
@@ -437,7 +437,7 @@ async function postTurn(
         textSuccess = !!textResult?.ts;
 
         if (textResult?.ts) {
-          saveMessageMapping(state.channelId, textResult.ts, {
+          await saveMessageMapping(state.channelId, textResult.ts, {
             sdkMessageId: segment.textOutput.uuid,
             sessionId: state.sessionId,
             type: 'assistant',
@@ -503,7 +503,7 @@ async function postTurn(
       for (const activityMsg of turn.trailingActivity) {
         if (!alreadyPosted.has(activityMsg.uuid)) {
           const mappingKey = `${activityTs}_${activityMsg.uuid}`;
-          saveMessageMapping(state.channelId, mappingKey, {
+          await saveMessageMapping(state.channelId, mappingKey, {
             sdkMessageId: activityMsg.uuid,
             sessionId: state.sessionId,
             type: 'assistant',
