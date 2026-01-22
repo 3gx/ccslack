@@ -19,6 +19,8 @@ import {
   saveMessageMapping,
   mergeActivityLog,
   isSlackOriginatedUserUuid,
+  generateSegmentKey,
+  saveSegmentActivityLog,
   SlackMessageMapping,
 } from './session-manager.js';
 import {
@@ -350,6 +352,8 @@ async function postTurn(
   const { charLimit, stripEmptyTag, infiniteRetry = false, postTextMessage, activityMessages } = options;
   const turnKey = turn.userInput.uuid;
   const activityLogKey = state.conversationKey;
+  // messageTs for segment keys: use threadTs if in thread, conversationKey as fallback
+  const segmentMessageTs = state.threadTs || state.conversationKey;
   const turnStartTime = new Date(turn.userInput.timestamp).getTime();
 
   // 1. Post user input (skip if already posted - partial turn recovery)
@@ -378,13 +382,20 @@ async function postTurn(
       const segmentActivityAlreadyPosted = segment.activityMessages.every(m => alreadyPosted.has(m.uuid));
 
       if (!segmentActivityAlreadyPosted) {
+        // Generate unique segment key for View Log isolation
+        const segmentKey = generateSegmentKey(state.channelId, segmentMessageTs);
+
+        // Save segment activity before posting
+        saveSegmentActivityLog(segmentKey, segmentActivity);
+
         // Post NEW activity message for this segment (not update-in-place)
-        const blocks = buildLiveActivityBlocks(segmentActivity, activityLogKey, false);
+        const blocks = buildLiveActivityBlocks(segmentActivity, segmentKey, false);
         const activityResult = await postActivitySummary(state, blocks, infiniteRetry);
 
         if (activityResult?.ts) {
           // Save activity log (unified with bot)
           await mergeActivityLog(activityLogKey, segmentActivity);
+          console.log(`[MessageSync] Posted segment activity: ${segmentActivity.length} entries, key: ${segmentKey}`);
 
           // Track activity messages as posted
           for (const activityMsg of segment.activityMessages) {
@@ -446,7 +457,21 @@ async function postTurn(
   if (trailingActivity.length > 0) {
     // Check if we already have a trailing activity message for this turn
     const existingTs = activityMessages?.get(turnKey);
-    const blocks = buildLiveActivityBlocks(trailingActivity, activityLogKey, true);
+
+    // Generate unique segment key for trailing activity
+    // NOTE: For /watch, the same segment key should be used for updates
+    // We store the segment key with the turn key for consistent updates
+    const trailingSegmentKeyStorage = `${turnKey}_segmentKey`;
+    let trailingSegmentKey = activityMessages?.get(trailingSegmentKeyStorage);
+    if (!trailingSegmentKey) {
+      trailingSegmentKey = generateSegmentKey(state.channelId, segmentMessageTs);
+      activityMessages?.set(trailingSegmentKeyStorage, trailingSegmentKey);
+    }
+
+    // Update segment activity for View Log (so View Log shows latest even during updates)
+    saveSegmentActivityLog(trailingSegmentKey, trailingActivity);
+
+    const blocks = buildLiveActivityBlocks(trailingActivity, trailingSegmentKey, true);
 
     let activityTs: string | undefined;
 
@@ -472,6 +497,7 @@ async function postTurn(
 
       // Save activity log (unified with bot)
       await mergeActivityLog(activityLogKey, trailingActivity);
+      console.log(`[MessageSync] Posted/updated trailing activity: ${trailingActivity.length} entries, key: ${trailingSegmentKey}`);
 
       // Track trailing activity messages as posted
       for (const activityMsg of turn.trailingActivity) {

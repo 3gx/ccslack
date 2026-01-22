@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import * as crypto from 'crypto';
 
 /**
  * SDK Permission Mode type - matches @anthropic-ai/claude-agent-sdk.
@@ -1018,4 +1019,93 @@ export async function mergeActivityLog(
 
   channelSession.activityLogs[conversationKey] = merged;
   saveSessions(store);
+}
+
+// ============================================================================
+// Segment Activity Log Storage (for View Log per-segment isolation)
+// ============================================================================
+
+/**
+ * In-memory storage for segment activity logs.
+ * Each segment gets a unique key and stores only that segment's entries.
+ * This enables View Log buttons to show only their segment's activity.
+ */
+const segmentActivityLogs: Map<string, ActivityEntry[]> = new Map();
+
+/**
+ * Generate unique segment key using UUID (100% collision-free).
+ * Format: {channelId}_{messageTs}_seg_{uuid}
+ *
+ * @param channelId - Slack channel ID
+ * @param messageTs - threadTs if in thread, originalTs if main channel (never undefined)
+ */
+export function generateSegmentKey(
+  channelId: string,
+  messageTs: string
+): string {
+  const uuid = crypto.randomUUID();
+  return `${channelId}_${messageTs}_seg_${uuid}`;
+}
+
+/**
+ * Save activity log for a specific segment.
+ * Creates a copy to avoid mutation issues.
+ */
+export function saveSegmentActivityLog(segmentKey: string, entries: ActivityEntry[]): void {
+  segmentActivityLogs.set(segmentKey, [...entries]);
+}
+
+/**
+ * Get activity log for a specific segment.
+ * Returns a copy of the entries, or null if not found.
+ */
+export function getSegmentActivityLog(segmentKey: string): ActivityEntry[] | null {
+  const entries = segmentActivityLogs.get(segmentKey);
+  return entries ? [...entries] : null;
+}
+
+/**
+ * Update segment activity log (for in-progress segments).
+ * Replaces existing entries with new ones.
+ */
+export function updateSegmentActivityLog(segmentKey: string, entries: ActivityEntry[]): void {
+  segmentActivityLogs.set(segmentKey, [...entries]);
+}
+
+/**
+ * Clear segment activity logs for a conversation (on /clear or channel delete).
+ *
+ * For threads: clears all segments with prefix {channelId}_{threadTs}_seg_
+ * For main channel (no threadTs): clears all segments with prefix {channelId}_
+ *
+ * @param channelId - Slack channel ID
+ * @param threadTs - Thread timestamp (optional, for thread sessions)
+ */
+export function clearSegmentActivityLogs(channelId: string, threadTs?: string): void {
+  if (threadTs) {
+    // Thread: clear all segments for this specific thread
+    const prefix = `${channelId}_${threadTs}_seg_`;
+    for (const key of segmentActivityLogs.keys()) {
+      if (key.startsWith(prefix)) {
+        segmentActivityLogs.delete(key);
+      }
+    }
+    console.log(`[SegmentActivity] Cleared segments for thread ${threadTs} in channel ${channelId}`);
+  } else {
+    // Main channel: clear ALL segments for this channel (includes thread segments)
+    const prefix = `${channelId}_`;
+    for (const key of segmentActivityLogs.keys()) {
+      if (key.startsWith(prefix)) {
+        segmentActivityLogs.delete(key);
+      }
+    }
+    console.log(`[SegmentActivity] Cleared all segments for channel ${channelId}`);
+  }
+}
+
+/**
+ * Clear ALL segment activity logs (for testing).
+ */
+export function clearAllSegmentActivityLogs(): void {
+  segmentActivityLogs.clear();
 }

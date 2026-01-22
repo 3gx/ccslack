@@ -22,6 +22,9 @@ vi.mock('../../session-manager.js', () => ({
   saveMessageMapping: vi.fn(),
   mergeActivityLog: vi.fn(),  // Now using merge instead of save
   isSlackOriginatedUserUuid: vi.fn(() => false),  // Default: not Slack-originated
+  // Segment activity log functions
+  generateSegmentKey: vi.fn((channelId, messageTs) => `${channelId}_${messageTs}_seg_mock-uuid`),
+  saveSegmentActivityLog: vi.fn(),
 }));
 
 // Mock session-event-stream module

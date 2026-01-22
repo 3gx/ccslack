@@ -2404,37 +2404,37 @@ describe('blocks', () => {
   });
 
   describe('buildLiveActivityBlocks', () => {
-    const activityKey = 'C123_thread456_seg0';
+    const segmentKey = 'C123_thread456_seg_abc-123-def';
 
-    it('should include View Log button', () => {
+    it('should include View Log button with segment key', () => {
       const entries: ActivityEntry[] = [{
         timestamp: Date.now(),
         type: 'thinking',
         thinkingContent: 'test thinking',
       }];
-      const blocks = buildLiveActivityBlocks(entries, activityKey);
+      const blocks = buildLiveActivityBlocks(entries, segmentKey);
 
       expect(blocks[1].type).toBe('actions');
       const buttons = (blocks[1] as any).elements;
       const viewLogButton = buttons.find((b: any) => b.text.text === 'View Log');
       expect(viewLogButton).toBeDefined();
-      expect(viewLogButton.action_id).toContain('view_activity_log_');
-      expect(viewLogButton.value).toBe(activityKey);
+      expect(viewLogButton.action_id).toBe(`view_segment_log_${segmentKey}`);
+      expect(viewLogButton.value).toBe(segmentKey);
     });
 
-    it('should include Download button', () => {
+    it('should include Download button with segment key', () => {
       const entries: ActivityEntry[] = [{
         timestamp: Date.now(),
         type: 'thinking',
         thinkingContent: 'test thinking',
       }];
-      const blocks = buildLiveActivityBlocks(entries, activityKey);
+      const blocks = buildLiveActivityBlocks(entries, segmentKey);
 
       const buttons = (blocks[1] as any).elements;
       const downloadButton = buttons.find((b: any) => b.text.text === 'Download .txt');
       expect(downloadButton).toBeDefined();
-      expect(downloadButton.action_id).toContain('download_activity_log_');
-      expect(downloadButton.value).toBe(activityKey);
+      expect(downloadButton.action_id).toBe(`download_segment_log_${segmentKey}`);
+      expect(downloadButton.value).toBe(segmentKey);
     });
 
     it('should show activity text in section', () => {
@@ -2444,7 +2444,7 @@ describe('blocks', () => {
         tool: 'Read',
         durationMs: 1500,
       }];
-      const blocks = buildLiveActivityBlocks(entries, activityKey);
+      const blocks = buildLiveActivityBlocks(entries, segmentKey);
 
       expect(blocks[0].type).toBe('section');
       const sectionText = (blocks[0] as any).text.text;
@@ -2453,7 +2453,7 @@ describe('blocks', () => {
   });
 
   describe('buildActivityLogModalView', () => {
-    const conversationKey = 'C123_thread456';
+    const segmentKey = 'C123_thread456_seg_abc-123-def';
 
     const createEntries = (count: number): ActivityEntry[] => {
       const entries: ActivityEntry[] = [];
@@ -2470,7 +2470,7 @@ describe('blocks', () => {
 
     it('should show page info in header', () => {
       const entries = createEntries(30);
-      const view = buildActivityLogModalView(entries, 1, 2, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 2, segmentKey);
 
       const contextBlock = view.blocks.find((b: any) => b.type === 'context');
       expect(contextBlock.elements[0].text).toContain('Page 1 of 2');
@@ -2479,7 +2479,7 @@ describe('blocks', () => {
 
     it('should show only entries for current page', () => {
       const entries = createEntries(30); // 2 pages with MODAL_PAGE_SIZE = 15
-      const view = buildActivityLogModalView(entries, 1, 2, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 2, segmentKey);
 
       // Count section blocks (entries)
       const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
@@ -2488,7 +2488,7 @@ describe('blocks', () => {
 
     it('should show Next button on first page when multiple pages', () => {
       const entries = createEntries(30);
-      const view = buildActivityLogModalView(entries, 1, 2, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 2, segmentKey);
 
       const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
       expect(actionsBlock).toBeDefined();
@@ -2499,7 +2499,7 @@ describe('blocks', () => {
 
     it('should show Prev button on second page', () => {
       const entries = createEntries(30);
-      const view = buildActivityLogModalView(entries, 2, 2, conversationKey);
+      const view = buildActivityLogModalView(entries, 2, 2, segmentKey);
 
       const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
       const prevButton = actionsBlock.elements.find((b: any) => b.text.text.includes('Prev'));
@@ -2509,7 +2509,7 @@ describe('blocks', () => {
 
     it('should show both Prev and Next on middle page', () => {
       const entries = createEntries(45); // 3 pages
-      const view = buildActivityLogModalView(entries, 2, 3, conversationKey);
+      const view = buildActivityLogModalView(entries, 2, 3, segmentKey);
 
       const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
       expect(actionsBlock.elements).toHaveLength(2);
@@ -2517,18 +2517,18 @@ describe('blocks', () => {
 
     it('should not show pagination buttons for single page', () => {
       const entries = createEntries(10); // 1 page
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
 
       const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
       expect(actionsBlock).toBeUndefined();
     });
 
-    it('should include conversationKey in private_metadata', () => {
+    it('should include segmentKey in private_metadata', () => {
       const entries = createEntries(5);
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
 
       const metadata = JSON.parse(view.private_metadata);
-      expect(metadata.conversationKey).toBe(conversationKey);
+      expect(metadata.segmentKey).toBe(segmentKey);
       expect(metadata.currentPage).toBe(1);
     });
 
@@ -2542,7 +2542,7 @@ describe('blocks', () => {
         },
       ];
 
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
       const sectionBlock = view.blocks.find((b: any) =>
         b.type === 'section' && b.text?.text?.includes('Thinking')
       );
@@ -2561,7 +2561,7 @@ describe('blocks', () => {
         },
       ];
 
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
       const sectionBlock = view.blocks.find((b: any) =>
         b.type === 'section' && b.text?.text?.includes('Thinking')
       );
@@ -2577,7 +2577,7 @@ describe('blocks', () => {
         { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 1200 },
       ];
 
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
       const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
 
       expect(sectionBlocks[0].text.text).toContain('Read');
@@ -2592,7 +2592,7 @@ describe('blocks', () => {
         { timestamp: Date.now(), type: 'tool_complete', tool: 'Edit', durationMs: 2500 },
       ];
 
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
       const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
 
       // tool_complete should show the duration it took
@@ -2606,7 +2606,7 @@ describe('blocks', () => {
         { timestamp: Date.now(), type: 'tool_complete', tool: 'Bash' },
       ];
 
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
       const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
 
       // Should not crash, just show complete without duration
@@ -2619,7 +2619,7 @@ describe('blocks', () => {
         { timestamp: Date.now(), type: 'error', message: 'Something failed' },
       ];
 
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
       const sectionBlock = view.blocks.find((b: any) =>
         b.type === 'section' && b.text?.text?.includes('Error')
       );
@@ -2634,7 +2634,7 @@ describe('blocks', () => {
         { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
       ];
 
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
       const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
 
       // Starting entry should be first
@@ -2646,7 +2646,7 @@ describe('blocks', () => {
 
     it('should have modal type and title', () => {
       const entries = createEntries(5);
-      const view = buildActivityLogModalView(entries, 1, 1, conversationKey);
+      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
 
       expect(view.type).toBe('modal');
       expect(view.title.type).toBe('plain_text');

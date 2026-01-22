@@ -14,6 +14,11 @@ import {
   getActivityLog,
   clearSyncedMessageUuids,
   addSlackOriginatedUserUuid,
+  generateSegmentKey,
+  saveSegmentActivityLog,
+  getSegmentActivityLog,
+  updateSegmentActivityLog,
+  clearSegmentActivityLogs,
   Session,
   ThreadSession,
   PermissionMode,
@@ -123,6 +128,9 @@ interface ProcessingState {
   // File tool tracking (Write, Edit, Read) to capture plan file path
   fileToolInputs: Map<number, string>;  // Tracks by tool index
   planFilePath: string | null;
+  // Segment tracking for View Log isolation
+  currentSegmentKey: string | null;
+  lastPostedActivityIndex: number;
 }
 
 /**
@@ -191,6 +199,10 @@ interface PendingToolApproval {
   threadTs?: string;
 }
 const pendingToolApprovals = new Map<string, PendingToolApproval>();
+
+// Map from segmentKey -> conversationKey for in-progress segment lookup
+// This allows View Log handler to find segment activity during processing
+const segmentToConversationKey = new Map<string, string>();
 
 // Track tool approval reminders (matches MCP ask_user pattern)
 const toolApprovalReminderIntervals = new Map<string, NodeJS.Timeout>();
@@ -745,6 +757,17 @@ async function runClearSession(
 
     // Clear synced message UUIDs (for /ff resumability)
     clearSyncedMessageUuids(channelId, threadTs);
+
+    // Clear segment activity logs (for View Log isolation)
+    clearSegmentActivityLogs(channelId, threadTs);
+
+    // Clean up segment-to-conversation lookup map
+    const conversationKey = threadTs ? `${channelId}_${threadTs}` : channelId;
+    for (const [segKey, convKey] of segmentToConversationKey.entries()) {
+      if (convKey === conversationKey) {
+        segmentToConversationKey.delete(segKey);
+      }
+    }
 
     console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
 
@@ -1541,6 +1564,17 @@ app.event('channel_deleted', async ({ event }) => {
     // Delete session (handles both bot records and SDK files)
     deleteSession(event.channel);
 
+    // Clear segment activity logs for the entire channel
+    clearSegmentActivityLogs(event.channel);
+
+    // Clean up segment-to-conversation lookup map for this channel
+    const channelPrefix = `${event.channel}_`;
+    for (const [segKey, convKey] of segmentToConversationKey.entries()) {
+      if (convKey.startsWith(channelPrefix) || convKey === event.channel) {
+        segmentToConversationKey.delete(segKey);
+      }
+    }
+
     console.log(`${'='.repeat(60)}\n`);
   } catch (error) {
     console.error('Error handling channel deletion:', error);
@@ -2143,6 +2177,8 @@ async function handleMessage(params: {
 
   // Initialize processing state for real-time activity tracking
   const startTime = Date.now();
+  // messageTs for segment keys: use threadTs if in thread, originalTs if main channel
+  const segmentMessageTs = threadTs || originalTs || `${channelId}_${startTime}`;
   const processingState: ProcessingState = {
     status: 'starting',
     toolsCompleted: 0,
@@ -2167,6 +2203,20 @@ async function handleMessage(params: {
     fileToolInputs: new Map(),
     // Initialize from session (falls back to null if not set)
     planFilePath: session.planFilePath || null,
+    // Segment tracking for View Log isolation
+    currentSegmentKey: null,
+    lastPostedActivityIndex: 0,
+  };
+
+  // Helper function to generate a new segment key and register it for lookup
+  const startNewSegment = () => {
+    const newKey = generateSegmentKey(channelId, segmentMessageTs);
+    processingState.currentSegmentKey = newKey;
+    segmentToConversationKey.set(newKey, conversationKey);
+    // Save initial segment activity (even if empty, so View Log works immediately)
+    const segmentActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
+    saveSegmentActivityLog(newKey, segmentActivity);
+    return newKey;
   };
 
   // Post single combined message (activity log + status panel)
@@ -2331,8 +2381,7 @@ async function handleMessage(params: {
     let modelName: string | undefined;
     const assistantMessageUuids: Set<string> = new Set();  // Track ALL assistant UUIDs for message mapping
     let costUsd: number | undefined;
-    // Track which activity entries have been "frozen" (posted as complete segments)
-    let lastPostedActivityIndex = 0;
+    // Note: lastPostedActivityIndex is now in processingState for segment isolation
 
     // Helper to start an in-progress thinking entry (for live streaming)
     const startThinkingEntry = () => {
@@ -2419,12 +2468,21 @@ async function handleMessage(params: {
       // Post the current segment (activity + text) if there's response text
       if (currentResponse.trim() && !isAborted(conversationKey)) {
         // 1. Get activity entries for THIS segment (from lastPostedActivityIndex to current end)
-        const segmentActivity = processingState.activityLog.slice(lastPostedActivityIndex);
+        const segmentActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
 
         // 2. Post frozen activity segment (not in-progress)
         if (segmentActivity.length > 0) {
           try {
-            const blocks = buildLiveActivityBlocks(segmentActivity, activityLogKey, false);
+            // Ensure we have a segment key for this segment
+            if (!processingState.currentSegmentKey) {
+              startNewSegment();
+            }
+            const segmentKey = processingState.currentSegmentKey!;
+
+            // Final save of segment activity before posting
+            saveSegmentActivityLog(segmentKey, segmentActivity);
+
+            const blocks = buildLiveActivityBlocks(segmentActivity, segmentKey, false);
             await withSlackRetry(
               () => client.chat.postMessage({
                 channel: channelId,
@@ -2434,14 +2492,18 @@ async function handleMessage(params: {
               }),
               { onRateLimit: handleRateLimit }
             );
-            console.log(`[Interleaved] Posted activity segment: ${segmentActivity.length} entries`);
+            console.log(`[Interleaved] Posted activity segment: ${segmentActivity.length} entries, key: ${segmentKey}`);
+
+            // Clean up lookup map (segment is now persisted)
+            segmentToConversationKey.delete(segmentKey);
+            processingState.currentSegmentKey = null;
           } catch (error) {
             console.error('[Interleaved] Error posting activity segment:', error);
           }
         }
 
         // Mark activity as posted
-        lastPostedActivityIndex = processingState.activityLog.length;
+        processingState.lastPostedActivityIndex = processingState.activityLog.length;
 
         // 3. Post response text for this segment
         try {
@@ -2585,7 +2647,7 @@ async function handleMessage(params: {
         if (statusMsgTs) {
           try {
             // Only show trailing activity (from lastPostedActivityIndex onwards)
-            const trailingActivity = processingState.activityLog.slice(lastPostedActivityIndex);
+            const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
             await withSlackRetry(
               () =>
                 client.chat.update({
@@ -2917,10 +2979,19 @@ async function handleMessage(params: {
         if (isAborted(conversationKey)) return;
 
         // Post any trailing activity that wasn't part of a segment (activity after last response)
-        const trailingActivity = processingState.activityLog.slice(lastPostedActivityIndex);
+        const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
         if (trailingActivity.length > 0) {
           try {
-            const blocks = buildLiveActivityBlocks(trailingActivity, activityLogKey, false);
+            // Generate segment key for trailing activity
+            if (!processingState.currentSegmentKey) {
+              startNewSegment();
+            }
+            const segmentKey = processingState.currentSegmentKey!;
+
+            // Save segment activity before posting
+            saveSegmentActivityLog(segmentKey, trailingActivity);
+
+            const blocks = buildLiveActivityBlocks(trailingActivity, segmentKey, false);
             await withSlackRetry(
               () => client.chat.postMessage({
                 channel: channelId,
@@ -2930,7 +3001,11 @@ async function handleMessage(params: {
               }),
               { onRateLimit: handleRateLimit }
             );
-            console.log(`[Interleaved] Posted trailing activity: ${trailingActivity.length} entries`);
+            console.log(`[Interleaved] Posted trailing activity: ${trailingActivity.length} entries, key: ${segmentKey}`);
+
+            // Clean up lookup map
+            segmentToConversationKey.delete(segmentKey);
+            processingState.currentSegmentKey = null;
           } catch (error) {
             console.error('[Interleaved] Error posting trailing activity:', error);
           }
@@ -4168,45 +4243,51 @@ app.action(/^concurrent_proceed_(.+)$/, async ({ action, ack, body, client }) =>
 });
 
 // ============================================================================
-// Activity Log Modal and Download Handlers
+// Activity Log Modal and Download Handlers (Segment-Based)
 // ============================================================================
 
 const MODAL_PAGE_SIZE = 15;  // Entries per page for modal
 
-// Handle "View Log" button click - opens modal with activity log
-app.action(/^view_activity_log_(.+)$/, async ({ action, ack, body, client }) => {
+// Handle "View Log" button click - opens modal with SEGMENT-SPECIFIC activity log
+// Each View Log button now uses a unique segment key to show only that segment's entries
+app.action(/^view_segment_log_(.+)$/, async ({ action, ack, body, client }) => {
   await ack();
 
   const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^view_activity_log_(.+)$/);
-  const conversationKey = match ? match[1] : '';
+  const match = actionId.match(/^view_segment_log_(.+)$/);
+  const segmentKey = match ? match[1] : '';
 
-  console.log(`View activity log clicked for: ${conversationKey}`);
+  console.log(`[ViewLog] Segment view requested: ${segmentKey}`);
 
   const bodyWithTrigger = body as any;
   const triggerId = bodyWithTrigger.trigger_id;
 
   if (!triggerId) {
-    console.error('No trigger_id found for activity log modal');
+    console.error('No trigger_id found for segment log modal');
     return;
   }
 
-  // Check if query is active (log is in memory, not yet persisted)
-  const activeQuery = activeQueries.get(conversationKey);
-  let activityLog: ActivityEntry[] | null;
+  // Get segment-specific activity log from in-memory storage
+  // This works for BOTH in-progress (updated via updateSegmentActivityLog) AND completed segments
+  let activityLog = getSegmentActivityLog(segmentKey);
 
-  if (activeQuery) {
-    // Read from in-memory processingState
-    activityLog = activeQuery.processingState.activityLog;
-    console.log(`[ViewLog] Reading from active query: ${activityLog.length} entries`);
-  } else {
-    // Read from persisted storage (completed sessions)
-    activityLog = await getActivityLog(conversationKey);
-    console.log(`[ViewLog] Reading from storage: ${activityLog?.length ?? 0} entries`);
+  // If not found in segment storage, check if this is an active query segment
+  // (fallback for edge case where View Log clicked before first save)
+  if (!activityLog) {
+    const conversationKey = segmentToConversationKey.get(segmentKey);
+    if (conversationKey) {
+      const activeQuery = activeQueries.get(conversationKey);
+      if (activeQuery && activeQuery.processingState.currentSegmentKey === segmentKey) {
+        // Get current segment activity from processingState
+        const lastIdx = activeQuery.processingState.lastPostedActivityIndex || 0;
+        activityLog = activeQuery.processingState.activityLog.slice(lastIdx);
+        console.log(`[ViewLog] Retrieved from active query: ${activityLog.length} entries`);
+      }
+    }
   }
 
-  if (!activityLog) {
-    // Log not found - session was cleared or bot restarted
+  if (!activityLog || activityLog.length === 0) {
+    // Segment not found or empty - session was cleared or bot restarted
     try {
       await client.views.open({
         trigger_id: triggerId,
@@ -4223,47 +4304,26 @@ app.action(/^view_activity_log_(.+)$/, async ({ action, ack, body, client }) => 
         },
       });
     } catch (error) {
-      console.error('Error opening activity log error modal:', error);
+      console.error('Error opening segment log error modal:', error);
     }
     return;
   }
 
-  if (activityLog.length === 0) {
-    // Log exists but is empty - no tools or thinking blocks were used
-    try {
-      await client.views.open({
-        trigger_id: triggerId,
-        view: {
-          type: 'modal',
-          title: { type: 'plain_text', text: 'Activity Log' },
-          blocks: [{
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: ':information_source: No activity to display.\n\nClaude responded directly without using any tools or extended thinking.',
-            },
-          }],
-        },
-      });
-    } catch (error) {
-      console.error('Error opening activity log empty modal:', error);
-    }
-    return;
-  }
+  console.log(`[ViewLog] Showing ${activityLog.length} entries for segment`);
 
-  // Open modal with first page
+  // Open modal with first page - uses segment key for pagination state
   const totalPages = Math.ceil(activityLog.length / MODAL_PAGE_SIZE);
   try {
     await client.views.open({
       trigger_id: triggerId,
-      view: buildActivityLogModalView(activityLog, 1, totalPages, conversationKey),
+      view: buildActivityLogModalView(activityLog, 1, totalPages, segmentKey),
     });
   } catch (error) {
-    console.error('Error opening activity log modal:', error);
+    console.error('Error opening segment log modal:', error);
   }
 });
 
-// Handle pagination buttons in modal
+// Handle pagination buttons in modal (uses segmentKey from private_metadata)
 app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) => {
   await ack();
 
@@ -4280,7 +4340,7 @@ app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) =>
     return;
   }
 
-  let metadata: { conversationKey: string };
+  let metadata: { segmentKey: string };
   try {
     metadata = JSON.parse(privateMetadata);
   } catch (e) {
@@ -4288,22 +4348,25 @@ app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) =>
     return;
   }
 
-  const { conversationKey } = metadata;
+  const { segmentKey } = metadata;
 
-  // Check if query is active (log is in memory, not yet persisted)
-  const activeQuery = activeQueries.get(conversationKey);
-  let activityLog: ActivityEntry[] | null;
+  // Get segment-specific activity log
+  let activityLog = getSegmentActivityLog(segmentKey);
 
-  if (activeQuery) {
-    // Read from in-memory processingState
-    activityLog = activeQuery.processingState.activityLog;
-  } else {
-    // Read from persisted storage (completed sessions)
-    activityLog = await getActivityLog(conversationKey);
+  // Fallback to active query if segment not found (in-progress)
+  if (!activityLog) {
+    const conversationKey = segmentToConversationKey.get(segmentKey);
+    if (conversationKey) {
+      const activeQuery = activeQueries.get(conversationKey);
+      if (activeQuery && activeQuery.processingState.currentSegmentKey === segmentKey) {
+        const lastIdx = activeQuery.processingState.lastPostedActivityIndex || 0;
+        activityLog = activeQuery.processingState.activityLog.slice(lastIdx);
+      }
+    }
   }
 
   if (!activityLog) {
-    console.error('Activity log not found for pagination');
+    console.error('Segment activity log not found for pagination');
     return;
   }
 
@@ -4313,37 +4376,49 @@ app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) =>
   try {
     await client.views.update({
       view_id: viewId,
-      view: buildActivityLogModalView(activityLog, page, totalPages, conversationKey),
+      view: buildActivityLogModalView(activityLog, page, totalPages, segmentKey),
     });
   } catch (error) {
-    console.error('Error updating activity log modal page:', error);
+    console.error('Error updating segment log modal page:', error);
   }
 });
 
-// Handle "Download .txt" button click - uploads activity log as file
-app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client }) => {
+// Handle "Download .txt" button click - uploads SEGMENT-SPECIFIC activity log as file
+app.action(/^download_segment_log_(.+)$/, async ({ action, ack, body, client }) => {
   await ack();
 
   const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^download_activity_log_(.+)$/);
-  const conversationKey = match ? match[1] : '';
+  const match = actionId.match(/^download_segment_log_(.+)$/);
+  const segmentKey = match ? match[1] : '';
 
-  console.log(`Download activity log clicked for: ${conversationKey}`);
+  console.log(`[Download] Segment download requested: ${segmentKey}`);
 
   const bodyWithChannel = body as any;
   const channelId = bodyWithChannel.channel?.id;
   const threadTs = bodyWithChannel.message?.thread_ts;
 
   if (!channelId) {
-    console.error('No channel_id found for activity log download');
+    console.error('No channel_id found for segment log download');
     return;
   }
 
-  // Get activity log from storage
-  const activityLog = await getActivityLog(conversationKey);
+  // Get segment-specific activity log
+  let activityLog = getSegmentActivityLog(segmentKey);
 
+  // Fallback to active query if segment not found (in-progress)
   if (!activityLog) {
-    // Log not found - session was cleared or bot restarted
+    const conversationKey = segmentToConversationKey.get(segmentKey);
+    if (conversationKey) {
+      const activeQuery = activeQueries.get(conversationKey);
+      if (activeQuery && activeQuery.processingState.currentSegmentKey === segmentKey) {
+        const lastIdx = activeQuery.processingState.lastPostedActivityIndex || 0;
+        activityLog = activeQuery.processingState.activityLog.slice(lastIdx);
+      }
+    }
+  }
+
+  if (!activityLog || activityLog.length === 0) {
+    // Segment not found or empty
     try {
       await client.chat.postEphemeral({
         channel: channelId,
@@ -4351,21 +4426,7 @@ app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client })
         text: ':warning: Activity log is no longer available.\n\nThis can happen if the session was cleared or the bot was restarted.',
       });
     } catch (error) {
-      console.error('Error posting activity log unavailable message:', error);
-    }
-    return;
-  }
-
-  if (activityLog.length === 0) {
-    // Log exists but is empty - no tools or thinking blocks were used
-    try {
-      await client.chat.postEphemeral({
-        channel: channelId,
-        user: bodyWithChannel.user?.id || 'unknown',
-        text: ':information_source: No activity to download.\n\nClaude responded directly without using any tools or extended thinking.',
-      });
-    } catch (error) {
-      console.error('Error posting activity log empty message:', error);
+      console.error('Error posting segment log unavailable message:', error);
     }
     return;
   }
@@ -4373,7 +4434,8 @@ app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client })
   // Format as plain text with FULL thinking content
   const lines: string[] = [];
   lines.push('='.repeat(60));
-  lines.push(`Activity Log for ${conversationKey}`);
+  lines.push(`Activity Log Segment`);
+  lines.push(`Segment Key: ${segmentKey}`);
   lines.push(`Generated: ${new Date().toISOString()}`);
   lines.push('='.repeat(60));
   lines.push('');
@@ -4382,7 +4444,9 @@ app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client })
     const timestamp = new Date(entry.timestamp).toISOString();
     const duration = entry.durationMs ? ` (${entry.durationMs}ms)` : '';
 
-    if (entry.type === 'thinking') {
+    if (entry.type === 'starting') {
+      lines.push(`[${timestamp}] STARTED`);
+    } else if (entry.type === 'thinking') {
       // Include FULL thinking content in download
       lines.push(`[${timestamp}] THINKING:`);
       lines.push('-'.repeat(40));
@@ -4393,13 +4457,22 @@ app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client })
       lines.push(`[${timestamp}] TOOL START: ${entry.tool || 'unknown'}`);
     } else if (entry.type === 'tool_complete') {
       lines.push(`[${timestamp}] TOOL COMPLETE: ${entry.tool || 'unknown'}${duration}`);
+    } else if (entry.type === 'generating') {
+      const chars = entry.generatingChars ? ` (${entry.generatingChars} chars)` : '';
+      lines.push(`[${timestamp}] RESPONSE${duration}${chars}:`);
+      if (entry.generatingContent) {
+        lines.push('-'.repeat(40));
+        lines.push(entry.generatingContent);
+        lines.push('-'.repeat(40));
+        lines.push('');
+      }
     } else if (entry.type === 'error') {
       lines.push(`[${timestamp}] ERROR: ${entry.message || 'unknown'}`);
     }
   }
 
   const content = lines.join('\n');
-  const filename = `activity-log-${conversationKey.replace(/[^a-zA-Z0-9_-]/g, '-')}.txt`;
+  const filename = `activity-log-${segmentKey.replace(/[^a-zA-Z0-9_-]/g, '-')}.txt`;
 
   // Upload as file snippet (requires files:write scope)
   try {
@@ -4411,7 +4484,7 @@ app.action(/^download_activity_log_(.+)$/, async ({ action, ack, body, client })
       title: 'Activity Log',
     });
   } catch (error) {
-    console.error('Error uploading activity log file:', error);
+    console.error('Error uploading segment log file:', error);
     // Post error message
     try {
       await client.chat.postEphemeral({

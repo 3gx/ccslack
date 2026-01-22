@@ -1713,10 +1713,14 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
  * Shows rolling activity with thinking previews, tool durations, etc.
  * Used by /watch and /ff for in-progress turns AND completed turns.
  * Always includes View Log and Download buttons.
+ *
+ * @param activityEntries - Activity entries to display
+ * @param segmentKey - Unique segment key (format: {channelId}_{messageTs}_seg_{uuid})
+ * @param inProgress - Whether this segment is still in progress
  */
 export function buildLiveActivityBlocks(
   activityEntries: ActivityEntry[],
-  activityKey: string,
+  segmentKey: string,
   inProgress: boolean = true
 ): Block[] {
   const activityText = buildActivityLogText(activityEntries, inProgress, ACTIVITY_LOG_MAX_CHARS);
@@ -1731,19 +1735,19 @@ export function buildLiveActivityBlocks(
     },
     {
       type: 'actions',
-      block_id: `activity_actions_${activityKey}`,
+      block_id: `activity_actions_${segmentKey}`,
       elements: [
         {
           type: 'button',
           text: { type: 'plain_text', text: 'View Log' },
-          action_id: `view_activity_log_${activityKey}`,
-          value: activityKey,
+          action_id: `view_segment_log_${segmentKey}`,
+          value: segmentKey,
         },
         {
           type: 'button',
           text: { type: 'plain_text', text: 'Download .txt' },
-          action_id: `download_activity_log_${activityKey}`,
-          value: activityKey,
+          action_id: `download_segment_log_${segmentKey}`,
+          value: segmentKey,
         },
       ],
     },
@@ -1752,12 +1756,17 @@ export function buildLiveActivityBlocks(
 
 /**
  * Build modal view for activity log with pagination.
+ *
+ * @param entries - Activity entries to display
+ * @param currentPage - Current page number (1-indexed)
+ * @param totalPages - Total number of pages
+ * @param segmentKey - Unique segment key for pagination state
  */
 export function buildActivityLogModalView(
   entries: ActivityEntry[],
   currentPage: number,
   totalPages: number,
-  conversationKey: string
+  segmentKey: string
 ): any {
   const startIdx = (currentPage - 1) * MODAL_PAGE_SIZE;
   const pageEntries = entries.slice(startIdx, startIdx + MODAL_PAGE_SIZE);
@@ -1869,7 +1878,7 @@ export function buildActivityLogModalView(
 
   return {
     type: 'modal',
-    private_metadata: JSON.stringify({ conversationKey, currentPage }),
+    private_metadata: JSON.stringify({ segmentKey, currentPage }),
     title: { type: 'plain_text', text: 'Activity Log' },
     blocks,
   };

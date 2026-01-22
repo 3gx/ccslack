@@ -37,6 +37,12 @@ vi.mock('../../session-manager.js', () => ({
   deleteSession: vi.fn(),
   saveActivityLog: vi.fn().mockResolvedValue(undefined),
   getActivityLog: vi.fn().mockResolvedValue(null),
+  // Segment activity log functions
+  getSegmentActivityLog: vi.fn().mockReturnValue(null),
+  saveSegmentActivityLog: vi.fn(),
+  updateSegmentActivityLog: vi.fn(),
+  generateSegmentKey: vi.fn((channelId, messageTs) => `${channelId}_${messageTs}_seg_mock-uuid`),
+  clearSegmentActivityLogs: vi.fn(),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({
@@ -68,7 +74,7 @@ vi.mock('fs', () => ({
 import { createMockSlackClient } from './slack-bot-setup.js';
 
 // Import mocked modules
-import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog } from '../../session-manager.js';
+import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog, getSegmentActivityLog } from '../../session-manager.js';
 import { isSessionActiveInTerminal } from '../../concurrent-check.js';
 import { startClaudeQuery } from '../../claude-client.js';
 import fs from 'fs';
@@ -90,26 +96,26 @@ describe('slack-bot activity handlers', () => {
     await import('../../slack-bot.js');
   });
 
-  describe('view_activity_log handler', () => {
-    it('should register view_activity_log handler', async () => {
-      const handler = registeredHandlers['action_^view_activity_log_(.+)$'];
+  describe('view_segment_log handler', () => {
+    it('should register view_segment_log handler', async () => {
+      const handler = registeredHandlers['action_^view_segment_log_(.+)$'];
       expect(handler).toBeDefined();
     });
 
-    it('should open modal with activity log entries', async () => {
-      const handler = registeredHandlers['action_^view_activity_log_(.+)$'];
+    it('should open modal with segment activity log entries', async () => {
+      const handler = registeredHandlers['action_^view_segment_log_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      // Mock activity log data
-      vi.mocked(getActivityLog).mockResolvedValue([
+      // Mock segment activity log data
+      vi.mocked(getSegmentActivityLog).mockReturnValue([
         { timestamp: Date.now(), type: 'thinking', thinkingContent: 'Test thinking content' },
         { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
         { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
       ]);
 
       await handler({
-        action: { action_id: 'view_activity_log_C123_thread456' },
+        action: { action_id: 'view_segment_log_C123_thread456_seg_abc-123-def' },
         ack,
         body: {
           trigger_id: 'trigger123',
@@ -130,16 +136,16 @@ describe('slack-bot activity handlers', () => {
       );
     });
 
-    it('should show error modal when activity log not found', async () => {
-      const handler = registeredHandlers['action_^view_activity_log_(.+)$'];
+    it('should show error modal when segment activity log not found', async () => {
+      const handler = registeredHandlers['action_^view_segment_log_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      // Mock no activity log
-      vi.mocked(getActivityLog).mockResolvedValue(null);
+      // Mock no segment activity log
+      vi.mocked(getSegmentActivityLog).mockReturnValue(null);
 
       await handler({
-        action: { action_id: 'view_activity_log_C123_thread456' },
+        action: { action_id: 'view_segment_log_C123_thread456_seg_abc-123-def' },
         ack,
         body: {
           trigger_id: 'trigger123',
@@ -165,16 +171,16 @@ describe('slack-bot activity handlers', () => {
       );
     });
 
-    it('should show "no activity" message when log exists but is empty', async () => {
-      const handler = registeredHandlers['action_^view_activity_log_(.+)$'];
+    it('should show error modal when segment activity log is empty', async () => {
+      const handler = registeredHandlers['action_^view_segment_log_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      // Mock empty activity log - log exists but has no entries
-      vi.mocked(getActivityLog).mockResolvedValue([]);
+      // Mock empty segment activity log
+      vi.mocked(getSegmentActivityLog).mockReturnValue([]);
 
       await handler({
-        action: { action_id: 'view_activity_log_C123_thread456' },
+        action: { action_id: 'view_segment_log_C123_thread456_seg_abc-123-def' },
         ack,
         body: {
           trigger_id: 'trigger123',
@@ -184,7 +190,7 @@ describe('slack-bot activity handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
-      // Empty array shows "no activity" message (different from null which shows "no longer available")
+      // Empty array shows "no longer available" message for segments
       expect(mockClient.views.open).toHaveBeenCalledWith(
         expect.objectContaining({
           view: expect.objectContaining({
@@ -192,7 +198,7 @@ describe('slack-bot activity handlers', () => {
             blocks: expect.arrayContaining([
               expect.objectContaining({
                 text: expect.objectContaining({
-                  text: expect.stringContaining('No activity to display'),
+                  text: expect.stringContaining('no longer available'),
                 }),
               }),
             ]),
@@ -213,13 +219,13 @@ describe('slack-bot activity handlers', () => {
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      // Mock activity log with enough entries for pagination
+      // Mock segment activity log with enough entries for pagination
       const entries = Array.from({ length: 30 }, (_, i) => ({
         timestamp: Date.now() + i,
         type: 'tool_start' as const,
         tool: `Tool${i}`,
       }));
-      vi.mocked(getActivityLog).mockResolvedValue(entries);
+      vi.mocked(getSegmentActivityLog).mockReturnValue(entries);
 
       await handler({
         action: { action_id: 'activity_log_page_2' },
@@ -228,7 +234,7 @@ describe('slack-bot activity handlers', () => {
           trigger_id: 'trigger123',
           view: {
             id: 'view123',
-            private_metadata: JSON.stringify({ conversationKey: 'C123_thread456', currentPage: 1 }),
+            private_metadata: JSON.stringify({ segmentKey: 'C123_thread456_seg_abc-123-def', currentPage: 1 }),
           },
         },
         client: mockClient,
@@ -246,13 +252,13 @@ describe('slack-bot activity handlers', () => {
       );
     });
 
-    it('should handle missing activity log during pagination', async () => {
+    it('should handle missing segment activity log during pagination', async () => {
       const handler = registeredHandlers['action_^activity_log_page_(\\d+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      // Mock missing activity log
-      vi.mocked(getActivityLog).mockResolvedValue(null);
+      // Mock missing segment activity log
+      vi.mocked(getSegmentActivityLog).mockReturnValue(null);
 
       await handler({
         action: { action_id: 'activity_log_page_2' },
@@ -261,7 +267,7 @@ describe('slack-bot activity handlers', () => {
           trigger_id: 'trigger123',
           view: {
             id: 'view123',
-            private_metadata: JSON.stringify({ conversationKey: 'C123_thread456', currentPage: 1 }),
+            private_metadata: JSON.stringify({ segmentKey: 'C123_thread456_seg_abc-123-def', currentPage: 1 }),
           },
         },
         client: mockClient,
@@ -272,26 +278,26 @@ describe('slack-bot activity handlers', () => {
     });
   });
 
-  describe('download_activity_log handler', () => {
-    it('should register download_activity_log handler', async () => {
-      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+  describe('download_segment_log handler', () => {
+    it('should register download_segment_log handler', async () => {
+      const handler = registeredHandlers['action_^download_segment_log_(.+)$'];
       expect(handler).toBeDefined();
     });
 
-    it('should upload file with activity log content', async () => {
-      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+    it('should upload file with segment activity log content', async () => {
+      const handler = registeredHandlers['action_^download_segment_log_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      // Mock activity log data
-      vi.mocked(getActivityLog).mockResolvedValue([
+      // Mock segment activity log data
+      vi.mocked(getSegmentActivityLog).mockReturnValue([
         { timestamp: 1700000000000, type: 'thinking', thinkingContent: 'Analyzing the request' },
         { timestamp: 1700000001000, type: 'tool_start', tool: 'Read' },
         { timestamp: 1700000002000, type: 'tool_complete', tool: 'Read', durationMs: 1000 },
       ]);
 
       await handler({
-        action: { action_id: 'download_activity_log_C123_thread456' },
+        action: { action_id: 'download_segment_log_C123_thread456_seg_abc-123-def' },
         ack,
         body: {
           channel: { id: 'C123' },
@@ -311,17 +317,17 @@ describe('slack-bot activity handlers', () => {
     });
 
     it('should include full thinking content in download', async () => {
-      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+      const handler = registeredHandlers['action_^download_segment_log_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
       const longThinking = 'A'.repeat(1000);
-      vi.mocked(getActivityLog).mockResolvedValue([
+      vi.mocked(getSegmentActivityLog).mockReturnValue([
         { timestamp: 1700000000000, type: 'thinking', thinkingContent: longThinking },
       ]);
 
       await handler({
-        action: { action_id: 'download_activity_log_C123' },
+        action: { action_id: 'download_segment_log_C123_seg_abc-123-def' },
         ack,
         body: {
           channel: { id: 'C123' },
@@ -337,15 +343,15 @@ describe('slack-bot activity handlers', () => {
       );
     });
 
-    it('should handle missing activity log gracefully', async () => {
-      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+    it('should handle missing segment activity log gracefully', async () => {
+      const handler = registeredHandlers['action_^download_segment_log_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      vi.mocked(getActivityLog).mockResolvedValue(null);
+      vi.mocked(getSegmentActivityLog).mockReturnValue(null);
 
       await handler({
-        action: { action_id: 'download_activity_log_C123' },
+        action: { action_id: 'download_segment_log_C123_seg_abc-123-def' },
         ack,
         body: {
           channel: { id: 'C123' },
@@ -366,16 +372,16 @@ describe('slack-bot activity handlers', () => {
       );
     });
 
-    it('should handle empty activity log with "no activity" message', async () => {
-      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+    it('should handle empty segment activity log with "no longer available" message', async () => {
+      const handler = registeredHandlers['action_^download_segment_log_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      // Mock empty activity log - log exists but has no entries
-      vi.mocked(getActivityLog).mockResolvedValue([]);
+      // Mock empty segment activity log
+      vi.mocked(getSegmentActivityLog).mockReturnValue([]);
 
       await handler({
-        action: { action_id: 'download_activity_log_C123' },
+        action: { action_id: 'download_segment_log_C123_seg_abc-123-def' },
         ack,
         body: {
           channel: { id: 'C123' },
@@ -388,26 +394,26 @@ describe('slack-bot activity handlers', () => {
       expect(ack).toHaveBeenCalled();
       // Should not attempt upload
       expect(mockClient.files.uploadV2).not.toHaveBeenCalled();
-      // Should post ephemeral with "no activity" message (different from null)
+      // Should post ephemeral with "no longer available" message
       expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith(
         expect.objectContaining({
-          text: expect.stringContaining('No activity to download'),
+          text: expect.stringContaining('no longer available'),
         })
       );
     });
 
     it('should format tool entries with duration', async () => {
-      const handler = registeredHandlers['action_^download_activity_log_(.+)$'];
+      const handler = registeredHandlers['action_^download_segment_log_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      vi.mocked(getActivityLog).mockResolvedValue([
+      vi.mocked(getSegmentActivityLog).mockReturnValue([
         { timestamp: 1700000000000, type: 'tool_start', tool: 'Edit' },
         { timestamp: 1700000001500, type: 'tool_complete', tool: 'Edit', durationMs: 1500 },
       ]);
 
       await handler({
-        action: { action_id: 'download_activity_log_C123' },
+        action: { action_id: 'download_segment_log_C123_seg_abc-123-def' },
         ack,
         body: {
           channel: { id: 'C123' },

@@ -38,6 +38,8 @@ vi.mock('../../session-manager.js', () => ({
   saveActivityLog: vi.fn().mockResolvedValue(undefined),
   getActivityLog: vi.fn().mockResolvedValue(null),
   clearSyncedMessageUuids: vi.fn(),
+  // Segment activity log functions
+  clearSegmentActivityLogs: vi.fn(),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({

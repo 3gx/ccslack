@@ -21,6 +21,12 @@ import {
   addSlackOriginatedUserUuid,
   isSlackOriginatedUserUuid,
   clearSlackOriginatedUserUuids,
+  generateSegmentKey,
+  saveSegmentActivityLog,
+  getSegmentActivityLog,
+  updateSegmentActivityLog,
+  clearSegmentActivityLogs,
+  clearAllSegmentActivityLogs,
 } from '../../session-manager.js';
 import type { Session, ThreadSession, SlackMessageMapping, ActivityEntry } from '../../session-manager.js';
 
@@ -2960,6 +2966,182 @@ describe('session-manager', () => {
         clearSlackOriginatedUserUuids('C999');
 
         expect(fs.writeFileSync).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  // ============================================================================
+  // Segment Activity Log Tests
+  // ============================================================================
+  describe('Segment Activity Log', () => {
+    beforeEach(() => {
+      // Clear segment logs between tests
+      clearAllSegmentActivityLogs();
+    });
+
+    describe('generateSegmentKey', () => {
+      it('should create unique keys with UUID', () => {
+        const key1 = generateSegmentKey('C123', '1234.5678');
+        const key2 = generateSegmentKey('C123', '1234.5678');
+        const key3 = generateSegmentKey('C123', '9999.9999');
+
+        // All keys should be unique (UUID guarantees this)
+        expect(key1).not.toBe(key2);
+        expect(key1).not.toBe(key3);
+
+        // Keys should have correct format: {channelId}_{messageTs}_seg_{uuid}
+        expect(key1).toMatch(/^C123_1234\.5678_seg_[a-f0-9-]{36}$/);
+        expect(key2).toMatch(/^C123_1234\.5678_seg_[a-f0-9-]{36}$/);
+        expect(key3).toMatch(/^C123_9999\.9999_seg_[a-f0-9-]{36}$/);
+      });
+
+      it('should work for main channel (no thread)', () => {
+        // Main channel uses originalTs as messageTs
+        const key = generateSegmentKey('C123', '1234567890.123456');
+        expect(key).toMatch(/^C123_1234567890\.123456_seg_[a-f0-9-]{36}$/);
+      });
+
+      it('should work with different channel IDs', () => {
+        const key1 = generateSegmentKey('C123', '1234.5678');
+        const key2 = generateSegmentKey('C456', '1234.5678');
+
+        expect(key1).toMatch(/^C123_/);
+        expect(key2).toMatch(/^C456_/);
+      });
+    });
+
+    describe('saveSegmentActivityLog and getSegmentActivityLog', () => {
+      it('should save and retrieve segment activity log', () => {
+        const key = generateSegmentKey('C123', '1234.5678');
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'thinking', thinkingContent: 'test' },
+        ];
+
+        saveSegmentActivityLog(key, entries);
+        const retrieved = getSegmentActivityLog(key);
+
+        expect(retrieved).toEqual(entries);
+      });
+
+      it('should return a copy, not the same reference', () => {
+        const key = generateSegmentKey('C123', '1234.5678');
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+
+        saveSegmentActivityLog(key, entries);
+        const retrieved = getSegmentActivityLog(key);
+
+        expect(retrieved).not.toBe(entries);
+      });
+
+      it('should return null for unknown key', () => {
+        const result = getSegmentActivityLog('unknown_key');
+        expect(result).toBeNull();
+      });
+
+      it('should save multiple segments independently', () => {
+        const key1 = generateSegmentKey('C123', '1234.5678');
+        const key2 = generateSegmentKey('C123', '1234.5678');
+        const entries1: ActivityEntry[] = [{ timestamp: 1, type: 'starting' }];
+        const entries2: ActivityEntry[] = [
+          { timestamp: 2, type: 'tool_start', tool: 'Bash' },
+          { timestamp: 3, type: 'tool_complete', tool: 'Bash', durationMs: 500 },
+        ];
+
+        saveSegmentActivityLog(key1, entries1);
+        saveSegmentActivityLog(key2, entries2);
+
+        expect(getSegmentActivityLog(key1)).toEqual(entries1);
+        expect(getSegmentActivityLog(key2)).toEqual(entries2);
+      });
+    });
+
+    describe('updateSegmentActivityLog', () => {
+      it('should replace existing entries', () => {
+        const key = generateSegmentKey('C123', '1234.5678');
+        const entries1: ActivityEntry[] = [{ timestamp: 1, type: 'starting' }];
+        const entries2: ActivityEntry[] = [
+          { timestamp: 1, type: 'starting' },
+          { timestamp: 2, type: 'thinking', thinkingContent: 'test' },
+        ];
+
+        saveSegmentActivityLog(key, entries1);
+        expect(getSegmentActivityLog(key)).toHaveLength(1);
+
+        updateSegmentActivityLog(key, entries2);
+        expect(getSegmentActivityLog(key)).toHaveLength(2);
+      });
+
+      it('should work the same as save for new keys', () => {
+        const key = generateSegmentKey('C123', '1234.5678');
+        const entries: ActivityEntry[] = [{ timestamp: 1, type: 'starting' }];
+
+        updateSegmentActivityLog(key, entries);
+        expect(getSegmentActivityLog(key)).toEqual(entries);
+      });
+    });
+
+    describe('clearSegmentActivityLogs', () => {
+      it('should clear segment logs for a specific thread', () => {
+        // Create segments for different threads
+        const key1 = 'C123_1234.5678_seg_uuid1';
+        const key2 = 'C123_1234.5678_seg_uuid2';
+        const key3 = 'C123_9999.9999_seg_uuid3';
+
+        saveSegmentActivityLog(key1, [{ timestamp: 1, type: 'starting' }]);
+        saveSegmentActivityLog(key2, [{ timestamp: 2, type: 'starting' }]);
+        saveSegmentActivityLog(key3, [{ timestamp: 3, type: 'starting' }]);
+
+        clearSegmentActivityLogs('C123', '1234.5678');
+
+        expect(getSegmentActivityLog(key1)).toBeNull();
+        expect(getSegmentActivityLog(key2)).toBeNull();
+        expect(getSegmentActivityLog(key3)).not.toBeNull(); // Different messageTs
+      });
+
+      it('should clear all segments for a channel when no threadTs', () => {
+        const key1 = 'C123_1234.5678_seg_uuid1';
+        const key2 = 'C123_9999.9999_seg_uuid2';
+        const key3 = 'C456_1234.5678_seg_uuid3';
+
+        saveSegmentActivityLog(key1, [{ timestamp: 1, type: 'starting' }]);
+        saveSegmentActivityLog(key2, [{ timestamp: 2, type: 'starting' }]);
+        saveSegmentActivityLog(key3, [{ timestamp: 3, type: 'starting' }]);
+
+        clearSegmentActivityLogs('C123'); // No threadTs = clear all for channel
+
+        expect(getSegmentActivityLog(key1)).toBeNull();
+        expect(getSegmentActivityLog(key2)).toBeNull();
+        expect(getSegmentActivityLog(key3)).not.toBeNull(); // Different channel
+      });
+
+      it('should preserve segments in other channels', () => {
+        const key1 = 'C123_1234.5678_seg_uuid1';
+        const key2 = 'C456_1234.5678_seg_uuid2';
+
+        saveSegmentActivityLog(key1, [{ timestamp: 1, type: 'starting' }]);
+        saveSegmentActivityLog(key2, [{ timestamp: 2, type: 'starting' }]);
+
+        clearSegmentActivityLogs('C123', '1234.5678');
+
+        expect(getSegmentActivityLog(key1)).toBeNull();
+        expect(getSegmentActivityLog(key2)).not.toBeNull();
+      });
+    });
+
+    describe('clearAllSegmentActivityLogs', () => {
+      it('should clear all segment logs', () => {
+        const key1 = generateSegmentKey('C123', '1234.5678');
+        const key2 = generateSegmentKey('C456', '9999.9999');
+
+        saveSegmentActivityLog(key1, [{ timestamp: 1, type: 'starting' }]);
+        saveSegmentActivityLog(key2, [{ timestamp: 2, type: 'starting' }]);
+
+        clearAllSegmentActivityLogs();
+
+        expect(getSegmentActivityLog(key1)).toBeNull();
+        expect(getSegmentActivityLog(key2)).toBeNull();
       });
     });
   });
