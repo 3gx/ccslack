@@ -2240,6 +2240,62 @@ async function handleMessage(params: {
   // Spinner timer - declared outside try block so it can be cleaned up in finally
   let spinnerTimer: NodeJS.Timeout | undefined;
 
+  // Helper to move status message to bottom (delete old, post new)
+  // Called after posting segments to keep Abort button at the bottom
+  const moveStatusToBottom = async (): Promise<void> => {
+    if (!statusMsgTs) return;
+
+    // Delete old status message
+    try {
+      await client.chat.delete({
+        channel: channelId,
+        ts: statusMsgTs,
+      });
+    } catch (error) {
+      console.log(`Could not delete old status message: ${error}`);
+    }
+
+    // Post new status message at bottom
+    try {
+      const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
+      const elapsedMs = Date.now() - processingState.startTime;
+      const spinner = SPINNER_FRAMES[processingState.spinnerIndex];
+
+      const result = await withSlackRetry(() =>
+        client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          blocks: buildCombinedStatusBlocks({
+            activityLog: trailingActivity,
+            inProgress: true,
+            status: processingState.status,
+            mode: session.mode,
+            model: processingState.model,
+            currentTool: processingState.currentTool,
+            toolsCompleted: processingState.toolsCompleted,
+            elapsedMs,
+            conversationKey,
+            spinner,
+            rateLimitHits: processingState.rateLimitHits,
+            segmentKey: processingState.currentSegmentKey || undefined,
+          }),
+          text: 'Claude is working...',
+        })
+      );
+      const newTs = (result as { ts?: string }).ts;
+      if (newTs) {
+        statusMsgTs = newTs;
+        // Update activeQueries with new ts
+        const activeQuery = activeQueries.get(conversationKey);
+        if (activeQuery) {
+          activeQuery.statusMsgTs = newTs;
+        }
+      }
+    } catch (error) {
+      console.error('Failed to move status message to bottom:', error);
+    }
+  };
+
   // Stream Claude response to Slack with real-time updates
   try {
     // Create canUseTool callback - ALWAYS defined for AskUserQuestion support in all modes
@@ -2501,6 +2557,10 @@ async function handleMessage(params: {
         // Mark activity as posted
         processingState.lastPostedActivityIndex = processingState.activityLog.length;
 
+        // Start new segment immediately so View Log works for next activity
+        // Don't wait for response text - activity may accumulate before next response
+        startNewSegment();
+
         // 3. Post response text for this segment
         try {
           const liveConfig = getLiveSessionConfig(channelId, threadTs);
@@ -2543,6 +2603,14 @@ async function handleMessage(params: {
 
         // 4. Reset currentResponse for next segment (keep fullResponse for total tracking)
         currentResponse = '';
+
+        // 5. Move status message to bottom so it's always below segments
+        // MUST use mutex to prevent race with periodic update timer
+        const mutex = getUpdateMutex(conversationKey);
+        await mutex.runExclusive(async () => {
+          if (isAborted(conversationKey)) return;
+          await moveStatusToBottom();
+        });
       }
     };
 
@@ -3031,11 +3099,14 @@ async function handleMessage(params: {
           }
         }
 
-        // Update initial status message to completion state (just stats, no activity log)
+        // Update initial status message to completion state (with Beginning header + activity + Complete + stats)
         if (statusMsgTs) {
           try {
-            // Build completion blocks: just status panel (activity already posted in segments)
-            const completionBlocks = buildStatusPanelBlocks({
+            // Build completion blocks: full combined view with Beginning header preserved
+            const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
+            const completionBlocks = buildCombinedStatusBlocks({
+              activityLog: trailingActivity,
+              inProgress: false,
               status: 'complete',
               mode: session.mode,
               model: processingState.model,
@@ -3048,6 +3119,7 @@ async function handleMessage(params: {
               costUsd: processingState.costUsd,
               conversationKey: activityLogKey,
               rateLimitHits: processingState.rateLimitHits,
+              segmentKey: processingState.currentSegmentKey || undefined,
             });
 
             await withSlackRetry(() =>

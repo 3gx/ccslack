@@ -393,10 +393,11 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Both messages should be posted then updated (not deleted)
+      // Messages should be posted, updated, and status message moved to bottom (delete+repost)
       expect(mockClient.chat.postMessage).toHaveBeenCalled();
       expect(mockClient.chat.update).toHaveBeenCalled();
-      expect(mockClient.chat.delete).not.toHaveBeenCalled();
+      // Status message is deleted and reposted to keep it at bottom after segments
+      // So chat.delete IS expected to be called now
 
       // Verify chat.update was called with complete status and stats
       const updateCalls = mockClient.chat.update.mock.calls;
@@ -406,26 +407,33 @@ describe('slack-bot mention handlers', () => {
       );
       expect(statusPanelComplete).toBeDefined();
 
-      // Combined completion blocks structure:
-      // 0: collapsed activity summary section
-      // 1: actions (View Log / Download)
-      // 2: divider
-      // 3: completion status section (with "Complete")
-      // 4: context with stats
+      // Combined completion blocks structure (buildCombinedStatusBlocks):
+      // 0: *Beginning* (section)
+      // 1: _Plan | model_ (context - simple status line)
+      // 2: Activity log (section)
+      // 3: *Complete* (section)
+      // 4: _Plan | model | stats..._ (context - full stats line)
       const completeBlocks = statusPanelComplete![0].blocks;
 
-      // Find the status section with "Complete"
+      // Find the *Beginning* section
+      const beginningSection = completeBlocks.find((b: any) => b.text?.text?.includes('Beginning'));
+      expect(beginningSection).toBeDefined();
+
+      // Find the *Complete* section
       const statusSection = completeBlocks.find((b: any) => b.text?.text?.includes('Complete'));
       expect(statusSection).toBeDefined();
 
-      // Find the context block with stats
-      const contextBlock = completeBlocks.find((b: any) => b.type === 'context' && b.elements?.[0]?.text?.includes('Plan'));
-      expect(contextBlock).toBeDefined();
-      expect(contextBlock.elements[0].text).toContain('claude-sonnet');
-      expect(contextBlock.elements[0].text).toContain('Plan');
-      expect(contextBlock.elements[0].text).toContain('100');  // input tokens
-      expect(contextBlock.elements[0].text).toContain('200');  // output tokens
-      expect(contextBlock.elements[0].text).toContain('5.0s');
+      // Find the full stats context block (the one with token counts, not just mode|model)
+      // Filter context blocks that contain 'in /' which indicates token stats
+      const statsBlock = completeBlocks.find((b: any) =>
+        b.type === 'context' && b.elements?.[0]?.text?.includes('in /')
+      );
+      expect(statsBlock).toBeDefined();
+      expect(statsBlock.elements[0].text).toContain('claude-sonnet');
+      expect(statsBlock.elements[0].text).toContain('Plan');
+      expect(statsBlock.elements[0].text).toContain('100');  // input tokens
+      expect(statsBlock.elements[0].text).toContain('200');  // output tokens
+      expect(statsBlock.elements[0].text).toContain('5.0s');
     });
 
     it('should post response via interleaved posting', async () => {
