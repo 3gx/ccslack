@@ -414,7 +414,6 @@ export async function uploadMarkdownAndPngWithResponse(
   userId?: string,
   threadCharLimit?: number,
   stripEmptyTag?: boolean,
-  forkInfo?: { threadTs?: string; conversationKey: string },
   mappingInfo?: MappingInfo
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
   const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
@@ -423,48 +422,77 @@ export async function uploadMarkdownAndPngWithResponse(
   const cleanMarkdown = stripMarkdownCodeFence(markdown, { stripEmptyTag });
 
   try {
-    // Step 1: Post formatted text (truncated if needed)
+    // Step 1: Prepare text (truncated if needed)
     const textToPost = slackFormattedResponse.length <= limit
       ? slackFormattedResponse
       : truncateWithClosedFormatting(slackFormattedResponse, limit);
 
-    // Build blocks with Fork here button for point-in-time forking
-    const blocks = forkInfo ? [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: textToPost,
+    // Track if response was truncated (for conditional file attachment)
+    const wasTruncated = slackFormattedResponse.length > limit;
+
+    let textTs: string | undefined;
+    const postedMessages: { ts: string }[] = [];
+
+    // Step 2: Post message - with files if truncated, just text otherwise
+    if (wasTruncated) {
+      // Generate PNG from markdown (may return null on failure)
+      const pngBuffer = await markdownToPng(cleanMarkdown);
+
+      // Prepare files array - always include markdown
+      const timestamp = Date.now();
+      const files: Array<{ content: string | Buffer; filename: string; title: string }> = [
+        {
+          content: cleanMarkdown,
+          filename: `response-${timestamp}.md`,
+          title: 'Full Response (Markdown)',
         },
-      },
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: {
-              type: 'plain_text',
-              text: ':twisted_rightwards_arrows: Fork here',
-              emoji: true,
-            },
-            action_id: `fork_here_${forkInfo.conversationKey}`,
-            value: JSON.stringify({ threadTs: forkInfo.threadTs }),
-          },
-        ],
-      },
-    ] : undefined;
+      ];
 
-    const textResult = await withSlackRetry(() =>
-      client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: textToPost,
-        ...(blocks && { blocks }),
-      })
-    );
+      // Add PNG if generation succeeded
+      if (pngBuffer) {
+        files.push({
+          content: pngBuffer,
+          filename: `response-${timestamp}.png`,
+          title: 'Response Preview',
+        });
+      }
 
-    const textTs = (textResult as any).ts;
-    const postedMessages: { ts: string }[] = textTs ? [{ ts: textTs }] : [];
+      // Upload files WITH the response text as initial_comment
+      // This posts files and text together in the same message
+      const fileResult = await withSlackRetry(() =>
+        client.files.uploadV2({
+          channel_id: channelId,
+          thread_ts: threadTs,
+          initial_comment: textToPost,
+          file_uploads: files.map((f) => ({
+            file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
+            filename: f.filename,
+            title: f.title,
+          })),
+        } as any)
+      );
+
+      // Get ts from the file message for mapping
+      // files.uploadV2 returns files array with shares info
+      textTs = (fileResult as any)?.files?.[0]?.shares?.public?.[channelId]?.[0]?.ts;
+      if (textTs) {
+        postedMessages.push({ ts: textTs });
+      }
+    } else {
+      // Short response - just post text (no files)
+      const textResult = await withSlackRetry(() =>
+        client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: textToPost,
+        })
+      );
+
+      textTs = (textResult as any).ts;
+      if (textTs) {
+        postedMessages.push({ ts: textTs });
+      }
+    }
 
     // CRITICAL: Save message mapping IMMEDIATELY after posting for point-in-time forking
     // This ensures the mapping is saved atomically with the post, not in a batch at the end
@@ -477,41 +505,6 @@ export async function uploadMarkdownAndPngWithResponse(
       });
       console.log(`[Mapping] Saved assistant mapping immediately: ${textTs} → ${mappingInfo.sdkMessageId}`);
     }
-
-    // Step 2: Generate PNG from markdown (may return null on failure)
-    const pngBuffer = await markdownToPng(cleanMarkdown);
-
-    // Prepare files array - always include markdown
-    const timestamp = Date.now();
-    const files: Array<{ content: string | Buffer; filename: string; title: string }> = [
-      {
-        content: cleanMarkdown,
-        filename: `response-${timestamp}.md`,
-        title: 'Full Response (Markdown)',
-      },
-    ];
-
-    // Add PNG if generation succeeded
-    if (pngBuffer) {
-      files.push({
-        content: pngBuffer,
-        filename: `response-${timestamp}.png`,
-        title: 'Response Preview',
-      });
-    }
-
-    // Step 3: Upload files (will appear after text message)
-    await withSlackRetry(() =>
-      client.files.uploadV2({
-        channel_id: channelId,
-        thread_ts: threadTs,
-        file_uploads: files.map((f) => ({
-          file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
-          filename: f.filename,
-          title: f.title,
-        })),
-      } as any)
-    );
 
     return {
       ts: textTs,

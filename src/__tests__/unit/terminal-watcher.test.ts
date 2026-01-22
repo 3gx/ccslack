@@ -433,6 +433,7 @@ describe('terminal-watcher', () => {
       await vi.advanceTimersByTimeAsync(2000);
 
       // Assistant messages now use uploadMarkdownAndPngWithResponse
+      // Note: Fork button is now on activity message in blocks.ts, not response message
       expect(streaming.uploadMarkdownAndPngWithResponse).toHaveBeenCalledWith(
         mockClient,
         'channel-1',
@@ -441,8 +442,8 @@ describe('terminal-watcher', () => {
         undefined,  // threadTs
         undefined,  // userId
         500,  // charLimit from session
-        false,  // stripEmptyTag
-        { threadTs: undefined, conversationKey: 'channel-1' }  // forkInfo for point-in-time forking
+        false  // stripEmptyTag
+        // forkInfo and isFinalSegment removed - Fork button now on activity message
       );
     });
 

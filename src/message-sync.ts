@@ -57,7 +57,7 @@ export interface SyncOptions {
   /** Delay between messages in ms (for /ff pacing) */
   pacingDelayMs?: number;
   /** Post function for text messages (allows /watch to use its own postTerminalMessage) */
-  postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage) => Promise<boolean>;
+  postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage, isLastMessage?: boolean) => Promise<boolean>;
   /** Character limit for text responses */
   charLimit?: number;
   /** Whether to strip empty code fence wrappers */
@@ -234,13 +234,15 @@ export async function syncMessagesFromOffset(
 
     console.log(`[MessageSync] Processing turn ${i + 1}/${turnsToProcess.length}: user=${turn.userInput.uuid}, segments=${turn.segments.length}, trailingActivity=${turn.trailingActivity.length}, activityEntries=${turnActivity.length}`);
 
+    const isFinalTurn = (i === turnsToProcess.length - 1);
     const result = await postTurn(
       state,
       turn,
       turnActivity,
       alreadyPosted,
       messageMap,
-      { charLimit, stripEmptyTag, infiniteRetry, postTextMessage, activityMessages }
+      { charLimit, stripEmptyTag, infiniteRetry, postTextMessage, activityMessages },
+      isFinalTurn
     );
 
     if (result.success) {
@@ -344,9 +346,10 @@ async function postTurn(
     charLimit: number;
     stripEmptyTag?: boolean;
     infiniteRetry?: boolean;
-    postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage) => Promise<boolean>;
+    postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage, isLastMessage?: boolean) => Promise<boolean>;
     activityMessages?: Map<string, string>;
-  }
+  },
+  isFinalTurn: boolean = false
 ): Promise<{ success: boolean; postedUuids: string[] }> {
   const postedUuids: string[] = [];
   const { charLimit, stripEmptyTag, infiniteRetry = false, postTextMessage, activityMessages } = options;
@@ -388,8 +391,17 @@ async function postTurn(
         // Save segment activity before posting
         saveSegmentActivityLog(segmentKey, segmentActivity);
 
+        // isLastMessage: true only for the final segment of the final turn (same as text posting)
+        const isLastSegment = isFinalTurn && (i === turn.segments.length - 1);
+
         // Post NEW activity message for this segment (not update-in-place)
-        const blocks = buildLiveActivityBlocks(segmentActivity, segmentKey, false);
+        const blocks = buildLiveActivityBlocks(
+          segmentActivity,
+          segmentKey,
+          false,  // not in-progress
+          isLastSegment,  // Fork button only on final segment of final turn
+          { threadTs: state.threadTs, conversationKey: state.conversationKey }
+        );
         const activityResult = await postActivitySummary(state, blocks, infiniteRetry);
 
         if (activityResult?.ts) {
@@ -416,11 +428,13 @@ async function postTurn(
     // 2c. Post text output for this segment (skip if already posted)
     if (!alreadyPosted.has(segment.textOutput.uuid)) {
       let textSuccess = false;
+      // isLastMessage: true only for the final segment of the final turn
+      const isLastMessage = isFinalTurn && (i === turn.segments.length - 1);
 
       if (postTextMessage) {
         if (infiniteRetry) {
           textSuccess = await withInfiniteRetry(
-            () => postTextMessage(state, segment.textOutput),
+            () => postTextMessage(state, segment.textOutput, isLastMessage),
             {
               baseDelayMs: 3000,
               maxDelayMs: 30000,
@@ -430,7 +444,7 @@ async function postTurn(
             }
           );
         } else {
-          textSuccess = await postTextMessage(state, segment.textOutput);
+          textSuccess = await postTextMessage(state, segment.textOutput, isLastMessage);
         }
       } else {
         const textResult = await postTextResponse(state, segment.textOutput, { charLimit, stripEmptyTag }, infiniteRetry);
@@ -471,7 +485,13 @@ async function postTurn(
     // Update segment activity for View Log (so View Log shows latest even during updates)
     saveSegmentActivityLog(trailingSegmentKey, trailingActivity);
 
-    const blocks = buildLiveActivityBlocks(trailingActivity, trailingSegmentKey, true);
+    const blocks = buildLiveActivityBlocks(
+      trailingActivity,
+      trailingSegmentKey,
+      true,  // in-progress (live updates)
+      false,  // no Fork button for in-progress trailing activity
+      undefined  // no forkInfo needed
+    );
 
     let activityTs: string | undefined;
 

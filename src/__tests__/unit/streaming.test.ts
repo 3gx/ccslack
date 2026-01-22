@@ -548,8 +548,8 @@ describe('streaming', () => {
     });
   });
 
-  describe('uploadMarkdownAndPngWithResponse with forkInfo', () => {
-    it('should include Fork here button with emoji when forkInfo is provided', async () => {
+  describe('uploadMarkdownAndPngWithResponse posts text only (Fork button now in activity message)', () => {
+    it('should NOT include blocks when posting text (Fork button moved to activity message)', async () => {
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
@@ -564,55 +564,7 @@ describe('streaming', () => {
         'thread123',
         'U456',
         500,
-        false,
-        { threadTs: 'thread123', conversationKey: 'C123_thread123' }
-      );
-
-      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel: 'C123',
-          blocks: expect.arrayContaining([
-            expect.objectContaining({
-              type: 'section',
-              text: expect.objectContaining({
-                type: 'mrkdwn',
-                text: 'Response text',
-              }),
-            }),
-            expect.objectContaining({
-              type: 'actions',
-              elements: expect.arrayContaining([
-                expect.objectContaining({
-                  type: 'button',
-                  text: expect.objectContaining({
-                    text: ':twisted_rightwards_arrows: Fork here',
-                  }),
-                  action_id: 'fork_here_C123_thread123',
-                }),
-              ]),
-            }),
-          ]),
-        })
-      );
-    });
-
-    it('should NOT include Fork here button when forkInfo is undefined', async () => {
-      const mockClient = createMockSlackClient();
-      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
-        ok: true,
-        files: [{ id: 'F123' }],
-      });
-
-      await uploadMarkdownAndPngWithResponse(
-        mockClient as any,
-        'C123',
-        '# Response',
-        'Response text',
-        'thread123',
-        'U456',
-        500,
-        false,
-        undefined  // No forkInfo
+        false
       );
 
       expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
@@ -621,12 +573,12 @@ describe('streaming', () => {
           text: 'Response text',
         })
       );
-      // Should NOT have blocks (no forkInfo)
+      // Should NOT have blocks (Fork button is now in activity message in blocks.ts)
       const call = mockClient.chat.postMessage.mock.calls[0][0];
       expect(call.blocks).toBeUndefined();
     });
 
-    it('should include forkInfo with undefined threadTs for main channel', async () => {
+    it('should NOT include Fork here button - it is now on activity messages in blocks.ts', async () => {
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
@@ -638,28 +590,21 @@ describe('streaming', () => {
         'C123',
         '# Response',
         'Response text',
-        undefined,  // Main channel (no threadTs)
+        'thread123',
         'U456',
         500,
-        false,
-        { threadTs: undefined, conversationKey: 'C123' }  // Main channel forkInfo
+        false
       );
 
       expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
-          blocks: expect.arrayContaining([
-            expect.objectContaining({
-              type: 'actions',
-              elements: expect.arrayContaining([
-                expect.objectContaining({
-                  action_id: 'fork_here_C123',
-                  value: JSON.stringify({ threadTs: undefined }),
-                }),
-              ]),
-            }),
-          ]),
+          channel: 'C123',
+          text: 'Response text',
         })
       );
+      // Should NOT have blocks - no Fork button in response messages anymore
+      const call = mockClient.chat.postMessage.mock.calls[0][0];
+      expect(call.blocks).toBeUndefined();
     });
   });
 
@@ -685,7 +630,6 @@ describe('streaming', () => {
         'U456',
         500,
         false,
-        { threadTs: 'thread123', conversationKey: 'C123_thread123' },
         { sdkMessageId: 'msg_uuid_abc123', sessionId: 'session_xyz789' }  // mappingInfo
       );
 
@@ -713,7 +657,6 @@ describe('streaming', () => {
         'U456',
         500,
         false,
-        { threadTs: 'thread123', conversationKey: 'C123_thread123' },
         undefined  // No mappingInfo
       );
 
@@ -737,8 +680,7 @@ describe('streaming', () => {
         'U456',
         500,
         false,
-        undefined,
-        { sdkMessageId: 'msg_uuid_abc123', sessionId: 'session_xyz789' }
+        { sdkMessageId: 'msg_uuid_abc123', sessionId: 'session_xyz789' }  // mappingInfo
       );
 
       expect(saveMessageMapping).not.toHaveBeenCalled();
@@ -769,6 +711,84 @@ describe('streaming', () => {
         ts: 'msg456',
         postedMessages: [{ ts: 'msg456' }],
       });
+    });
+  });
+
+  describe('uploadMarkdownAndPngWithResponse conditional file attachment', () => {
+    it('should NOT upload files when response is short (not truncated)', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      // Short response (less than default 500 char limit)
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Short response',
+        'Short response text',
+        'thread123'
+      );
+
+      // Files should NOT be uploaded for short responses
+      expect(mockClient.files.uploadV2).not.toHaveBeenCalled();
+    });
+
+    it('should upload files when response is truncated (exceeds char limit)', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      // Long response that exceeds 100 char limit
+      const longResponse = 'A'.repeat(150);
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'thread123',
+        'U456',
+        100  // Set low char limit to trigger truncation
+      );
+
+      // Files SHOULD be uploaded for truncated responses
+      expect(mockClient.files.uploadV2).toHaveBeenCalled();
+    });
+
+    it('should upload files with correct content when truncated', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      const longResponse = 'B'.repeat(200);
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'thread123',
+        'U456',
+        100  // Low limit to trigger truncation
+      );
+
+      // Verify file upload was called
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          thread_ts: 'thread123',
+          file_uploads: expect.arrayContaining([
+            expect.objectContaining({
+              filename: expect.stringMatching(/^response-\d+\.md$/),
+              title: 'Full Response (Markdown)',
+            }),
+          ]),
+        })
+      );
     });
   });
 });

@@ -1515,16 +1515,149 @@ export interface CombinedStatusParams extends StatusPanelParams {
   activityLog: ActivityEntry[];
   inProgress: boolean;
   segmentKey?: string;  // Real segment key for View Log button (required for active queries)
+  sessionId?: string;  // Current session ID (n/a initially)
+  isNewSession?: boolean;  // Show [new] prefix in TOP line
+  isFinalSegment?: boolean;  // Show Fork button on completion
+  forkInfo?: { threadTs?: string; conversationKey: string };  // For Fork button
+}
+
+// SDK mode labels for display (shared by helper functions)
+const MODE_LABELS: Record<PermissionMode, string> = {
+  plan: 'plan',
+  default: 'default',
+  bypassPermissions: 'bypass',
+  acceptEdits: 'acceptEdits',
+};
+
+/**
+ * Build TOP status line - simple: mode | model | [new] session-id
+ * NO context % in TOP line - simplified!
+ *
+ * @param mode - Permission mode
+ * @param model - Model name (e.g., "claude-sonnet-4") or undefined
+ * @param sessionId - Session ID or undefined
+ * @param isNewSession - Show [new] prefix if true
+ * @returns Formatted string like "_plan | claude-sonnet-4 | [new] abc123_"
+ */
+export function buildTopStatusLine(
+  mode: PermissionMode,
+  model?: string,
+  sessionId?: string,
+  isNewSession?: boolean
+): string {
+  const modeLabel = MODE_LABELS[mode] || mode;
+  const modelStr = model || 'n/a';
+
+  let sessionStr = sessionId || 'n/a';
+  if (sessionId && isNewSession) {
+    sessionStr = `[new] ${sessionId}`;
+  }
+
+  return `_${modeLabel} | ${modelStr} | ${sessionStr}_`;
+}
+
+/**
+ * Build BOTTOM stats line - only at completion/abort.
+ * Always includes mode | model | session-id, stats appended only if available.
+ *
+ * @param mode - Permission mode
+ * @param model - Model name
+ * @param sessionId - Session ID
+ * @param contextPercent - Context usage percentage
+ * @param compactPercent - Percent remaining until auto-compact
+ * @param inputTokens - Input token count
+ * @param outputTokens - Output token count
+ * @param cost - Cost in USD
+ * @param durationMs - Duration in milliseconds
+ * @param rateLimitHits - Number of rate limits encountered
+ * @returns Formatted string with mode|model|session + optional stats
+ */
+export function buildBottomStatsLine(
+  mode: PermissionMode,
+  model?: string,
+  sessionId?: string,
+  contextPercent?: number,
+  compactPercent?: number,
+  inputTokens?: number,
+  outputTokens?: number,
+  cost?: number,
+  durationMs?: number,
+  rateLimitHits?: number
+): string {
+  const modeLabel = MODE_LABELS[mode] || mode;
+  const parts: string[] = [modeLabel];
+
+  // Model
+  if (model) parts.push(model);
+
+  // Session ID
+  if (sessionId) parts.push(sessionId);
+
+  // Check if we have any stats to show
+  const hasStats = contextPercent !== undefined ||
+                   inputTokens !== undefined ||
+                   outputTokens !== undefined ||
+                   cost !== undefined ||
+                   durationMs !== undefined;
+
+  if (hasStats) {
+    // Context % with compact info
+    if (contextPercent !== undefined) {
+      if (compactPercent !== undefined && compactPercent > 0) {
+        parts.push(`${contextPercent}% ctx (${compactPercent}% to ⚡)`);
+      } else if (compactPercent !== undefined && compactPercent <= 0) {
+        parts.push(`${contextPercent}% ctx (⚡ soon)`);
+      } else {
+        parts.push(`${contextPercent}% ctx`);
+      }
+    }
+
+    // Tokens: input/output format
+    if (inputTokens !== undefined || outputTokens !== undefined) {
+      const inStr = formatTokenCount(inputTokens || 0);
+      const outStr = formatTokenCount(outputTokens || 0);
+      parts.push(`${inStr}/${outStr}`);
+    }
+
+    // Cost
+    if (cost !== undefined) {
+      parts.push(`$${cost.toFixed(2)}`);
+    }
+
+    // Duration
+    if (durationMs !== undefined) {
+      parts.push(`${(durationMs / 1000).toFixed(1)}s`);
+    }
+  }
+
+  // Rate limit warning suffix (appended at end)
+  if (rateLimitHits && rateLimitHits > 0) {
+    parts.push(`:warning: ${rateLimitHits} limits`);
+  }
+
+  return `_${parts.join(' | ')}_`;
+}
+
+/**
+ * Format token count with K suffix for readability.
+ */
+function formatTokenCount(count: number): string {
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return count.toString();
 }
 
 /**
  * Build combined status blocks (activity log + status panel in single message).
- * New layout:
- * - "Beginning" header at top
- * - Simple status line (mode | model)
- * - Activity log
- * - Spinner + elapsed (in-progress) or "Complete"/"Aborted"/"Error" (terminal)
- * - Abort button at very end (in-progress only) or stats line (terminal)
+ *
+ * Consolidated layout (no Beginning/Complete headers):
+ * - TOP line: mode | model | [new] session-id (context block)
+ * - Activity log section
+ * - Rate limit warning (if any, during in-progress) - above buttons
+ * - Buttons: [View Log] [Abort] during in-progress, [View Log] [Fork here] on final
+ * - Spinner BELOW buttons (during in-progress only)
+ * - BOTTOM stats line: ONLY at completion with full stats
  */
 export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[] {
   const {
@@ -1533,8 +1666,6 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     status,
     mode,
     model,
-    currentTool,
-    toolsCompleted,
     elapsedMs,
     inputTokens,
     outputTokens,
@@ -1547,40 +1678,27 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     rateLimitHits,
     customStatus,
     segmentKey,
+    sessionId,
+    isNewSession,
+    isFinalSegment,
+    forkInfo,
   } = params;
 
   const blocks: Block[] = [];
 
-  // SDK mode labels for display
-  const modeLabels: Record<PermissionMode, string> = {
-    plan: 'Plan',
-    default: 'Default',
-    bypassPermissions: 'Bypass',
-    acceptEdits: 'AcceptEdits',
-  };
-  const modeLabel = modeLabels[mode] || mode;
-
   // Format elapsed time
   const elapsedSec = (elapsedMs / 1000).toFixed(1);
 
-  // 1. "Beginning" header
-  blocks.push({
-    type: 'section',
-    text: { type: 'mrkdwn', text: '*Beginning*' },
-  });
-
-  // 2. Simple status line (mode | model only)
-  const simpleStatusParts = [modeLabel];
-  if (model) simpleStatusParts.push(model);
+  // 1. TOP status line (context) - simple: mode | model | [new] session-id
   blocks.push({
     type: 'context',
     elements: [{
       type: 'mrkdwn',
-      text: `_${simpleStatusParts.join(' | ')}_`,
+      text: buildTopStatusLine(mode, model, sessionId, isNewSession),
     }],
   });
 
-  // 3. Activity log section
+  // 2. Activity log section - ALWAYS
   const activityText = buildActivityLogText(activityLog, inProgress, ACTIVITY_LOG_MAX_CHARS);
   blocks.push({
     type: 'section',
@@ -1588,21 +1706,31 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     expand: true,
   } as Block);
 
-  // 4 & 5: Footer depends on status
-  const isInProgress = ['starting', 'thinking', 'tool', 'generating'].includes(status);
+  // Determine if in-progress vs terminal state
+  const isInProgressStatus = ['starting', 'thinking', 'tool', 'generating'].includes(status);
 
-  if (isInProgress) {
-    // 4. Spinner + elapsed at bottom of activity
+  if (isInProgressStatus) {
+    // 3. Rate limit warning (context) - ABOVE buttons when rate limits hit
+    if (rateLimitHits && rateLimitHits > 0) {
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `_:warning: ${rateLimitHits} rate limit${rateLimitHits > 1 ? 's' : ''} hit_`,
+        }],
+      });
+    }
+
+    // 4. Spinner (context) - ABOVE buttons
     blocks.push({
       type: 'context',
       elements: [{
         type: 'mrkdwn',
-        text: `${spinner || ''} [${elapsedSec}s]`,
+        text: `${spinner || '⠋'} [${elapsedSec}s]`,
       }],
     });
 
-    // 5. View Log (for current segment) + Abort
-    // Use segmentKey for View Log to match the stored activity log key
+    // 5. Actions: [View Log] [Abort]
     const viewLogKey = segmentKey || conversationKey;
     blocks.push({
       type: 'actions',
@@ -1622,82 +1750,78 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
         },
       ],
     });
-  } else if (status === 'complete') {
-    // 4. "Complete" footer
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: '*Complete*' },
-    });
+  } else {
+    // Terminal states: complete, aborted, error
 
-    // 5. Full stats line
-    const statsParts = [modeLabel];
-    if (model) statsParts.push(model);
-    if (customStatus) {
-      statsParts.push(customStatus);
-    } else {
-      if (inputTokens || outputTokens) {
-        const inStr = inputTokens ? inputTokens.toLocaleString() : '0';
-        const outStr = outputTokens ? outputTokens.toLocaleString() : '0';
-        statsParts.push(`${inStr} in / ${outStr} out`);
-      }
-      if (contextPercent !== undefined) {
-        if (compactPercent !== undefined && compactPercent > 0) {
-          statsParts.push(`${contextPercent}% ctx (${compactPercent}% to compact)`);
-        } else if (compactPercent !== undefined && compactPercent <= 0) {
-          statsParts.push(`${contextPercent}% ctx (compact soon)`);
-        } else {
-          statsParts.push(`${contextPercent}% ctx`);
-        }
-      }
-      if (costUsd !== undefined) {
-        statsParts.push(`$${costUsd.toFixed(4)}`);
-      }
+    // 3. BOTTOM stats line (context) - ONLY at completion/abort/error
+    // Always shows mode|model|session, stats appended only if available
+    const hasStats = contextPercent !== undefined ||
+                     inputTokens !== undefined ||
+                     outputTokens !== undefined ||
+                     costUsd !== undefined;
+
+    if (status === 'complete' || status === 'aborted' || (status === 'error' && hasStats)) {
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: buildBottomStatsLine(
+            mode,
+            model,
+            sessionId,
+            contextPercent,
+            compactPercent,
+            inputTokens,
+            outputTokens,
+            costUsd,
+            elapsedMs,
+            rateLimitHits
+          ),
+        }],
+      });
+    } else if (status === 'error') {
+      // Error without stats - show error message in context
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `_:x: ${customStatus || errorMessage || 'Unknown error'}_`,
+        }],
+      });
     }
-    statsParts.push(`${elapsedSec}s`);
-    if (rateLimitHits && rateLimitHits > 0) {
-      statsParts.push(`:warning: ${rateLimitHits} rate limit${rateLimitHits > 1 ? 's' : ''}`);
+
+    // 4. Actions: depends on status
+    const viewLogKey = segmentKey || conversationKey;
+    const actionElements: any[] = [
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: 'View Log' },
+        action_id: `view_segment_log_${viewLogKey}`,
+        value: viewLogKey,
+      },
+    ];
+
+    // Fork button only on final segment (for BOTH thread AND main channel)
+    if (isFinalSegment && forkInfo && status === 'complete') {
+      actionElements.push({
+        type: 'button',
+        text: {
+          type: 'plain_text',
+          text: ':twisted_rightwards_arrows: Fork here',
+          emoji: true,
+        },
+        action_id: `fork_here_${forkInfo.conversationKey}`,
+        value: JSON.stringify({ threadTs: forkInfo.threadTs }),
+      });
     }
 
     blocks.push({
-      type: 'context',
-      elements: [{
-        type: 'mrkdwn',
-        text: `_${statsParts.join(' | ')}_`,
-      }],
-    });
-  } else if (status === 'aborted') {
-    // 4. "Aborted" footer
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: '*Aborted*' },
+      type: 'actions',
+      block_id: `status_panel_${conversationKey}`,
+      elements: actionElements,
     });
 
-    // 5. Status line
-    const abortedParts = [modeLabel];
-    if (model) abortedParts.push(model);
-    abortedParts.push('aborted');
-    blocks.push({
-      type: 'context',
-      elements: [{
-        type: 'mrkdwn',
-        text: `_${abortedParts.join(' | ')}_`,
-      }],
-    });
-  } else if (status === 'error') {
-    // 4. "Error" footer
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: '*Error*' },
-    });
-
-    // 5. Error message
-    blocks.push({
-      type: 'context',
-      elements: [{
-        type: 'mrkdwn',
-        text: `_${customStatus || errorMessage || 'Unknown error'}_`,
-      }],
-    });
+    // NO spinner for terminal states
   }
 
   return blocks;
@@ -1857,17 +1981,46 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
  * Shows rolling activity with thinking previews, tool durations, etc.
  * Used by /watch and /ff for in-progress turns AND completed turns.
  * Always includes View Log and Download buttons.
+ * Fork button shown only on final segment when forkInfo is provided.
  *
  * @param activityEntries - Activity entries to display
  * @param segmentKey - Unique segment key (format: {channelId}_{messageTs}_seg_{uuid})
  * @param inProgress - Whether this segment is still in progress
+ * @param isFinalSegment - Whether this is the final segment (shows Fork button)
+ * @param forkInfo - Fork button info (required for Fork button to show)
  */
 export function buildLiveActivityBlocks(
   activityEntries: ActivityEntry[],
   segmentKey: string,
-  inProgress: boolean = true
+  inProgress: boolean = true,
+  isFinalSegment: boolean = false,
+  forkInfo?: { threadTs?: string; conversationKey: string }
 ): Block[] {
   const activityText = buildActivityLogText(activityEntries, inProgress, ACTIVITY_LOG_MAX_CHARS);
+
+  // Build action elements - always include View Log, conditionally add Fork
+  const actionElements: any[] = [
+    {
+      type: 'button',
+      text: { type: 'plain_text', text: 'View Log' },
+      action_id: `view_segment_log_${segmentKey}`,
+      value: segmentKey,
+    },
+  ];
+
+  // Fork button only on final segment when forkInfo is provided
+  if (isFinalSegment && forkInfo) {
+    actionElements.push({
+      type: 'button',
+      text: {
+        type: 'plain_text',
+        text: ':twisted_rightwards_arrows: Fork here',
+        emoji: true,
+      },
+      action_id: `fork_here_${forkInfo.conversationKey}`,
+      value: JSON.stringify({ threadTs: forkInfo.threadTs }),
+    });
+  }
 
   return [
     {
@@ -1880,20 +2033,7 @@ export function buildLiveActivityBlocks(
     {
       type: 'actions',
       block_id: `activity_actions_${segmentKey}`,
-      elements: [
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: 'View Log' },
-          action_id: `view_segment_log_${segmentKey}`,
-          value: segmentKey,
-        },
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: 'Download .txt' },
-          action_id: `download_segment_log_${segmentKey}`,
-          value: segmentKey,
-        },
-      ],
+      elements: actionElements,
     },
   ];
 }

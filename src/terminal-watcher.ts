@@ -216,7 +216,7 @@ async function pollForChanges(state: WatchState): Promise<void> {
 
     const syncResult = await syncMessagesFromOffset(syncState, filePath, state.fileOffset, {
       infiniteRetry: false,  // /watch uses limited retries
-      postTextMessage: (s, msg) => postTerminalMessage(state, msg),
+      postTextMessage: (s, msg, isLastMessage) => postTerminalMessage(state, msg, isLastMessage),
       activityMessages: state.activityMessages,  // Pass activity ts map for update-in-place
     });
 
@@ -304,7 +304,7 @@ async function moveStatusMessageToBottom(state: WatchState): Promise<void> {
  *
  * @returns true if message was successfully posted (and saved to messageMap), false on failure
  */
-export async function postTerminalMessage(state: WatchState, msg: SessionFileMessage): Promise<boolean> {
+export async function postTerminalMessage(state: WatchState, msg: SessionFileMessage, isFinalSegment?: boolean): Promise<boolean> {
   const rawText = extractTextContent(msg);
 
   // Get session config - use correct function for channel vs thread
@@ -402,9 +402,8 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
         state.threadTs,
         state.userId,  // For ephemeral error notifications (may be undefined)
         charLimit,
-        session?.stripEmptyTag,
-        // Add "Fork here" button for point-in-time forking (creates independent fork, safe during watch)
-        { threadTs: state.threadTs, conversationKey: state.conversationKey }
+        session?.stripEmptyTag
+        // Note: Fork button now on activity message, not response
       );
 
       // Save mapping for thread forking

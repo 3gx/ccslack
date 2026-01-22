@@ -870,8 +870,8 @@ describe('message-sync', () => {
         postTextMessage,
       });
 
-      // Should use postTextMessage for text response
-      expect(postTextMessage).toHaveBeenCalledWith(mockState, textMsg);
+      // Should use postTextMessage for text response (isLastMessage=true since only one turn/segment)
+      expect(postTextMessage).toHaveBeenCalledWith(mockState, textMsg, true);
     });
 
     it('should truncate long text responses', async () => {

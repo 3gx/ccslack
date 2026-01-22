@@ -28,6 +28,8 @@ import {
   ActivityEntry,
   ACTIVITY_LOG_MAX_CHARS,
   buildStopWatchingButton,
+  buildTopStatusLine,
+  buildBottomStatsLine,
 } from '../../blocks.js';
 import type { ModelInfo } from '../../model-cache.js';
 import type { LastUsage } from '../../session-manager.js';
@@ -2420,21 +2422,6 @@ describe('blocks', () => {
       expect(viewLogButton.value).toBe(segmentKey);
     });
 
-    it('should include Download button with segment key', () => {
-      const entries: ActivityEntry[] = [{
-        timestamp: Date.now(),
-        type: 'thinking',
-        thinkingContent: 'test thinking',
-      }];
-      const blocks = buildLiveActivityBlocks(entries, segmentKey);
-
-      const buttons = (blocks[1] as any).elements;
-      const downloadButton = buttons.find((b: any) => b.text.text === 'Download .txt');
-      expect(downloadButton).toBeDefined();
-      expect(downloadButton.action_id).toBe(`download_segment_log_${segmentKey}`);
-      expect(downloadButton.value).toBe(segmentKey);
-    });
-
     it('should show activity text in section', () => {
       const entries: ActivityEntry[] = [{
         timestamp: Date.now(),
@@ -2957,57 +2944,307 @@ describe('blocks', () => {
       toolsCompleted: 0,
       elapsedMs: 0,
       conversationKey: 'C123_thread456',
-      spinner: '|',
+      spinner: '◐',
     };
 
-    it('should return Beginning header + status line + activity + spinner + buttons', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting' },
-      ];
-      const blocks = buildCombinedStatusBlocks({
-        ...baseParams,
-        activityLog: entries,
-        inProgress: true,
+    describe('in-progress state', () => {
+      it('should return TOP line + activity + buttons + spinner (no Beginning header)', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          activityLog: entries,
+          inProgress: true,
+          sessionId: 'abc123',
+        });
+
+        // Should have 4 blocks: TOP line, activity, spinner, buttons (no Beginning header!)
+        expect(blocks.length).toBe(4);
+        // First block should be TOP status line (context)
+        expect(blocks[0].type).toBe('context');
+        expect((blocks[0] as any).elements[0].text).toContain('bypass');
+        expect((blocks[0] as any).elements[0].text).toContain('abc123');
+        // Second should be activity log section
+        expect(blocks[1].type).toBe('section');
+        expect((blocks[1] as any).text.text).toContain(':brain:');
+        // Third should be spinner + elapsed (ABOVE buttons)
+        expect(blocks[2].type).toBe('context');
+        expect((blocks[2] as any).elements[0].text).toContain('◐');
+        // Fourth should be View Log + Abort buttons
+        expect(blocks[3].type).toBe('actions');
+        expect((blocks[3] as any).elements.length).toBe(2);
+        expect((blocks[3] as any).elements[0].text.text).toBe('View Log');
+        expect((blocks[3] as any).elements[1].text.text).toBe('Abort');
       });
 
-      // Should have 5 blocks: Beginning, status line, activity, spinner, buttons
-      expect(blocks.length).toBe(5);
-      // First block should be "Beginning" header
-      expect(blocks[0].type).toBe('section');
-      expect((blocks[0] as any).text.text).toBe('*Beginning*');
-      // Second should be simple status line
-      expect(blocks[1].type).toBe('context');
-      // Third should be activity log section
-      expect(blocks[2].type).toBe('section');
-      expect((blocks[2] as any).text.text).toContain(':brain:');
-      // Fourth should be spinner + elapsed
-      expect(blocks[3].type).toBe('context');
-      // Fifth should be View Log + Abort buttons
-      expect(blocks[4].type).toBe('actions');
-      expect((blocks[4] as any).elements.length).toBe(2);
-      expect((blocks[4] as any).elements[0].text.text).toBe('View Log');
-      expect((blocks[4] as any).elements[0].action_id).toMatch(/^view_segment_log_/);
-      expect((blocks[4] as any).elements[1].text.text).toBe('Abort');
-      expect((blocks[4] as any).elements[1].action_id).toMatch(/^abort_query_/);
+      it('should show n/a for model and sessionId when not yet available', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          activityLog: entries,
+          inProgress: true,
+          // no model, no sessionId
+        });
+
+        const topLine = (blocks[0] as any).elements[0].text;
+        expect(topLine).toContain('n/a');
+      });
+
+      it('should show [new] prefix for new sessions', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          activityLog: entries,
+          inProgress: true,
+          sessionId: 'new-session-id',
+          isNewSession: true,
+        });
+
+        const topLine = (blocks[0] as any).elements[0].text;
+        expect(topLine).toContain('[new]');
+        expect(topLine).toContain('new-session-id');
+      });
+
+      it('should show rate limit warning above buttons when hit', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          activityLog: entries,
+          inProgress: true,
+          rateLimitHits: 3,
+        });
+
+        // Should have 5 blocks: TOP line, activity, rate limit warning, spinner, buttons
+        expect(blocks.length).toBe(5);
+        // Rate limit warning should be context block
+        expect(blocks[2].type).toBe('context');
+        expect((blocks[2] as any).elements[0].text).toContain(':warning:');
+        expect((blocks[2] as any).elements[0].text).toContain('3 rate limits');
+        // Spinner should follow
+        expect(blocks[3].type).toBe('context');
+        // Buttons should be last
+        expect(blocks[4].type).toBe('actions');
+      });
+
+      it('should include abort button during processing', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          activityLog: entries,
+          inProgress: true,
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        expect(actionsBlock).toBeDefined();
+        const abortButton = (actionsBlock as any).elements.find(
+          (e: any) => e.action_id.startsWith('abort_query_')
+        );
+        expect(abortButton).toBeDefined();
+        expect(abortButton.style).toBe('danger');
+      });
     });
 
-    it('should include abort button during processing', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting' },
-      ];
-      const blocks = buildCombinedStatusBlocks({
-        ...baseParams,
-        activityLog: entries,
-        inProgress: true,
+    describe('completed state', () => {
+      it('should show BOTTOM stats line on completion (no Complete header)', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+          { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'complete',
+          activityLog: entries,
+          inProgress: false,
+          model: 'claude-sonnet-4',
+          sessionId: 'session-xyz',
+          inputTokens: 1500,
+          outputTokens: 800,
+          contextPercent: 45,
+          compactPercent: 30,
+          costUsd: 0.05,
+          elapsedMs: 5000,
+        });
+
+        // Should have 3 blocks: TOP line, activity, BOTTOM stats, buttons (no Complete header!)
+        expect(blocks.length).toBe(4);
+        // First is TOP line
+        expect(blocks[0].type).toBe('context');
+        expect((blocks[0] as any).elements[0].text).toContain('claude-sonnet-4');
+        // Second is activity log
+        expect(blocks[1].type).toBe('section');
+        // Third is BOTTOM stats line
+        expect(blocks[2].type).toBe('context');
+        const bottomLine = (blocks[2] as any).elements[0].text;
+        expect(bottomLine).toContain('bypass');
+        expect(bottomLine).toContain('claude-sonnet-4');
+        expect(bottomLine).toContain('session-xyz');
+        expect(bottomLine).toContain('45% ctx');
+        expect(bottomLine).toContain('30% to ⚡');
+        expect(bottomLine).toContain('1.5k/800');
+        expect(bottomLine).toContain('$0.05');
+        expect(bottomLine).toContain('5.0s');
+        // Fourth is actions (View Log only, no Abort)
+        expect(blocks[3].type).toBe('actions');
+        expect((blocks[3] as any).elements.length).toBe(1);
+        expect((blocks[3] as any).elements[0].text.text).toBe('View Log');
       });
 
-      const actionsBlock = blocks.find(b => b.type === 'actions');
-      expect(actionsBlock).toBeDefined();
-      const abortButton = (actionsBlock as any).elements.find(
-        (e: any) => e.action_id.startsWith('abort_query_')
-      );
-      expect(abortButton).toBeDefined();
-      expect(abortButton.style).toBe('danger');
+      it('should show Fork button on final segment', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'complete',
+          activityLog: entries,
+          inProgress: false,
+          isFinalSegment: true,
+          forkInfo: { threadTs: 'thread-123', conversationKey: 'C123_thread456' },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        expect(actionsBlock).toBeDefined();
+        const forkButton = (actionsBlock as any).elements.find(
+          (e: any) => e.action_id.startsWith('fork_here_')
+        );
+        expect(forkButton).toBeDefined();
+        expect(forkButton.text.text).toContain('Fork here');
+      });
+
+      it('should NOT show Fork button on non-final segment', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'complete',
+          activityLog: entries,
+          inProgress: false,
+          isFinalSegment: false,
+          forkInfo: { threadTs: 'thread-123', conversationKey: 'C123_thread456' },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        const forkButton = (actionsBlock as any).elements.find(
+          (e: any) => e.action_id.startsWith('fork_here_')
+        );
+        expect(forkButton).toBeUndefined();
+      });
+
+      it('should include rate limits in BOTTOM stats line at completion', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'complete',
+          activityLog: entries,
+          inProgress: false,
+          rateLimitHits: 2,
+          inputTokens: 100,
+          elapsedMs: 1000,
+        });
+
+        // Find BOTTOM stats line (should be context block after activity)
+        const contextBlocks = blocks.filter(b => b.type === 'context');
+        const bottomLine = contextBlocks[contextBlocks.length - 1];
+        expect((bottomLine as any).elements[0].text).toContain(':warning:');
+        expect((bottomLine as any).elements[0].text).toContain('2 limits');
+      });
+
+      it('should NOT have spinner after completion', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'complete',
+          activityLog: entries,
+          inProgress: false,
+        });
+
+        // Actions block should be last (no spinner after it)
+        expect(blocks[blocks.length - 1].type).toBe('actions');
+      });
+    });
+
+    describe('aborted state', () => {
+      it('should show BOTTOM stats line with available data on abort', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'aborted',
+          activityLog: entries,
+          inProgress: false,
+          sessionId: 'session-abc',
+          inputTokens: 500,
+          outputTokens: 100,
+          contextPercent: 20,
+          costUsd: 0.02,
+          elapsedMs: 3000,
+        });
+
+        // Should have BOTTOM stats line
+        const contextBlocks = blocks.filter(b => b.type === 'context');
+        expect(contextBlocks.length).toBe(2); // TOP and BOTTOM
+        const bottomLine = contextBlocks[1];
+        expect((bottomLine as any).elements[0].text).toContain('session-abc');
+        expect((bottomLine as any).elements[0].text).toContain('20% ctx');
+      });
+
+      it('should show View Log but NOT Abort or Fork after abort', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'aborted',
+          activityLog: entries,
+          inProgress: false,
+          isFinalSegment: true,
+          forkInfo: { threadTs: 'thread-123', conversationKey: 'C123_thread456' },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        expect(actionsBlock).toBeDefined();
+        // Only View Log button (no Abort, no Fork for aborted)
+        expect((actionsBlock as any).elements.length).toBe(1);
+        expect((actionsBlock as any).elements[0].text.text).toBe('View Log');
+      });
+    });
+
+    describe('error state', () => {
+      it('should show error message in context when no stats available', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+          { timestamp: Date.now(), type: 'error', message: 'Connection timeout' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'error',
+          activityLog: entries,
+          inProgress: false,
+          errorMessage: 'Connection timeout',
+        });
+
+        const contextBlocks = blocks.filter(b => b.type === 'context');
+        // Should have error message in a context block
+        const errorContext = contextBlocks.find(b =>
+          (b as any).elements[0].text.includes(':x:')
+        );
+        expect(errorContext).toBeDefined();
+      });
     });
 
     it('should truncate activity log to maxChars', () => {
@@ -3027,8 +3264,8 @@ describe('blocks', () => {
         inProgress: true,
       });
 
-      // Activity log section is now blocks[2] (after Beginning header and status line)
-      const activitySection = blocks[2];
+      // Activity log section is blocks[1] (after TOP status line)
+      const activitySection = blocks[1];
       expect((activitySection as any).text.text.length).toBeLessThanOrEqual(ACTIVITY_LOG_MAX_CHARS + 100); // Allow some margin
     });
 
@@ -3044,9 +3281,75 @@ describe('blocks', () => {
         inProgress: true,
       });
 
-      // Activity section is now blocks[2] (after Beginning header and status line)
-      expect((blocks[2] as any).text.text).toContain(':brain:');
-      expect((blocks[2] as any).text.text).toContain('Thinking');
+      // Activity section is blocks[1] (after TOP status line)
+      expect((blocks[1] as any).text.text).toContain(':brain:');
+      expect((blocks[1] as any).text.text).toContain('Thinking');
+    });
+  });
+
+  describe('buildTopStatusLine', () => {
+    it('should format mode | model | sessionId', () => {
+      const line = buildTopStatusLine('plan', 'claude-sonnet-4', 'abc123');
+      expect(line).toBe('_plan | claude-sonnet-4 | abc123_');
+    });
+
+    it('should show n/a for missing values', () => {
+      const line = buildTopStatusLine('plan');
+      expect(line).toBe('_plan | n/a | n/a_');
+    });
+
+    it('should show [new] prefix for new sessions', () => {
+      const line = buildTopStatusLine('bypassPermissions', 'claude-opus-4', 'new-session', true);
+      expect(line).toBe('_bypass | claude-opus-4 | [new] new-session_');
+    });
+
+    it('should not show [new] when isNewSession is false', () => {
+      const line = buildTopStatusLine('default', 'claude-sonnet-4', 'existing', false);
+      expect(line).toBe('_default | claude-sonnet-4 | existing_');
+    });
+  });
+
+  describe('buildBottomStatsLine', () => {
+    it('should format all stats when available', () => {
+      const line = buildBottomStatsLine(
+        'plan',
+        'claude-sonnet-4',
+        'session123',
+        55,   // contextPercent
+        22,   // compactPercent
+        1200, // inputTokens
+        850,  // outputTokens
+        0.12, // cost
+        15000, // durationMs
+      );
+      expect(line).toContain('plan');
+      expect(line).toContain('claude-sonnet-4');
+      expect(line).toContain('session123');
+      expect(line).toContain('55% ctx');
+      expect(line).toContain('22% to ⚡');
+      expect(line).toContain('1.2k/850');
+      expect(line).toContain('$0.12');
+      expect(line).toContain('15.0s');
+    });
+
+    it('should show just mode/model/session when no stats', () => {
+      const line = buildBottomStatsLine('acceptEdits', 'claude-opus-4', 'sess-abc');
+      expect(line).toBe('_acceptEdits | claude-opus-4 | sess-abc_');
+    });
+
+    it('should include rate limit warning as suffix', () => {
+      const line = buildBottomStatsLine(
+        'plan', 'claude-sonnet-4', 'session', 45, 30, 1000, 500, 0.05, 5000, 3
+      );
+      expect(line).toContain(':warning: 3 limits');
+    });
+
+    it('should show compact soon when compactPercent <= 0', () => {
+      const line = buildBottomStatsLine(
+        'plan', 'claude-sonnet-4', 'session', 80, -5, 1000, 500
+      );
+      expect(line).toContain('80% ctx');
+      expect(line).toContain('⚡ soon');
     });
   });
 

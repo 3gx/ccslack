@@ -319,38 +319,34 @@ describe('slack-bot mention handlers', () => {
       expect(combinedCall.channel).toBe('C123');
       expect(combinedCall.text).toBe('Claude is starting...');
 
-      // Verify new combined blocks: Beginning + status line + activity + spinner + abort
+      // Verify new combined blocks: TOP line + activity + spinner + buttons (no Beginning header!)
       const blocks = combinedCall.blocks;
       expect(blocks).toBeDefined();
-      expect(blocks.length).toBe(5); // Beginning + status line + activity + spinner + abort
+      expect(blocks.length).toBe(4); // TOP line + activity + spinner + buttons
 
-      // First block: "Beginning" header
-      expect(blocks[0].type).toBe('section');
-      expect(blocks[0].text.text).toBe('*Beginning*');
+      // First block: TOP status line (mode | model | session-id)
+      expect(blocks[0].type).toBe('context');
+      expect(blocks[0].elements[0].text).toContain('plan');
 
-      // Second block: simple status line (mode | model)
-      expect(blocks[1].type).toBe('context');
-      expect(blocks[1].elements[0].text).toContain('Plan');
+      // Second block: activity log section
+      expect(blocks[1].type).toBe('section');
+      expect(blocks[1].text.text).toContain('Analyzing request');
 
-      // Third block: activity log section
-      expect(blocks[2].type).toBe('section');
-      expect(blocks[2].text.text).toContain('Analyzing request');
+      // Third block: spinner + elapsed (ABOVE buttons)
+      expect(blocks[2].type).toBe('context');
 
-      // Fourth block: spinner + elapsed
-      expect(blocks[3].type).toBe('context');
-
-      // Fifth block: View Log + Abort buttons
-      expect(blocks[4].type).toBe('actions');
-      expect(blocks[4].elements.length).toBe(2);
+      // Fourth block: View Log + Abort buttons
+      expect(blocks[3].type).toBe('actions');
+      expect(blocks[3].elements.length).toBe(2);
       // View Log button first
-      expect(blocks[4].elements[0].type).toBe('button');
-      expect(blocks[4].elements[0].text.text).toBe('View Log');
-      expect(blocks[4].elements[0].action_id).toMatch(/^view_segment_log_/);
+      expect(blocks[3].elements[0].type).toBe('button');
+      expect(blocks[3].elements[0].text.text).toBe('View Log');
+      expect(blocks[3].elements[0].action_id).toMatch(/^view_segment_log_/);
       // Abort button second
-      expect(blocks[4].elements[1].type).toBe('button');
-      expect(blocks[4].elements[1].text.text).toBe('Abort');
-      expect(blocks[4].elements[1].style).toBe('danger');
-      expect(blocks[4].elements[1].action_id).toMatch(/^abort_query_/);
+      expect(blocks[3].elements[1].type).toBe('button');
+      expect(blocks[3].elements[1].text.text).toBe('Abort');
+      expect(blocks[3].elements[1].style).toBe('danger');
+      expect(blocks[3].elements[1].action_id).toMatch(/^abort_query_/);
     });
 
     it('should update header with stats on success', async () => {
@@ -393,46 +389,43 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Messages should be posted, updated, and status message moved to bottom (delete+repost)
+      // Messages should be posted and updated (status message stays at TOP, updated in place)
       expect(mockClient.chat.postMessage).toHaveBeenCalled();
       expect(mockClient.chat.update).toHaveBeenCalled();
-      // Status message is deleted and reposted to keep it at bottom after segments
-      // So chat.delete IS expected to be called now
+      // Status message stays at TOP - no delete/repost, only in-place updates via chat.update
+      // chat.delete should NOT be called (status message is never moved)
 
       // Verify chat.update was called with complete status and stats
       const updateCalls = mockClient.chat.update.mock.calls;
-      // Find the combined completion update (has 'Complete' somewhere in blocks)
+      // Find the combined completion update (has BOTTOM stats line with token counts)
+      // New format: TOP line + activity + BOTTOM stats + actions (no "Complete" header!)
       const statusPanelComplete = updateCalls.find((call: any) =>
-        call[0].blocks?.some((b: any) => b.text?.text?.includes('Complete'))
+        call[0].blocks?.some((b: any) =>
+          b.type === 'context' && b.elements?.[0]?.text?.includes('100') && b.elements?.[0]?.text?.includes('200')
+        )
       );
       expect(statusPanelComplete).toBeDefined();
 
       // Combined completion blocks structure (buildCombinedStatusBlocks):
-      // 0: *Beginning* (section)
-      // 1: _Plan | model_ (context - simple status line)
-      // 2: Activity log (section)
-      // 3: *Complete* (section)
-      // 4: _Plan | model | stats..._ (context - full stats line)
+      // 0: _plan | claude-sonnet | session-id_ (context - TOP line)
+      // 1: Activity log (section)
+      // 2: _plan | claude-sonnet | session-id | stats..._ (context - BOTTOM stats line)
+      // 3: [View Log] (actions)
       const completeBlocks = statusPanelComplete![0].blocks;
 
-      // Find the *Beginning* section
-      const beginningSection = completeBlocks.find((b: any) => b.text?.text?.includes('Beginning'));
-      expect(beginningSection).toBeDefined();
+      // Find the TOP status line (first context block with mode)
+      const topLine = completeBlocks.find((b: any) =>
+        b.type === 'context' && b.elements?.[0]?.text?.includes('plan') && !b.elements?.[0]?.text?.includes('100')
+      );
+      expect(topLine).toBeDefined();
 
-      // Find the *Complete* section
-      const statusSection = completeBlocks.find((b: any) => b.text?.text?.includes('Complete'));
-      expect(statusSection).toBeDefined();
-
-      // Find the full stats context block (the one with token counts, not just mode|model)
-      // Filter context blocks that contain 'in /' which indicates token stats
+      // Find the BOTTOM stats context block (the one with token counts)
       const statsBlock = completeBlocks.find((b: any) =>
-        b.type === 'context' && b.elements?.[0]?.text?.includes('in /')
+        b.type === 'context' && b.elements?.[0]?.text?.includes('100') && b.elements?.[0]?.text?.includes('200')
       );
       expect(statsBlock).toBeDefined();
       expect(statsBlock.elements[0].text).toContain('claude-sonnet');
-      expect(statsBlock.elements[0].text).toContain('Plan');
-      expect(statsBlock.elements[0].text).toContain('100');  // input tokens
-      expect(statsBlock.elements[0].text).toContain('200');  // output tokens
+      expect(statsBlock.elements[0].text).toContain('plan');
       expect(statsBlock.elements[0].text).toContain('5.0s');
     });
 
@@ -487,7 +480,7 @@ describe('slack-bot mention handlers', () => {
       expect(responseCall[0].text).toContain(':speech_balloon: *Response*');
     });
 
-    it('should upload .md file without initial_comment and post text separately', async () => {
+    it('should upload .md file without initial_comment when response is truncated', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
@@ -510,9 +503,11 @@ describe('slack-bot mention handlers', () => {
         configuredAt: Date.now(),
       });
 
+      // Long response that exceeds default 500 char limit to trigger file upload
+      const longMarkdown = '# Hello\n\n' + 'This is a very long markdown response. '.repeat(20);
       const mockMessages = [
         { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
-        { type: 'result', result: '# Hello\n\nThis is **markdown**' },
+        { type: 'result', result: longMarkdown },
       ];
       vi.mocked(startClaudeQuery).mockReturnValue({
         [Symbol.asyncIterator]: async function* () {
@@ -533,11 +528,12 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md and .png files WITHOUT initial_comment
+      // Should upload .md and .png files WITH initial_comment (text attached to files)
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
           thread_ts: undefined,
+          initial_comment: expect.stringContaining('very long markdown'),
           file_uploads: expect.arrayContaining([
             expect.objectContaining({
               file: expect.any(Buffer),  // Markdown as Buffer
@@ -547,15 +543,16 @@ describe('slack-bot mention handlers', () => {
           ]),
         })
       );
-      // Verify initial_comment is NOT present
+      // Verify initial_comment IS present (text is attached to files, not separate)
       const uploadCall = mockClient.files.uploadV2.mock.calls[0][0] as any;
-      expect(uploadCall.initial_comment).toBeUndefined();
+      expect(uploadCall.initial_comment).toBeDefined();
+      expect(uploadCall.initial_comment).toContain('very long markdown');
 
-      // Text should be posted separately via chat.postMessage
+      // Text should NOT be posted separately via chat.postMessage when truncated
+      // (it's attached to the file via initial_comment)
       const postCalls = mockClient.chat.postMessage.mock.calls;
-      // Response text should be posted (after combined status message)
-      const responseCall = postCalls.find((call: any) => call[0].text?.includes('Hello'));
-      expect(responseCall).toBeDefined();
+      const responseCall = postCalls.find((call: any) => call[0].text?.includes('very long markdown'));
+      expect(responseCall).toBeUndefined();
     });
 
     it('should fall back to chat.postMessage when file upload fails', async () => {
@@ -606,7 +603,7 @@ describe('slack-bot mention handlers', () => {
       expect(responseCall[0].text).toContain(':speech_balloon: *Response*');
     });
 
-    it('should upload .md file in thread and post text separately', async () => {
+    it('should upload .md file in thread when response is truncated', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
@@ -645,9 +642,11 @@ describe('slack-bot mention handlers', () => {
         isNewFork: false,
       });
 
+      // Long response that exceeds default 500 char limit to trigger file upload
+      const longThreadResponse = 'Thread response with lots of content. '.repeat(20);
       const mockMessages = [
         { type: 'system', subtype: 'init', session_id: 'thread-session', model: 'claude-sonnet' },
-        { type: 'result', result: 'Thread response' },
+        { type: 'result', result: longThreadResponse },
       ];
       vi.mocked(startClaudeQuery).mockReturnValue({
         [Symbol.asyncIterator]: async function* () {
@@ -669,11 +668,12 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md and .png files to the thread WITHOUT initial_comment
+      // Should upload .md and .png files to the thread WITH initial_comment (text attached to files)
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
           thread_ts: 'thread123',
+          initial_comment: expect.stringContaining('Thread response with lots'),
           file_uploads: expect.arrayContaining([
             expect.objectContaining({
               file: expect.any(Buffer),  // Markdown as Buffer
@@ -683,17 +683,491 @@ describe('slack-bot mention handlers', () => {
           ]),
         })
       );
-      // Verify initial_comment is NOT present
+      // Verify initial_comment IS present (text is attached to files, not separate)
       const uploadCall = mockClient.files.uploadV2.mock.calls[0][0] as any;
-      expect(uploadCall.initial_comment).toBeUndefined();
+      expect(uploadCall.initial_comment).toBeDefined();
+      expect(uploadCall.initial_comment).toContain('Thread response with lots');
 
-      // Text should be posted separately via chat.postMessage
+      // Text should NOT be posted separately via chat.postMessage when truncated
+      // (it's attached to the file via initial_comment)
       const postCalls = mockClient.chat.postMessage.mock.calls;
       const responseCall = postCalls.find((call: any) =>
-        call[0].text?.includes('Thread response') &&
+        call[0].text?.includes('Thread response with lots') &&
         call[0].thread_ts === 'thread123'
       );
-      expect(responseCall).toBeDefined();
+      expect(responseCall).toBeUndefined();
+    });
+  });
+
+  describe('status message position and activity consolidation', () => {
+    it('should NOT move status message to bottom - status stays at TOP', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
+        { type: 'assistant', content: 'Processing your request...' },
+        { type: 'result', result: 'Done!' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> test status position',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Status message should stay at TOP - NO chat.delete calls
+      // (Old behavior deleted and reposted status to move it to bottom)
+      expect(mockClient.chat.delete).not.toHaveBeenCalled();
+
+      // Status message is updated in-place via chat.update
+      expect(mockClient.chat.update).toHaveBeenCalled();
+    });
+
+    it('should NOT post activity as separate message - activity stays in status message', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock a full flow with tools
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
+        { type: 'tool_use', name: 'Read', id: 'tool-1' },
+        { type: 'tool_result', name: 'Read', id: 'tool-1' },
+        { type: 'assistant', content: 'Response text here' },
+        { type: 'result', result: 'Response text here' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> test activity consolidation',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Check all postMessage calls - should NOT have any "Activity" segment messages
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+
+      // Activity should NOT be posted as separate message
+      // Old behavior posted activity segments via buildLiveActivityBlocks
+      const activitySegmentCall = postCalls.find((call: any) => {
+        const blocks = call[0].blocks;
+        if (!blocks) return false;
+        // Check for activity segment format (section with thinking/tool emoji)
+        return blocks.some((b: any) =>
+          b.type === 'section' &&
+          b.text?.text &&
+          (b.text.text.includes(':brain:') || b.text.text.includes(':white_check_mark:')) &&
+          // But NOT the combined status message (which has actions block)
+          !blocks.some((b2: any) => b2.type === 'actions')
+        );
+      });
+      expect(activitySegmentCall).toBeUndefined();
+
+      // Status message (with activity IN it) should exist
+      const statusCall = postCalls.find((call: any) =>
+        call[0].text === 'Claude is starting...' &&
+        call[0].blocks?.some((b: any) => b.type === 'actions')
+      );
+      expect(statusCall).toBeDefined();
+    });
+
+    it('should include activity log in completion status message (single message format)', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
+        { type: 'result', result: 'All done!', usage: { input_tokens: 500, output_tokens: 100 } },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> test full activity',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Find the completion update (has BOTTOM stats line with token counts)
+      const updateCalls = mockClient.chat.update.mock.calls;
+      const completionUpdate = updateCalls.find((call: any) =>
+        call[0].blocks?.some((b: any) =>
+          b.type === 'context' &&
+          b.elements?.[0]?.text?.includes('500') &&
+          b.elements?.[0]?.text?.includes('100')
+        )
+      );
+      expect(completionUpdate).toBeDefined();
+
+      // Verify completion message has the expected block structure:
+      // 1. TOP line (context) - mode | model | session-id
+      // 2. Activity log (section)
+      // 3. BOTTOM stats line (context) - includes token counts
+      // 4. Actions (buttons)
+      const completionBlocks = completionUpdate![0].blocks;
+
+      // TOP line: context with mode
+      const topLine = completionBlocks.find((b: any) =>
+        b.type === 'context' && b.elements?.[0]?.text?.includes('plan') && !b.elements?.[0]?.text?.includes('500')
+      );
+      expect(topLine).toBeDefined();
+
+      // Activity section exists
+      const activitySection = completionBlocks.find((b: any) => b.type === 'section');
+      expect(activitySection).toBeDefined();
+
+      // BOTTOM stats line: context with token counts
+      const statsLine = completionBlocks.find((b: any) =>
+        b.type === 'context' && b.elements?.[0]?.text?.includes('500')
+      );
+      expect(statsLine).toBeDefined();
+
+      // Actions block (View Log button)
+      const actionsBlock = completionBlocks.find((b: any) => b.type === 'actions');
+      expect(actionsBlock).toBeDefined();
+
+      // No spinner block in completion (spinner only during in-progress)
+      // Completion should have exactly 4 blocks: TOP + activity + BOTTOM + actions
+      expect(completionBlocks.length).toBe(4);
+    });
+  });
+
+  describe('intermediate response text handling', () => {
+    it('should NOT post intermediate text before tool as separate message', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Simulate: text streaming → tool use → final text → result
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session-123', model: 'claude-sonnet' },
+        // Text before tool (this should NOT be posted as separate message)
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: "I'll explore the codebase to find..." }}},
+        // Tool starts - triggers logToolStart which should skipPosting
+        { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Task' }}},
+        { type: 'stream_event', event: { type: 'content_block_stop' }},
+        // Final text after tool (this SHOULD be posted)
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Analysis complete! I found the issue.' }}},
+        // Result signals end of streaming
+        { type: 'result', result: 'Analysis complete! I found the issue.' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> find the bug',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+
+      // Should NOT find a message with intermediate "I'll explore..." text
+      const intermediateMsg = postCalls.find((call: any) =>
+        call[0].text?.includes("I'll explore the codebase")
+      );
+      expect(intermediateMsg).toBeUndefined();
+
+      // Should find final response
+      const finalMsg = postCalls.find((call: any) =>
+        call[0].text?.includes('Analysis complete')
+      );
+      expect(finalMsg).toBeDefined();
+    });
+
+    it('should only post final response after multiple tools', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Simulate: text → tool1 → text → tool2 → final text → result
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session-123', model: 'claude-sonnet' },
+        // Text before first tool
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Let me search for that...' }}},
+        // Tool 1
+        { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Grep' }}},
+        { type: 'stream_event', event: { type: 'content_block_stop' }},
+        // Text between tools
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Now reading the file...' }}},
+        // Tool 2
+        { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Read' }}},
+        { type: 'stream_event', event: { type: 'content_block_stop' }},
+        // Final text after all tools (this SHOULD be posted)
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '## Summary\n\nHere is what I found in the code.' }}},
+        // Result signals end of streaming
+        { type: 'result', result: '## Summary\n\nHere is what I found in the code.' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> analyze code',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+
+      // Should NOT find intermediate messages
+      const searchMsg = postCalls.find((call: any) =>
+        call[0].text?.includes('Let me search')
+      );
+      expect(searchMsg).toBeUndefined();
+
+      const readingMsg = postCalls.find((call: any) =>
+        call[0].text?.includes('Now reading the file')
+      );
+      expect(readingMsg).toBeUndefined();
+
+      // Should find only the final response
+      const finalMsg = postCalls.find((call: any) =>
+        call[0].text?.includes('Summary') && call[0].text?.includes('what I found')
+      );
+      expect(finalMsg).toBeDefined();
+
+      // Count response messages (excluding status message)
+      const responseMessages = postCalls.filter((call: any) =>
+        call[0].text?.includes(':speech_balloon: *Response*')
+      );
+      expect(responseMessages.length).toBe(1); // Only the final response
+    });
+
+    it('should post response normally when no tools are called', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Simple response with no tools
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session-123', model: 'claude-sonnet' },
+        // Text response (no tools)
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'This is a direct answer.' }}},
+        { type: 'result', result: 'This is a direct answer.' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> what is 2+2',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+
+      // Response should be posted normally
+      const responseMsg = postCalls.find((call: any) =>
+        call[0].text?.includes('direct answer')
+      );
+      expect(responseMsg).toBeDefined();
+      expect(responseMsg[0].text).toContain(':speech_balloon: *Response*');
+    });
+
+    it('should track intermediate text in activity entries even when not posting', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Simulate: text before tool → tool → final text → result
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session-123', model: 'claude-sonnet' },
+        // Intermediate text that gets tracked but not posted
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Let me investigate this bug...' }}},
+        // Tool starts
+        { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Read' }}},
+        { type: 'stream_event', event: { type: 'content_block_stop' }},
+        // Final text after tool
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Found the issue!' }}},
+        { type: 'result', result: 'Found the issue!' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> debug issue',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+
+      // Key verification: Intermediate text is NOT posted as separate message
+      const intermediatePosted = postCalls.find((call: any) =>
+        call[0].text?.includes('Let me investigate')
+      );
+      expect(intermediatePosted).toBeUndefined();
+
+      // Final text IS posted
+      const finalPosted = postCalls.find((call: any) =>
+        call[0].text?.includes('Found the issue')
+      );
+      expect(finalPosted).toBeDefined();
+
+      // Status message updates should happen (activity is tracked via chat.update)
+      expect(mockClient.chat.update).toHaveBeenCalled();
+
+      // Verify at least one update contains activity section (proving activity is tracked)
+      const updateCalls = mockClient.chat.update.mock.calls;
+      const hasActivitySection = updateCalls.some((call: any) =>
+        call[0].blocks?.some((b: any) =>
+          b.type === 'section' && b.text?.text
+        )
+      );
+      expect(hasActivitySection).toBe(true);
     });
   });
 

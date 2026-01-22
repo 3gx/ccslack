@@ -117,6 +117,10 @@ interface ProcessingState {
   contextWindow?: number;
   costUsd?: number;
   durationMs?: number;
+  // Session tracking for status display
+  sessionId?: string;  // Updated when SDK reports session ID
+  contextPercent?: number;  // Context usage percentage
+  compactPercent?: number;  // Percent remaining until auto-compact
   // Rate limit tracking
   rateLimitHits: number;
   rateLimitNotified: boolean;
@@ -1388,8 +1392,8 @@ async function handleAskUserQuestion(
       threadTs,
       undefined,  // userId
       500,        // threadCharLimit
-      false,      // stripEmptyTag
-      { threadTs, conversationKey }  // forkInfo for point-in-time forking
+      false       // stripEmptyTag
+      // Note: Fork button now on activity message, not response
     );
 
     // Clear accumulated response so it's not posted again at the end
@@ -1650,8 +1654,8 @@ async function showPlanApprovalUI(params: {
         threadTs,
         userId,
         liveConfig.threadCharLimit,
-        liveConfig.stripEmptyTag,
-        { threadTs, conversationKey }  // forkInfo for point-in-time forking
+        liveConfig.stripEmptyTag
+        // Note: Fork button now on activity message, not response
       );
     } catch (e) {
       console.error('[PlanApproval] Failed to read/display plan file:', e);
@@ -2237,6 +2241,7 @@ async function handleMessage(params: {
           conversationKey,
           spinner: SPINNER_FRAMES[0],  // Show spinner immediately
           segmentKey: processingState.currentSegmentKey || undefined,
+          sessionId: session.sessionId || undefined,  // Initial session ID (may be null for new sessions)
         }),
         text: 'Claude is starting...',
       })
@@ -2248,62 +2253,6 @@ async function handleMessage(params: {
 
   // Spinner timer - declared outside try block so it can be cleaned up in finally
   let spinnerTimer: NodeJS.Timeout | undefined;
-
-  // Helper to move status message to bottom (delete old, post new)
-  // Called after posting segments to keep Abort button at the bottom
-  const moveStatusToBottom = async (): Promise<void> => {
-    if (!statusMsgTs) return;
-
-    // Delete old status message
-    try {
-      await client.chat.delete({
-        channel: channelId,
-        ts: statusMsgTs,
-      });
-    } catch (error) {
-      console.log(`Could not delete old status message: ${error}`);
-    }
-
-    // Post new status message at bottom
-    try {
-      const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
-      const elapsedMs = Date.now() - processingState.startTime;
-      const spinner = SPINNER_FRAMES[processingState.spinnerIndex];
-
-      const result = await withSlackRetry(() =>
-        client.chat.postMessage({
-          channel: channelId,
-          thread_ts: threadTs,
-          blocks: buildCombinedStatusBlocks({
-            activityLog: trailingActivity,
-            inProgress: true,
-            status: processingState.status,
-            mode: session.mode,
-            model: processingState.model,
-            currentTool: processingState.currentTool,
-            toolsCompleted: processingState.toolsCompleted,
-            elapsedMs,
-            conversationKey,
-            spinner,
-            rateLimitHits: processingState.rateLimitHits,
-            segmentKey: processingState.currentSegmentKey || undefined,
-          }),
-          text: 'Claude is working...',
-        })
-      );
-      const newTs = (result as { ts?: string }).ts;
-      if (newTs) {
-        statusMsgTs = newTs;
-        // Update activeQueries with new ts
-        const activeQuery = activeQueries.get(conversationKey);
-        if (activeQuery) {
-          activeQuery.statusMsgTs = newTs;
-        }
-      }
-    } catch (error) {
-      console.error('Failed to move status message to bottom:', error);
-    }
-  };
 
   // Stream Claude response to Slack with real-time updates
   try {
@@ -2357,8 +2306,8 @@ async function handleMessage(params: {
           threadTs,
           undefined,  // userId
           liveConfig.threadCharLimit,
-          liveConfig.stripEmptyTag,
-          { threadTs, conversationKey }  // forkInfo for point-in-time forking
+          liveConfig.stripEmptyTag
+          // Note: Fork button now on activity message, not response
         );
 
         // Clear current segment so it's not posted again (fullResponse keeps total)
@@ -2506,7 +2455,9 @@ async function handleMessage(params: {
 
     // Helper to finalize generating entry and post segment (called when tool starts or streaming completes)
     // Posts: 1) frozen activity segment, 2) response text for that segment
-    const finalizeGeneratingEntry = async (segmentCharCount: number) => {
+    // isFinalSegment: only true for the LAST segment (enables Fork button)
+    // skipPosting: if true, captures content for activity log but does NOT post as separate message
+    const finalizeGeneratingEntry = async (segmentCharCount: number, isFinalSegment: boolean = false, skipPosting: boolean = false) => {
       const entry = processingState.activityLog.find(
         e => e.type === 'generating' && e.generatingInProgress
       );
@@ -2527,50 +2478,12 @@ async function handleMessage(params: {
       }
 
       // Post the current segment (activity + text) if there's response text
-      if (currentResponse.trim() && !isAborted(conversationKey)) {
-        // 1. Get activity entries for THIS segment (from lastPostedActivityIndex to current end)
-        const segmentActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
+      // skipPosting: capture content for View Log, but don't post intermediate text as separate message
+      if (!skipPosting && currentResponse.trim() && !isAborted(conversationKey)) {
+        // Activity stays in the status message (updated in-place via chat.update)
+        // Only post response text as separate message
 
-        // 2. Post frozen activity segment (not in-progress)
-        if (segmentActivity.length > 0) {
-          try {
-            // Ensure we have a segment key for this segment
-            if (!processingState.currentSegmentKey) {
-              startNewSegment();
-            }
-            const segmentKey = processingState.currentSegmentKey!;
-
-            // Final save of segment activity before posting
-            saveSegmentActivityLog(segmentKey, segmentActivity);
-
-            const blocks = buildLiveActivityBlocks(segmentActivity, segmentKey, false);
-            await withSlackRetry(
-              () => client.chat.postMessage({
-                channel: channelId,
-                thread_ts: threadTs,
-                blocks,
-                text: 'Activity',
-              }),
-              { onRateLimit: handleRateLimit }
-            );
-            console.log(`[Interleaved] Posted activity segment: ${segmentActivity.length} entries, key: ${segmentKey}`);
-
-            // Clean up lookup map (segment is now persisted)
-            segmentToConversationKey.delete(segmentKey);
-            processingState.currentSegmentKey = null;
-          } catch (error) {
-            console.error('[Interleaved] Error posting activity segment:', error);
-          }
-        }
-
-        // Mark activity as posted
-        processingState.lastPostedActivityIndex = processingState.activityLog.length;
-
-        // Start new segment immediately so View Log works for next activity
-        // Don't wait for response text - activity may accumulate before next response
-        startNewSegment();
-
-        // 3. Post response text for this segment
+        // Post response text
         try {
           const liveConfig = getLiveSessionConfig(channelId, threadTs);
           const strippedResponse = stripMarkdownCodeFence(currentResponse, {
@@ -2596,8 +2509,8 @@ async function handleMessage(params: {
             userId,
             liveConfig.threadCharLimit,
             liveConfig.stripEmptyTag,
-            { threadTs, conversationKey },  // forkInfo for point-in-time forking
-            mappingInfo  // NEW: immediate mapping save
+            mappingInfo  // immediate mapping save
+            // Note: Fork button now on activity message, not response
           );
 
           // Track successfully mapped UUIDs so we don't create placeholders for them
@@ -2613,13 +2526,8 @@ async function handleMessage(params: {
         // 4. Reset currentResponse for next segment (keep fullResponse for total tracking)
         currentResponse = '';
 
-        // 5. Move status message to bottom so it's always below segments
-        // MUST use mutex to prevent race with periodic update timer
-        const mutex = getUpdateMutex(conversationKey);
-        await mutex.runExclusive(async () => {
-          if (isAborted(conversationKey)) return;
-          await moveStatusToBottom();
-        });
+        // Status message stays at TOP - updated in place via chat.update
+        // Response segments appear BELOW because they're posted after status was created
       }
     };
 
@@ -2656,9 +2564,10 @@ async function handleMessage(params: {
 
     // Helper to add tool start to activity log
     const logToolStart = async (toolName: string) => {
-      // Finalize any in-progress generating entry before tool starts
-      // This posts the current segment (activity + text) before the tool
-      await finalizeGeneratingEntry(currentResponse.length);
+      // Finalize generating entry to capture content for View Log,
+      // but skip posting intermediate text (e.g., "I'll do X...")
+      await finalizeGeneratingEntry(currentResponse.length, false, true);  // skipPosting=true
+      currentResponse = '';  // Discard after capturing
 
       const formattedName = formatToolName(toolName);
       const elapsedMs = Date.now() - processingState.startTime;
@@ -2675,9 +2584,10 @@ async function handleMessage(params: {
 
     // Helper to add tool complete to activity log
     const logToolComplete = async () => {
-      // Finalize any in-progress generating entry before tool completes
-      // This handles generating entries created DURING tool execution
-      await finalizeGeneratingEntry(currentResponse.length);
+      // Finalize with skipPosting - text during tool execution is rare
+      // but should be captured for View Log, not posted separately
+      await finalizeGeneratingEntry(currentResponse.length, false, true);  // skipPosting=true
+      currentResponse = '';  // Discard after capturing
 
       const lastToolStart = [...processingState.activityLog].reverse().find(e => e.type === 'tool_start');
       if (lastToolStart) {
@@ -2761,6 +2671,8 @@ async function handleMessage(params: {
                     spinner,
                     rateLimitHits: processingState.rateLimitHits,
                     segmentKey: processingState.currentSegmentKey || undefined,
+                    sessionId: newSessionId || session.sessionId || undefined,
+                    isNewSession: newSessionId !== null && session.sessionId === null,
                   }),
                   text: 'Claude is working...',
                 }),
@@ -2787,6 +2699,9 @@ async function handleMessage(params: {
     };
     scheduleUpdate();
 
+    // Track whether query completed successfully (for isFinalSegment detection)
+    let isQueryComplete = false;
+
     for await (const msg of claudeQuery) {
       // Capture ALL assistant message UUIDs for message mapping (point-in-time forking)
       // IMPORTANT: With extended thinking, SDK emits MULTIPLE assistant messages:
@@ -2807,6 +2722,7 @@ async function handleMessage(params: {
         newSessionId = (msg as any).session_id;
         modelName = (msg as any).model;
         processingState.model = modelName;
+        processingState.sessionId = newSessionId || undefined;  // Track for abort handler
         console.log(`Session initialized: ${newSessionId}, model: ${modelName}`);
 
         // CRITICAL: Save session ID immediately, not at end of try block
@@ -3012,6 +2928,7 @@ async function handleMessage(params: {
       if (msg.type === 'result') {
         const resultMsg = msg as any;
         isActivelyStreaming = false;  // No longer in middle of streaming
+        isQueryComplete = true;  // Query completed successfully - enable Fork button on final segment
 
         // Only use result as fallback if accumulation failed (matches streaming.ts pattern)
         // This preserves intermediate text outputs that were accumulated via +=
@@ -3045,8 +2962,9 @@ async function handleMessage(params: {
 
     // Finalize the final segment (posts remaining activity + currentResponse if any)
     // This handles the case where the query ends with a response (not a tool)
+    // Pass isQueryComplete to enable Fork button on successful completion
     if (generatingChunkCount > 0 || currentResponse.trim()) {
-      await finalizeGeneratingEntry(currentResponse.length);
+      await finalizeGeneratingEntry(currentResponse.length, isQueryComplete);
     }
 
     // Stop the spinner timer now that processing is complete
@@ -3066,54 +2984,26 @@ async function handleMessage(params: {
       ? Number((((processingState.contextWindow * AUTOCOMPACT_THRESHOLD_PERCENT - totalContextTokens) / processingState.contextWindow) * 100).toFixed(1))
       : undefined;
 
+    // Store in processingState for abort handler access
+    processingState.contextPercent = contextPercent;
+    processingState.compactPercent = compactPercent;
+
     // Final elapsed time
     const finalDurationMs = processingState.durationMs ?? (Date.now() - processingState.startTime);
 
     // Update combined message to completion state (only if not aborted)
+    // Activity stays in status message - no separate activity posting
     if (!isAborted(conversationKey)) {
       const mutex = getUpdateMutex(conversationKey);
       await mutex.runExclusive(async () => {
         if (isAborted(conversationKey)) return;
 
-        // Post any trailing activity that wasn't part of a segment (activity after last response)
-        const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
-        if (trailingActivity.length > 0) {
-          try {
-            // Generate segment key for trailing activity
-            if (!processingState.currentSegmentKey) {
-              startNewSegment();
-            }
-            const segmentKey = processingState.currentSegmentKey!;
-
-            // Save segment activity before posting
-            saveSegmentActivityLog(segmentKey, trailingActivity);
-
-            const blocks = buildLiveActivityBlocks(trailingActivity, segmentKey, false);
-            await withSlackRetry(
-              () => client.chat.postMessage({
-                channel: channelId,
-                thread_ts: threadTs,
-                blocks,
-                text: 'Activity',
-              }),
-              { onRateLimit: handleRateLimit }
-            );
-            console.log(`[Interleaved] Posted trailing activity: ${trailingActivity.length} entries, key: ${segmentKey}`);
-
-            // Note: segment stays in segmentToConversationKey until finally block
-            // This allows View Log to detect live vs completed segments
-          } catch (error) {
-            console.error('[Interleaved] Error posting trailing activity:', error);
-          }
-        }
-
-        // Update initial status message to completion state (with Beginning header + activity + Complete + stats)
+        // Update status message to completion state with FULL activity log
         if (statusMsgTs) {
           try {
-            // Build completion blocks: full combined view with Beginning header preserved
-            const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
+            // Build completion blocks with full activity log (not just trailing)
             const completionBlocks = buildCombinedStatusBlocks({
-              activityLog: trailingActivity,
+              activityLog: processingState.activityLog,
               inProgress: false,
               status: 'complete',
               mode: session.mode,
@@ -3128,6 +3018,10 @@ async function handleMessage(params: {
               conversationKey: activityLogKey,
               rateLimitHits: processingState.rateLimitHits,
               segmentKey: processingState.currentSegmentKey || undefined,
+              sessionId: newSessionId || session.sessionId || undefined,
+              isNewSession: newSessionId !== null && session.sessionId === null,
+              isFinalSegment: isQueryComplete,  // Show Fork button on successful completion
+              forkInfo: { threadTs, conversationKey },
             });
 
             await withSlackRetry(() =>
@@ -3348,6 +3242,13 @@ async function handleMessage(params: {
                 conversationKey,
                 errorMessage: error.message,
                 segmentKey: processingState.currentSegmentKey || undefined,
+                sessionId: processingState.sessionId || session.sessionId || undefined,
+                // Error states: show stats if we have them
+                inputTokens: processingState.inputTokens,
+                outputTokens: processingState.outputTokens,
+                contextPercent: processingState.contextPercent,
+                compactPercent: processingState.compactPercent,
+                costUsd: processingState.costUsd,
               }),
               text: `Error: ${error.message}`,
             });
@@ -3580,6 +3481,13 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
               elapsedMs,
               conversationKey,
               segmentKey: active.processingState.currentSegmentKey || undefined,
+              sessionId: active.processingState.sessionId,
+              // Include stats if available (SDK may have reported them before abort)
+              inputTokens: active.processingState.inputTokens,
+              outputTokens: active.processingState.outputTokens,
+              contextPercent: active.processingState.contextPercent,
+              compactPercent: active.processingState.compactPercent,
+              costUsd: active.processingState.costUsd,
             }),
             text: `${active.model || 'Claude'} | ${active.mode} | aborted`,
           });
@@ -4499,121 +4407,6 @@ app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) =>
     });
   } catch (error) {
     console.error('Error updating segment log modal page:', error);
-  }
-});
-
-// Handle "Download .txt" button click - uploads SEGMENT-SPECIFIC activity log as file
-app.action(/^download_segment_log_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^download_segment_log_(.+)$/);
-  const segmentKey = match ? match[1] : '';
-
-  console.log(`[Download] Segment download requested: ${segmentKey}`);
-
-  const bodyWithChannel = body as any;
-  const channelId = bodyWithChannel.channel?.id;
-  const threadTs = bodyWithChannel.message?.thread_ts;
-
-  if (!channelId) {
-    console.error('No channel_id found for segment log download');
-    return;
-  }
-
-  // Get segment-specific activity log
-  let activityLog = getSegmentActivityLog(segmentKey);
-
-  // Fallback to active query if segment not found (in-progress)
-  if (!activityLog) {
-    const conversationKey = segmentToConversationKey.get(segmentKey);
-    if (conversationKey) {
-      const activeQuery = activeQueries.get(conversationKey);
-      if (activeQuery && activeQuery.processingState.currentSegmentKey === segmentKey) {
-        const lastIdx = activeQuery.processingState.lastPostedActivityIndex || 0;
-        activityLog = activeQuery.processingState.activityLog.slice(lastIdx);
-      }
-    }
-  }
-
-  if (!activityLog || activityLog.length === 0) {
-    // Segment not found or empty
-    try {
-      await client.chat.postEphemeral({
-        channel: channelId,
-        user: bodyWithChannel.user?.id || 'unknown',
-        text: ':warning: Activity log is no longer available.\n\nThis can happen if the session was cleared or the bot was restarted.',
-      });
-    } catch (error) {
-      console.error('Error posting segment log unavailable message:', error);
-    }
-    return;
-  }
-
-  // Format as plain text with FULL thinking content
-  const lines: string[] = [];
-  lines.push('='.repeat(60));
-  lines.push(`Activity Log Segment`);
-  lines.push(`Segment Key: ${segmentKey}`);
-  lines.push(`Generated: ${new Date().toISOString()}`);
-  lines.push('='.repeat(60));
-  lines.push('');
-
-  for (const entry of activityLog) {
-    const timestamp = new Date(entry.timestamp).toISOString();
-    const duration = entry.durationMs ? ` (${entry.durationMs}ms)` : '';
-
-    if (entry.type === 'starting') {
-      lines.push(`[${timestamp}] STARTED`);
-    } else if (entry.type === 'thinking') {
-      // Include FULL thinking content in download
-      lines.push(`[${timestamp}] THINKING:`);
-      lines.push('-'.repeat(40));
-      lines.push(entry.thinkingContent || entry.thinkingTruncated || '');
-      lines.push('-'.repeat(40));
-      lines.push('');
-    } else if (entry.type === 'tool_start') {
-      lines.push(`[${timestamp}] TOOL START: ${entry.tool || 'unknown'}`);
-    } else if (entry.type === 'tool_complete') {
-      lines.push(`[${timestamp}] TOOL COMPLETE: ${entry.tool || 'unknown'}${duration}`);
-    } else if (entry.type === 'generating') {
-      const chars = entry.generatingChars ? ` (${entry.generatingChars} chars)` : '';
-      lines.push(`[${timestamp}] RESPONSE${duration}${chars}:`);
-      if (entry.generatingContent) {
-        lines.push('-'.repeat(40));
-        lines.push(entry.generatingContent);
-        lines.push('-'.repeat(40));
-        lines.push('');
-      }
-    } else if (entry.type === 'error') {
-      lines.push(`[${timestamp}] ERROR: ${entry.message || 'unknown'}`);
-    }
-  }
-
-  const content = lines.join('\n');
-  const filename = `activity-log-${segmentKey.replace(/[^a-zA-Z0-9_-]/g, '-')}.txt`;
-
-  // Upload as file snippet (requires files:write scope)
-  try {
-    await client.files.uploadV2({
-      channel_id: channelId,
-      thread_ts: threadTs,
-      content,
-      filename,
-      title: 'Activity Log',
-    });
-  } catch (error) {
-    console.error('Error uploading segment log file:', error);
-    // Post error message
-    try {
-      await client.chat.postEphemeral({
-        channel: channelId,
-        user: bodyWithChannel.user?.id || 'unknown',
-        text: ':warning: Failed to upload activity log. The bot may need `files:write` permission.',
-      });
-    } catch (e) {
-      console.error('Error posting upload error message:', e);
-    }
   }
 });
 
