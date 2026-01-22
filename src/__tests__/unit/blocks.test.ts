@@ -28,6 +28,7 @@ import {
   ActivityEntry,
   ACTIVITY_LOG_MAX_CHARS,
   buildStopWatchingButton,
+  buildWatchingStatusSection,
   buildTopStatusLine,
   buildBottomStatsLine,
 } from '../../blocks.js';
@@ -3383,6 +3384,43 @@ describe('blocks', () => {
       expect(button1.block_id).toBe('terminal_watch_session-aaa');
       expect(button2.block_id).toBe('terminal_watch_session-bbb');
       expect(button1.block_id).not.toBe(button2.block_id);
+    });
+  });
+
+  describe('buildWatchingStatusSection', () => {
+    it('should return actions block with button', () => {
+      const block = buildWatchingStatusSection('session-123', 2);
+
+      expect(block.type).toBe('actions');
+      expect(block.block_id).toBe('terminal_watch_session-123');
+      expect(block.elements).toHaveLength(1);
+    });
+
+    it('should have button with update rate in text', () => {
+      const block = buildWatchingStatusSection('session-456', 5);
+      const button = block.elements![0];
+
+      expect(button.type).toBe('button');
+      expect(button.text.text).toContain('🛑');
+      expect(button.text.text).toContain('Stop Watching');
+      expect(button.text.text).toContain('(5s)');
+      expect(button.text.emoji).toBe(true);
+      expect(button.action_id).toBe('stop_terminal_watch');
+      expect(button.style).toBe('danger');
+    });
+
+    it('should include session ID in button value', () => {
+      const block = buildWatchingStatusSection('my-session', 3);
+      const value = JSON.parse(block.elements![0].value);
+      expect(value.sessionId).toBe('my-session');
+    });
+
+    it('should use dynamic update rate in button text', () => {
+      const block1 = buildWatchingStatusSection('sess', 2);
+      const block2 = buildWatchingStatusSection('sess', 10);
+
+      expect(block1.elements![0].text.text).toContain('(2s)');
+      expect(block2.elements![0].text.text).toContain('(10s)');
     });
   });
 

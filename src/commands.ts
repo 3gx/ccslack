@@ -12,6 +12,7 @@ import {
   buildTerminalCommandBlocks,
   buildModeSelectionBlocks,
   buildContextDisplayBlocks,
+  buildWatchingStatusSection,
 } from './blocks.js';
 
 // Extended thinking token limits
@@ -415,27 +416,8 @@ function handleWatch(session: Session): CommandResult {
       {
         type: "divider",
       },
-      // Watching status and stop button
-      {
-        type: "context",
-        elements: [{
-          type: "mrkdwn",
-          text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
-        }],
-      },
-      {
-        type: "actions",
-        block_id: `terminal_watch_${session.sessionId}`,
-        elements: [{
-          type: "button",
-          text: { type: "plain_text", text: "🛑 Stop Watching", emoji: true },
-          action_id: "stop_terminal_watch",
-          style: "danger",
-          value: JSON.stringify({
-            sessionId: session.sessionId
-          }),
-        }],
-      },
+      // Watching status and stop button (combined on single line)
+      buildWatchingStatusSection(session.sessionId, updateRate),
     ],
   };
 }

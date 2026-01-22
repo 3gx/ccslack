@@ -16,7 +16,7 @@ import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
-import { buildStopWatchingButton } from './blocks.js';
+import { buildWatchingStatusSection } from './blocks.js';
 
 /**
  * State for an active terminal watcher.
@@ -243,14 +243,7 @@ async function pollForChanges(state: WatchState): Promise<void> {
 function buildStatusBlocks(state: WatchState): any[] {
   const updateRateSeconds = state.updateRateMs / 1000;
   return [
-    {
-      type: 'context',
-      elements: [{
-        type: 'mrkdwn',
-        text: `:eye: Watching for terminal activity... Updates every ${updateRateSeconds}s`,
-      }],
-    },
-    buildStopWatchingButton(state.sessionId),
+    buildWatchingStatusSection(state.sessionId, updateRateSeconds),
   ];
 }
 

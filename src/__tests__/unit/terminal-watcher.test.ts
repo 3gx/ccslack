@@ -70,12 +70,12 @@ vi.mock('../../blocks.js', () => ({
     { type: 'section', text: { type: 'mrkdwn', text: ':brain: *Thinking...*' } },
     { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Log' } }] },
   ]),
-  buildStopWatchingButton: vi.fn((sessionId: string) => ({
+  buildWatchingStatusSection: vi.fn((sessionId: string, updateRateSeconds: number) => ({
     type: 'actions',
     block_id: `terminal_watch_${sessionId}`,
     elements: [{
       type: 'button',
-      text: { type: 'plain_text', text: '🛑 Stop Watching', emoji: true },
+      text: { type: 'plain_text', text: `🛑 Stop Watching (${updateRateSeconds}s)`, emoji: true },
       action_id: 'stop_terminal_watch',
       style: 'danger',
       value: JSON.stringify({ sessionId }),
@@ -852,7 +852,7 @@ describe('terminal-watcher', () => {
               elements: expect.arrayContaining([
                 expect.objectContaining({
                   action_id: 'stop_terminal_watch',
-                  text: expect.objectContaining({ text: '🛑 Stop Watching' }),
+                  text: expect.objectContaining({ text: expect.stringContaining('Stop Watching') }),
                 }),
               ]),
             }),
@@ -942,13 +942,13 @@ describe('terminal-watcher', () => {
 
       await vi.advanceTimersByTimeAsync(5000);
 
-      // Should include rate in watching text (may not be the first postMessage call due to activity messages)
+      // Should include rate in button text (may not be the first postMessage call due to activity messages)
       const postCalls = mockClient.chat.postMessage.mock.calls;
       const statusCall = postCalls.find((call: any[]) => {
         const arg = call[0] as any;
         return arg.blocks?.some((block: any) =>
-          block.type === 'context' &&
-          block.elements?.some((el: any) => el.text?.includes('Updates every 5s'))
+          block.type === 'actions' &&
+          block.elements?.some((el: any) => el.text?.text?.includes('(5s)'))
         );
       });
       expect(statusCall).toBeDefined();

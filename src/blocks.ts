@@ -2192,3 +2192,25 @@ export function buildStopWatchingButton(sessionId: string): Block {
     }],
   };
 }
+
+/**
+ * Build a Stop Watching button that includes the update rate in the button text.
+ * Compact single-element display for terminal watch status.
+ *
+ * @param sessionId - The session ID being watched
+ * @param updateRateSeconds - Update rate in seconds (e.g., 2)
+ * @returns Actions block with stop button including rate info
+ */
+export function buildWatchingStatusSection(sessionId: string, updateRateSeconds: number): Block {
+  return {
+    type: 'actions',
+    block_id: `terminal_watch_${sessionId}`,
+    elements: [{
+      type: 'button',
+      text: { type: 'plain_text', text: `🛑 Stop Watching (${updateRateSeconds}s)`, emoji: true },
+      action_id: 'stop_terminal_watch',
+      style: 'danger',
+      value: JSON.stringify({ sessionId }),
+    }],
+  };
+}

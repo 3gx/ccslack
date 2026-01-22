@@ -47,7 +47,7 @@ import {
   buildStatusDisplayBlocks,
   buildSdkQuestionBlocks,
   buildAnsweredBlocks,
-  buildStopWatchingButton,
+  buildWatchingStatusSection,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -1034,14 +1034,7 @@ async function handleFastForwardSync(
           {
             type: 'divider',
           },
-          {
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
-            }],
-          },
-          buildStopWatchingButton(sessionId),
+          buildWatchingStatusSection(sessionId, updateRate),
         ],
       });
       startWatching(channelId, threadTs, effectiveSession as Session, client, watchStatusMsg.ts as string, userId);
@@ -1111,14 +1104,7 @@ async function handleFastForwardSync(
         {
           type: 'divider',
         },
-        {
-          type: 'context',
-          elements: [{
-            type: 'mrkdwn',
-            text: `:eye: Watching for terminal activity... Updates every ${updateRate}s`,
-          }],
-        },
-        buildStopWatchingButton(sessionId),
+        buildWatchingStatusSection(sessionId, updateRate),
       ],
     });
 
