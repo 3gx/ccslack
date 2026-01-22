@@ -790,5 +790,55 @@ describe('streaming', () => {
         })
       );
     });
+
+    it('should extract ts from shares.public for public channels', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { public: { 'C123': [{ ts: 'file-msg-public-ts' }] } },
+        }],
+      });
+
+      const longResponse = 'C'.repeat(200);
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'thread123',
+        'U456',
+        100  // Low limit to trigger truncation
+      );
+
+      // Should extract ts from shares.public
+      expect(result?.ts).toBe('file-msg-public-ts');
+    });
+
+    it('should extract ts from shares.private for private channels', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { private: { 'C123': [{ ts: 'file-msg-private-ts' }] } },
+        }],
+      });
+
+      const longResponse = 'D'.repeat(200);
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'thread123',
+        'U456',
+        100  // Low limit to trigger truncation
+      );
+
+      // Should extract ts from shares.private when shares.public is missing
+      expect(result?.ts).toBe('file-msg-private-ts');
+    });
   });
 });

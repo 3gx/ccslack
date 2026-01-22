@@ -474,7 +474,9 @@ export async function uploadMarkdownAndPngWithResponse(
 
       // Get ts from the file message for mapping
       // files.uploadV2 returns files array with shares info
-      textTs = (fileResult as any)?.files?.[0]?.shares?.public?.[channelId]?.[0]?.ts;
+      // Check both public and private shares (private channels use shares.private)
+      const shares = (fileResult as any)?.files?.[0]?.shares;
+      textTs = shares?.public?.[channelId]?.[0]?.ts ?? shares?.private?.[channelId]?.[0]?.ts;
       if (textTs) {
         postedMessages.push({ ts: textTs });
       }
