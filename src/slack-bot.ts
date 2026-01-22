@@ -1934,7 +1934,12 @@ async function handleMessage(params: {
       if (commandResult.sessionUpdate.pathConfigured) {
         commandResult.sessionUpdate.configuredBy = userId ?? null;
       }
-      await saveSession(channelId, commandResult.sessionUpdate);
+      // Save to correct session based on context (thread vs main channel)
+      if (threadTs) {
+        await saveThreadSession(channelId, threadTs, commandResult.sessionUpdate);
+      } else {
+        await saveSession(channelId, commandResult.sessionUpdate);
+      }
 
       // Live update: If a query is running, update its processingState and SDK settings immediately
       // This allows config commands to take effect without waiting for next query
@@ -2096,8 +2101,12 @@ async function handleMessage(params: {
         text: 'Your selected model is no longer available. Please select a new model.',
       });
 
-      // Clear invalid model from session
-      await saveSession(channelId, { model: undefined });
+      // Clear invalid model from session (thread-aware)
+      if (threadTs) {
+        await saveThreadSession(channelId, threadTs, { model: undefined });
+      } else {
+        await saveSession(channelId, { model: undefined });
+      }
 
       // Remove eyes reaction
       if (originalTs) {
@@ -3661,11 +3670,16 @@ app.action(/^mode_(plan|default|bypassPermissions|acceptEdits)$/, async ({ actio
   console.log(`Mode button clicked: ${mode} for channel: ${channelId}`);
 
   if (channelId) {
-    // Update session with new mode
-    await saveSession(channelId, { mode });
+    // Update session with new mode (thread-aware)
+    const threadTs = bodyWithChannel.message?.thread_ts;
+    if (threadTs) {
+      await saveThreadSession(channelId, threadTs, { mode });
+    } else {
+      await saveSession(channelId, { mode });
+    }
 
     // Live update: If a query is running, update SDK mode immediately
-    const conversationKey = getConversationKey(channelId, bodyWithChannel.message?.thread_ts);
+    const conversationKey = getConversationKey(channelId, threadTs);
     const activeQuery = activeQueries.get(conversationKey);
     if (activeQuery) {
       try {
@@ -3738,8 +3752,13 @@ app.action(/^model_select_(.+)$/, async ({ action, ack, body, client }) => {
   const modelInfo = await getModelInfo(modelId);
   const displayName = modelInfo?.displayName || modelId;
 
-  // Save to session
-  await saveSession(channelId, { model: modelId });
+  // Save to session (thread-aware)
+  const threadTs = bodyWithChannel.message?.thread_ts;
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { model: modelId });
+  } else {
+    await saveSession(channelId, { model: modelId });
+  }
 
   // Update message to confirm
   if (bodyWithChannel.message?.ts) {
@@ -3809,8 +3828,12 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
   const activeQuery = activeQueries.get(conversationKey);
   const planFilePath = activeQuery?.processingState?.planFilePath;
 
-  // Clear session (set sessionId to null) and set bypass mode
-  await saveSession(channelId, { sessionId: null, mode: 'bypassPermissions' });
+  // Clear session (set sessionId to null) and set bypass mode (thread-aware)
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { sessionId: null, mode: 'bypassPermissions' });
+  } else {
+    await saveSession(channelId, { sessionId: null, mode: 'bypassPermissions' });
+  }
 
   const bodyWithChannel = body as any;
   await handleMessage({
@@ -3839,8 +3862,12 @@ app.action(/^plan_accept_edits_(.+)$/, async ({ action, ack, body, client }) => 
 
   await updateApprovalMessage(body, client, '✅ Proceeding with accept-edits mode...');
 
-  // Set acceptEdits mode
-  await saveSession(channelId, { mode: 'acceptEdits' });
+  // Set acceptEdits mode (thread-aware)
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { mode: 'acceptEdits' });
+  } else {
+    await saveSession(channelId, { mode: 'acceptEdits' });
+  }
 
   const bodyWithChannel = body as any;
   await handleMessage({
@@ -3867,8 +3894,12 @@ app.action(/^plan_bypass_(.+)$/, async ({ action, ack, body, client }) => {
 
   await updateApprovalMessage(body, client, '✅ Proceeding with bypass mode...');
 
-  // Set bypassPermissions mode
-  await saveSession(channelId, { mode: 'bypassPermissions' });
+  // Set bypassPermissions mode (thread-aware)
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { mode: 'bypassPermissions' });
+  } else {
+    await saveSession(channelId, { mode: 'bypassPermissions' });
+  }
 
   const bodyWithChannel = body as any;
   await handleMessage({
@@ -3895,8 +3926,12 @@ app.action(/^plan_manual_(.+)$/, async ({ action, ack, body, client }) => {
 
   await updateApprovalMessage(body, client, '✅ Proceeding with manual approval mode...');
 
-  // Set default (ask) mode
-  await saveSession(channelId, { mode: 'default' });
+  // Set default (ask) mode (thread-aware)
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { mode: 'default' });
+  } else {
+    await saveSession(channelId, { mode: 'default' });
+  }
 
   const bodyWithChannel = body as any;
   await handleMessage({

@@ -122,7 +122,7 @@ describe('slack-bot approval handlers', () => {
       expect(handler).toBeDefined();
     });
 
-    // Test option 1: clear context + bypass
+    // Test option 1: clear context + bypass (thread context - uses saveThreadSession)
     it('option 1: should clear session and set bypass mode', async () => {
       const handler = registeredHandlers['action_^plan_clear_bypass_(.+)$'];
       const mockClient = createMockSlackClient();
@@ -140,8 +140,8 @@ describe('slack-bot approval handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
-      // Should clear session (sessionId: null) AND set bypass mode
-      expect(saveSession).toHaveBeenCalledWith('C123', { sessionId: null, mode: 'bypassPermissions' });
+      // Should clear session (sessionId: null) AND set bypass mode - thread context uses saveThreadSession
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', 'thread456', { sessionId: null, mode: 'bypassPermissions' });
       expect(mockClient.chat.update).toHaveBeenCalledWith(
         expect.objectContaining({
           channel: 'C123',
@@ -179,7 +179,7 @@ describe('slack-bot approval handlers', () => {
       );
     });
 
-    // Test option 3: bypass permissions
+    // Test option 3: bypass permissions (thread context - uses saveThreadSession)
     it('option 3: should set bypassPermissions mode', async () => {
       const handler = registeredHandlers['action_^plan_bypass_(.+)$'];
       const mockClient = createMockSlackClient();
@@ -197,7 +197,8 @@ describe('slack-bot approval handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
-      expect(saveSession).toHaveBeenCalledWith('C123', { mode: 'bypassPermissions' });
+      // Thread context uses saveThreadSession
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', 'thread456', { mode: 'bypassPermissions' });
       expect(mockClient.chat.update).toHaveBeenCalledWith(
         expect.objectContaining({
           channel: 'C123',
@@ -262,12 +263,12 @@ describe('slack-bot approval handlers', () => {
       );
     });
 
-    it('should extract channel and thread from conversation key', async () => {
+    it('should extract channel and thread from conversation key and save to thread', async () => {
       const handler = registeredHandlers['action_^plan_bypass_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
-      // With thread
+      // With thread - should save to thread session
       await handler({
         action: { action_id: 'plan_bypass_C123_thread456' },
         ack,
@@ -279,8 +280,8 @@ describe('slack-bot approval handlers', () => {
         client: mockClient,
       });
 
-      // Should save to the channel (extracted from conversation key)
-      expect(saveSession).toHaveBeenCalledWith('C123', { mode: 'bypassPermissions' });
+      // Should save to thread session (extracted from conversation key)
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', 'thread456', { mode: 'bypassPermissions' });
     });
 
     it('option 1: should use fallback userText when no planFilePath', async () => {

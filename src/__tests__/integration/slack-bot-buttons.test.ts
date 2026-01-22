@@ -345,7 +345,7 @@ describe('slack-bot button handlers', () => {
       expect(handler).toBeDefined();
     });
 
-    it('should update session mode on button click', async () => {
+    it('should save to main session when not in thread', async () => {
       const handler = registeredHandlers['action_^mode_(plan|default|bypassPermissions|acceptEdits)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
@@ -362,6 +362,27 @@ describe('slack-bot button handlers', () => {
 
       expect(ack).toHaveBeenCalled();
       expect(saveSession).toHaveBeenCalledWith('C123', { mode: 'bypassPermissions' });
+      expect(saveThreadSession).not.toHaveBeenCalled();
+    });
+
+    it('should save to thread session when in thread context', async () => {
+      const handler = registeredHandlers['action_^mode_(plan|default|bypassPermissions|acceptEdits)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'mode_plan' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123', thread_ts: '1234567890.123456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', '1234567890.123456', { mode: 'plan' });
+      expect(saveSession).not.toHaveBeenCalled();
     });
 
     it('should update message to confirm selection', async () => {
@@ -386,6 +407,234 @@ describe('slack-bot button handlers', () => {
           text: 'Mode set to `plan`',
         })
       );
+    });
+  });
+
+  describe('model button handler', () => {
+    it('should register model button handler', async () => {
+      const handler = registeredHandlers['action_^model_select_(.+)$'];
+      expect(handler).toBeDefined();
+    });
+
+    it('should save to main session when not in thread', async () => {
+      const handler = registeredHandlers['action_^model_select_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'model_select_claude-opus-4-20250514' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveSession).toHaveBeenCalledWith('C123', { model: 'claude-opus-4-20250514' });
+      expect(saveThreadSession).not.toHaveBeenCalled();
+    });
+
+    it('should save to thread session when in thread context', async () => {
+      const handler = registeredHandlers['action_^model_select_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'model_select_claude-opus-4-20250514' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123', thread_ts: '1234567890.123456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', '1234567890.123456', { model: 'claude-opus-4-20250514' });
+      expect(saveSession).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('plan approval button handlers - thread awareness', () => {
+    it('plan_clear_bypass should save to main session when not in thread', async () => {
+      const handler = registeredHandlers['action_^plan_clear_bypass_(.+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock getSession for handleMessage flow
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: null,
+      });
+
+      await handler({
+        action: { action_id: 'plan_clear_bypass_C123' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveSession).toHaveBeenCalledWith('C123', { sessionId: null, mode: 'bypassPermissions' });
+      expect(saveThreadSession).not.toHaveBeenCalled();
+    });
+
+    it('plan_clear_bypass should save to thread session when in thread', async () => {
+      const handler = registeredHandlers['action_^plan_clear_bypass_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: null,
+      });
+
+      await handler({
+        action: { action_id: 'plan_clear_bypass_C123_1234567890.123456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', '1234567890.123456', { sessionId: null, mode: 'bypassPermissions' });
+      expect(saveSession).not.toHaveBeenCalledWith('C123', { sessionId: null, mode: 'bypassPermissions' });
+    });
+
+    it('plan_accept_edits should save to thread session when in thread', async () => {
+      const handler = registeredHandlers['action_^plan_accept_edits_(.+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: null,
+      });
+
+      await handler({
+        action: { action_id: 'plan_accept_edits_C123_1234567890.123456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', '1234567890.123456', { mode: 'acceptEdits' });
+      expect(saveSession).not.toHaveBeenCalledWith('C123', { mode: 'acceptEdits' });
+    });
+
+    it('plan_bypass should save to thread session when in thread', async () => {
+      const handler = registeredHandlers['action_^plan_bypass_(.+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: null,
+      });
+
+      await handler({
+        action: { action_id: 'plan_bypass_C123_1234567890.123456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', '1234567890.123456', { mode: 'bypassPermissions' });
+      expect(saveSession).not.toHaveBeenCalledWith('C123', { mode: 'bypassPermissions' });
+    });
+
+    it('plan_manual should save to thread session when in thread', async () => {
+      const handler = registeredHandlers['action_^plan_manual_(.+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: null,
+      });
+
+      await handler({
+        action: { action_id: 'plan_manual_C123_1234567890.123456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', '1234567890.123456', { mode: 'default' });
+      expect(saveSession).not.toHaveBeenCalledWith('C123', { mode: 'default' });
     });
   });
 });
