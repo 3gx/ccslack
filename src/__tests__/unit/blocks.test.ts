@@ -2986,7 +2986,9 @@ describe('blocks', () => {
       expect(blocks[4].type).toBe('actions');
       expect((blocks[4] as any).elements.length).toBe(2);
       expect((blocks[4] as any).elements[0].text.text).toBe('View Log');
+      expect((blocks[4] as any).elements[0].action_id).toMatch(/^view_segment_log_/);
       expect((blocks[4] as any).elements[1].text.text).toBe('Abort');
+      expect((blocks[4] as any).elements[1].action_id).toMatch(/^abort_query_/);
     });
 
     it('should include abort button during processing', () => {

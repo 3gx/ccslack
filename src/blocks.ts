@@ -1607,7 +1607,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
         {
           type: 'button',
           text: { type: 'plain_text', text: 'View Log' },
-          action_id: `view_activity_log_${conversationKey}`,
+          action_id: `view_segment_log_${conversationKey}`,
           value: conversationKey,
         },
         {

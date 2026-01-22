@@ -339,7 +339,7 @@ describe('slack-bot mention handlers', () => {
       // View Log button first
       expect(blocks[4].elements[0].type).toBe('button');
       expect(blocks[4].elements[0].text.text).toBe('View Log');
-      expect(blocks[4].elements[0].action_id).toMatch(/^view_activity_log_/);
+      expect(blocks[4].elements[0].action_id).toMatch(/^view_segment_log_/);
       // Abort button second
       expect(blocks[4].elements[1].type).toBe('button');
       expect(blocks[4].elements[1].text.text).toBe('Abort');
