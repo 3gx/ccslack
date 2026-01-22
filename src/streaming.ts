@@ -415,7 +415,7 @@ export async function uploadMarkdownAndPngWithResponse(
   threadCharLimit?: number,
   stripEmptyTag?: boolean,
   mappingInfo?: MappingInfo
-): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
+): Promise<{ ts?: string; postedMessages?: { ts: string }[]; uploadSucceeded?: boolean } | null> {
   const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
 
   // Strip markdown code fence wrapper if present (e.g., ```markdown ... ```)
@@ -479,6 +479,12 @@ export async function uploadMarkdownAndPngWithResponse(
       textTs = shares?.public?.[channelId]?.[0]?.ts ?? shares?.private?.[channelId]?.[0]?.ts;
       if (textTs) {
         postedMessages.push({ ts: textTs });
+      } else {
+        // files.uploadV2 succeeded but textTs extraction failed
+        // Log for debugging and mark upload as succeeded to prevent duplicate fallback
+        console.error('[uploadMarkdownAndPng] textTs extraction failed after successful upload');
+        console.error('[uploadMarkdownAndPng] channelId:', channelId);
+        console.error('[uploadMarkdownAndPng] fileResult:', JSON.stringify(fileResult, null, 2));
       }
     } else {
       // Short response - just post text (no files)
@@ -511,6 +517,7 @@ export async function uploadMarkdownAndPngWithResponse(
     return {
       ts: textTs,
       postedMessages,
+      uploadSucceeded: wasTruncated && !textTs,  // True when upload worked but ts extraction failed
     };
   } catch (error) {
     console.error('Failed to upload markdown/png files:', error);

@@ -710,6 +710,7 @@ describe('streaming', () => {
       expect(result).toEqual({
         ts: 'msg456',
         postedMessages: [{ ts: 'msg456' }],
+        uploadSucceeded: false,
       });
     });
   });
@@ -839,6 +840,80 @@ describe('streaming', () => {
 
       // Should extract ts from shares.private when shares.public is missing
       expect(result?.ts).toBe('file-msg-private-ts');
+    });
+
+    it('should return uploadSucceeded=true when upload works but ts extraction fails', async () => {
+      const mockClient = createMockSlackClient();
+      // Simulate successful upload but missing/malformed shares structure
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          // No shares property - ts extraction will fail
+        }],
+      });
+
+      const longResponse = 'E'.repeat(200);
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'thread123',
+        'U456',
+        100  // Low limit to trigger truncation
+      );
+
+      // ts should be undefined (extraction failed)
+      expect(result?.ts).toBeUndefined();
+      // uploadSucceeded should be true (upload worked, extraction failed)
+      expect(result?.uploadSucceeded).toBe(true);
+    });
+
+    it('should return uploadSucceeded=false for short responses (no file upload)', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'msg123' });
+
+      // Short response - no file upload needed
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Short',
+        'Short response',
+        'thread123'
+      );
+
+      // ts should be present (text posted successfully)
+      expect(result?.ts).toBe('msg123');
+      // uploadSucceeded should be false (no truncation occurred)
+      expect(result?.uploadSucceeded).toBe(false);
+    });
+
+    it('should return uploadSucceeded=false when truncated and ts extraction succeeds', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { public: { 'C123': [{ ts: 'file-msg-ts' }] } },
+        }],
+      });
+
+      const longResponse = 'F'.repeat(200);
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'thread123',
+        'U456',
+        100  // Low limit to trigger truncation
+      );
+
+      // ts should be present
+      expect(result?.ts).toBe('file-msg-ts');
+      // uploadSucceeded should be false (ts was successfully extracted)
+      expect(result?.uploadSucceeded).toBe(false);
     });
   });
 });

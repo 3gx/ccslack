@@ -416,6 +416,19 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
         return true;
       }
 
+      // Upload succeeded but ts extraction failed - don't post duplicate fallback
+      // Save mapping with synthetic ts to prevent re-processing on subsequent polls
+      if ((uploaded as any)?.uploadSucceeded) {
+        console.warn('[TerminalWatcher] Upload succeeded but ts unavailable, using synthetic ts for deduplication');
+        const syntheticTs = `uploaded-no-ts-${msg.uuid}`;
+        await saveMessageMapping(state.channelId, syntheticTs, {
+          sdkMessageId: msg.uuid,
+          sessionId: state.sessionId,
+          type: 'assistant',
+        });
+        return true;
+      }
+
       // Fallback if upload fails (returns null)
       let fallbackText = slackText;
       if (fallbackText.length > charLimit) {

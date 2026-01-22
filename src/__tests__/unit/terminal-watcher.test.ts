@@ -107,6 +107,11 @@ describe('terminal-watcher', () => {
     vi.mocked(sessionReader.getFileSize).mockReturnValue(1000);
     vi.mocked(sessionReader.readNewMessages).mockResolvedValue({ messages: [], newOffset: 1000 });
 
+    // Reset session manager mocks that may have custom implementations from previous tests
+    vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(new Set<string>());
+    vi.mocked(sessionManager.saveMessageMapping).mockImplementation(() => {});
+    vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mockResolvedValue({ ts: 'upload-ts' });
+
     mockClient = {
       chat: {
         postMessage: vi.fn().mockResolvedValue({ ts: 'msg-ts' }),
@@ -613,6 +618,166 @@ describe('terminal-watcher', () => {
         longText,
         500  // charLimit from session
       );
+    });
+
+    it('should NOT post fallback when uploadSucceeded is true (prevents duplicate)', async () => {
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-0',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'prompt' },
+      };
+      const mockMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Assistant response' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockUserInput, mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Assistant response');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [], textOutput: mockMessage as any }],
+        trailingActivity: [],
+        allMessageUuids: ['user-0', '123'],
+      }]);
+
+      // Mock upload returning uploadSucceeded=true but ts=undefined
+      // This simulates files.uploadV2 succeeding but ts extraction failing
+      vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mockResolvedValue({
+        ts: undefined,
+        postedMessages: [],
+        uploadSucceeded: true,
+      });
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Should NOT have posted a fallback message via chat.postMessage
+      // Only the status message and user input should be posted
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const fallbackPosts = postCalls.filter(
+        (call: any[]) => (call[0] as any).text?.includes('Terminal Output')
+      );
+      expect(fallbackPosts.length).toBe(0);
+
+      // CRITICAL: Should save mapping with synthetic ts for deduplication
+      expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
+        'channel-1',
+        'uploaded-no-ts-123',  // Synthetic ts based on message UUID
+        expect.objectContaining({
+          sdkMessageId: '123',
+          sessionId: 'test-session-123',
+          type: 'assistant',
+        })
+      );
+    });
+
+    it('should NOT re-post message on subsequent polls when uploadSucceeded with synthetic ts', async () => {
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-0',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'prompt' },
+      };
+      const mockMessage = {
+        type: 'assistant',
+        uuid: 'dedup-test-123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Assistant response' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockUserInput, mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Assistant response');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [], textOutput: mockMessage as any }],
+        trailingActivity: [],
+        allMessageUuids: ['user-0', 'dedup-test-123'],
+      }]);
+
+      // Track messageMap state to simulate real deduplication
+      let messageMapUuids = new Set<string>();
+      vi.mocked(sessionManager.getMessageMapUuids).mockImplementation(() => messageMapUuids);
+      vi.mocked(sessionManager.saveMessageMapping).mockImplementation((channelId, ts, mapping) => {
+        messageMapUuids.add(mapping.sdkMessageId);
+      });
+
+      // Mock upload returning uploadSucceeded=true but ts=undefined
+      vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mockResolvedValue({
+        ts: undefined,
+        postedMessages: [],
+        uploadSucceeded: true,
+      });
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // First poll - should upload and save synthetic mapping
+      await vi.advanceTimersByTimeAsync(2000);
+
+      const uploadCallsAfterFirstPoll = vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mock.calls.length;
+
+      // Second poll - should skip because UUID is now in messageMap
+      await vi.advanceTimersByTimeAsync(2000);
+
+      const uploadCallsAfterSecondPoll = vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mock.calls.length;
+
+      // Upload should NOT have been called again on second poll
+      expect(uploadCallsAfterSecondPoll).toBe(uploadCallsAfterFirstPoll);
+    });
+
+    it('should post fallback when upload returns null (actual failure)', async () => {
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-0',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'prompt' },
+      };
+      const mockMessage = {
+        type: 'assistant',
+        uuid: '123',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Assistant response' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockUserInput, mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Assistant response');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [], textOutput: mockMessage as any }],
+        trailingActivity: [],
+        allMessageUuids: ['user-0', '123'],
+      }]);
+
+      // Mock upload returning null (actual failure)
+      vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mockResolvedValue(null);
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // SHOULD have posted a fallback message via chat.postMessage
+      // May be posted multiple times due to immediate + timer polls (messageMap not fully mocked)
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const fallbackPosts = postCalls.filter(
+        (call: any[]) => (call[0] as any).text?.includes('Terminal Output')
+      );
+      expect(fallbackPosts.length).toBeGreaterThanOrEqual(1);
     });
 
   });
