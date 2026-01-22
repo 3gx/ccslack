@@ -7,6 +7,49 @@ import { saveMessageMapping } from './session-manager.js';
 // Throttle interval for fallback mode (2 seconds = 30 updates/min, well under 50/min limit)
 const UPDATE_INTERVAL_MS = 2000;
 
+// Polling config for files.uploadV2 shares (async file sharing)
+const FILE_SHARES_POLL_INTERVAL_MS = 200;  // Poll every 200ms
+const FILE_SHARES_POLL_MAX_ATTEMPTS = 25;  // Max 5 seconds (25 * 200ms)
+
+/**
+ * Poll for file shares to be populated after files.uploadV2.
+ * Slack's files.uploadV2 is async - it returns before the file is shared to the channel.
+ * We need to poll files.info until shares[channelId] has a ts.
+ *
+ * @param client - Slack WebClient
+ * @param fileId - ID of the uploaded file
+ * @param channelId - Channel the file was shared to
+ * @returns The message ts where the file was shared, or null if polling times out
+ */
+async function pollForFileShares(
+  client: WebClient,
+  fileId: string,
+  channelId: string
+): Promise<string | null> {
+  for (let attempt = 0; attempt < FILE_SHARES_POLL_MAX_ATTEMPTS; attempt++) {
+    try {
+      const fileInfo = await client.files.info({ file: fileId });
+      const shares = (fileInfo as any)?.file?.shares;
+
+      // Check both public and private shares
+      const ts = shares?.public?.[channelId]?.[0]?.ts ?? shares?.private?.[channelId]?.[0]?.ts;
+      if (ts) {
+        console.log(`[pollForFileShares] Got ts after ${attempt + 1} attempts: ${ts}`);
+        return ts;
+      }
+    } catch (error) {
+      console.error(`[pollForFileShares] files.info error on attempt ${attempt + 1}:`, error);
+      // Continue polling despite errors
+    }
+
+    // Wait before next poll
+    await new Promise(resolve => setTimeout(resolve, FILE_SHARES_POLL_INTERVAL_MS));
+  }
+
+  console.error(`[pollForFileShares] Timed out after ${FILE_SHARES_POLL_MAX_ATTEMPTS} attempts for file ${fileId}`);
+  return null;
+}
+
 // Default char limit for truncation (when to truncate long responses)
 const THREAD_CHAR_DEFAULT = 500;
 
@@ -477,12 +520,23 @@ export async function uploadMarkdownAndPngWithResponse(
       // Check both public and private shares (private channels use shares.private)
       const shares = (fileResult as any)?.files?.[0]?.shares;
       textTs = shares?.public?.[channelId]?.[0]?.ts ?? shares?.private?.[channelId]?.[0]?.ts;
+
+      // files.uploadV2 is async - shares may be empty initially
+      // Poll files.info until shares is populated to ensure message is visible
+      if (!textTs) {
+        // Get the first file ID to poll for shares
+        const fileId = (fileResult as any)?.files?.[0]?.files?.[0]?.id;
+        if (fileId) {
+          console.log(`[uploadMarkdownAndPng] shares empty, polling for file ${fileId}`);
+          textTs = (await pollForFileShares(client, fileId, channelId)) ?? undefined;
+        }
+      }
+
       if (textTs) {
         postedMessages.push({ ts: textTs });
       } else {
-        // files.uploadV2 succeeded but textTs extraction failed
-        // Log for debugging and mark upload as succeeded to prevent duplicate fallback
-        console.error('[uploadMarkdownAndPng] textTs extraction failed after successful upload');
+        // Polling timed out - log for debugging
+        console.error('[uploadMarkdownAndPng] textTs extraction failed after polling');
         console.error('[uploadMarkdownAndPng] channelId:', channelId);
         console.error('[uploadMarkdownAndPng] fileResult:', JSON.stringify(fileResult, null, 2));
       }

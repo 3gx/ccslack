@@ -916,6 +916,59 @@ describe('terminal-watcher', () => {
       // Only the initial postMessage from startWatching should have happened (none in this case)
     });
 
+    it('should move status message when turns attempted even if syncedCount is 0', async () => {
+      // This tests the fix for "stuck button" issue where messages are posted
+      // but ts extraction fails, causing syncedCount=0 even though messages appeared
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-stuck-btn',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'prompt' },
+      };
+      const mockMessage = {
+        type: 'assistant',
+        uuid: 'assistant-stuck-btn',
+        timestamp: '2024-01-01T00:00:01Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Response' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockUserInput, mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Response');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [], textOutput: mockMessage as any }],
+        trailingActivity: [],
+        allMessageUuids: ['user-stuck-btn', 'assistant-stuck-btn'],
+      }]);
+
+      // Simulate ts extraction failure - messages posted but ts undefined
+      // User input: postMessage returns no ts
+      // Assistant: upload returns uploadSucceeded but no ts
+      mockClient.chat.postMessage.mockResolvedValue({ ok: true }); // No ts!
+      vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mockResolvedValue({
+        ts: undefined,
+        postedMessages: [],
+        uploadSucceeded: true,  // Upload worked but ts extraction failed
+      });
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // Advance timer to trigger poll
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Even though syncedCount may be 0 (ts extraction failed),
+      // button should STILL move because we attempted to process turns (totalToSync > 0)
+      expect(mockClient.chat.delete).toHaveBeenCalledWith({
+        channel: 'channel-1',
+        ts: 'status-ts',
+      });
+    });
+
     it('should include watching text with update rate in status message', async () => {
       const mockMessage = {
         type: 'user',

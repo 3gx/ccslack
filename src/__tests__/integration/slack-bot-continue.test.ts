@@ -196,10 +196,14 @@ describe('slack-bot /watch command', () => {
         type: 'header',
         text: expect.objectContaining({ text: 'Continue in Terminal' }),
       }));
+      // Check for stop watching button with rate info
       expect(blocks).toContainEqual(expect.objectContaining({
-        type: 'context',
+        type: 'actions',
         elements: expect.arrayContaining([
-          expect.objectContaining({ text: expect.stringContaining('Watching for terminal activity') }),
+          expect.objectContaining({
+            action_id: 'stop_terminal_watch',
+            text: expect.objectContaining({ text: expect.stringContaining('Stop Watching') }),
+          }),
         ]),
       }));
     });

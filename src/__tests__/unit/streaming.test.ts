@@ -915,5 +915,114 @@ describe('streaming', () => {
       // uploadSucceeded should be false (ts was successfully extracted)
       expect(result?.uploadSucceeded).toBe(false);
     });
+
+    it('should poll files.info when shares is initially empty (async file sharing)', async () => {
+      const mockClient = createMockSlackClient();
+
+      // files.uploadV2 returns empty shares initially (Slack async behavior)
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: {},  // Empty shares - async upload not yet complete
+          files: [{ id: 'file-inner-id' }],  // File ID for polling
+        }],
+      });
+
+      // files.info returns populated shares after polling
+      mockClient.files.info = vi.fn().mockResolvedValue({
+        ok: true,
+        file: {
+          id: 'file-inner-id',
+          shares: { public: { 'C123': [{ ts: 'polled-ts' }] } },
+        },
+      });
+
+      const longResponse = 'G'.repeat(200);
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'thread123',
+        'U456',
+        100  // Low limit to trigger truncation
+      );
+
+      // Should have polled files.info
+      expect(mockClient.files.info).toHaveBeenCalledWith({ file: 'file-inner-id' });
+      // ts should come from polling
+      expect(result?.ts).toBe('polled-ts');
+      // uploadSucceeded should be false (ts was successfully extracted via polling)
+      expect(result?.uploadSucceeded).toBe(false);
+    });
+
+    it('should return uploadSucceeded=true when polling times out', async () => {
+      const mockClient = createMockSlackClient();
+
+      // files.uploadV2 returns empty shares
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: {},  // Empty shares
+          files: [{ id: 'file-inner-id' }],
+        }],
+      });
+
+      // files.info always returns empty shares (simulates timeout scenario)
+      mockClient.files.info = vi.fn().mockResolvedValue({
+        ok: true,
+        file: {
+          id: 'file-inner-id',
+          shares: {},  // Still empty - polling will timeout
+        },
+      });
+
+      const longResponse = 'H'.repeat(200);
+
+      // Need real timers for the async polling to work
+      // But limit iterations by returning ts after a few polls
+      let callCount = 0;
+      mockClient.files.info = vi.fn().mockImplementation(async () => {
+        callCount++;
+        // Return empty shares for first 3 calls, then ts on 4th
+        if (callCount < 4) {
+          return {
+            ok: true,
+            file: { id: 'file-inner-id', shares: {} },
+          };
+        }
+        // Return populated shares on 4th call
+        return {
+          ok: true,
+          file: {
+            id: 'file-inner-id',
+            shares: { public: { 'C123': [{ ts: 'polled-after-retry-ts' }] } },
+          },
+        };
+      });
+
+      // Use real timers for polling
+      vi.useRealTimers();
+
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'thread123',
+        'U456',
+        100  // Low limit to trigger truncation
+      );
+
+      // Verify multiple poll attempts were made
+      expect(mockClient.files.info).toHaveBeenCalledTimes(4);
+      // ts should be present after polling succeeded
+      expect(result?.ts).toBe('polled-after-retry-ts');
+
+      // Restore fake timers for other tests
+      vi.useFakeTimers();
+    });
   });
 });

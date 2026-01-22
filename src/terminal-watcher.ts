@@ -225,8 +225,10 @@ async function pollForChanges(state: WatchState): Promise<void> {
     // Note: We don't update fileOffset - messageMap handles deduplication
     // This simplifies logic and avoids offset advancement bugs
 
-    // Move status message to bottom after posting new messages
-    if (syncResult.syncedCount > 0) {
+    // Move status message to bottom after attempting to post messages
+    // Use totalToSync (not syncedCount) to handle edge cases where messages
+    // are posted but ts extraction fails - button should still move
+    if (syncResult.totalToSync > 0) {
       await moveStatusMessageToBottom(state);
     }
   } catch (error) {
