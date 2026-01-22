@@ -494,8 +494,10 @@ export function findForkPointMessageId(
 
   // Parent is user message (or not found) - find last assistant message BEFORE this timestamp
   // Sort all timestamps and find the most recent assistant message before parentSlackTs
+  // IMPORTANT: Filter out placeholder ts values (like "_slack_uuid123") - they don't have real Slack ts
+  // and would cause parseFloat to return NaN breaking the sort
   const sortedTimestamps = Object.keys(channelSession.messageMap)
-    .filter(ts => ts < parentSlackTs)  // Only messages BEFORE the parent
+    .filter(ts => ts < parentSlackTs && !ts.startsWith('_slack_'))  // Only real ts BEFORE the parent
     .sort((a, b) => parseFloat(b) - parseFloat(a));  // Sort descending (most recent first)
 
   for (const ts of sortedTimestamps) {

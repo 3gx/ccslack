@@ -507,4 +507,253 @@ describe('slack-bot fork handlers', () => {
       );
     });
   });
+
+  describe('Fork here button handler', () => {
+    it('should handle fork from thread (post notification to source thread)', async () => {
+      const handler = registeredHandlers['action_^fork_here_(.+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const threadTs = '1000000000.000000';
+      const messageTs = '1000000100.000000';
+
+      // Mock message mapping found
+      vi.mocked(findForkPointMessageId).mockReturnValue({
+        messageId: 'msg_abc123',
+        sessionId: 'parent-session',
+      });
+
+      // Mock session
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        action: {
+          action_id: `fork_here_C123_${threadTs}`,
+          value: JSON.stringify({ threadTs }),
+        },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: messageTs },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+
+      // Should create fork anchor in main channel
+      const anchorCall = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].text?.includes('Point-in-time fork')
+      );
+      expect(anchorCall).toBeDefined();
+      expect(anchorCall[0].channel).toBe('C123');
+      expect(anchorCall[0].thread_ts).toBeUndefined(); // Main channel, no thread_ts
+
+      // Should post notification in source thread
+      const notificationCall = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].thread_ts === threadTs
+      );
+      expect(notificationCall).toBeDefined();
+      expect(notificationCall[0].text).toContain('Point-in-time fork created');
+    });
+
+    it('should handle fork from main channel (no notification in source thread)', async () => {
+      const handler = registeredHandlers['action_^fork_here_(.+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const messageTs = '1000000100.000000';
+
+      // Mock message mapping found
+      vi.mocked(findForkPointMessageId).mockReturnValue({
+        messageId: 'msg_xyz789',
+        sessionId: 'parent-session',
+      });
+
+      // Mock session
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        action: {
+          action_id: 'fork_here_C123',  // Main channel - no threadTs in conversationKey
+          value: JSON.stringify({}),  // No threadTs for main channel
+        },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: messageTs },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+
+      // Should create fork anchor in main channel
+      const anchorCall = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].text?.includes('Point-in-time fork')
+      );
+      expect(anchorCall).toBeDefined();
+
+      // Should NOT post notification to source thread (since we're forking from main channel)
+      const notificationWithThreadTs = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any) => call[0].thread_ts !== undefined && call[0].text?.includes('fork created')
+      );
+      // Only notification should be in the NEW fork thread, not the source
+      expect(notificationWithThreadTs.length).toBeLessThanOrEqual(1);
+    });
+
+    it('should show error when message not found in messageMap', async () => {
+      const handler = registeredHandlers['action_^fork_here_(.+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const threadTs = '1000000000.000000';
+
+      // Mock NO message mapping found
+      vi.mocked(findForkPointMessageId).mockReturnValue(null);
+
+      await handler({
+        action: {
+          action_id: `fork_here_C123_${threadTs}`,
+          value: JSON.stringify({ threadTs }),
+        },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: '1000000100.000000' },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+
+      // Should post error message
+      const errorCall = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].text?.includes('Message not found')
+      );
+      expect(errorCall).toBeDefined();
+    });
+
+    it('should build correct forkPointLink for thread context', async () => {
+      const handler = registeredHandlers['action_^fork_here_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const threadTs = '1000000000.000000';
+      const messageTs = '1000000100.000000';
+
+      vi.mocked(findForkPointMessageId).mockReturnValue({
+        messageId: 'msg_abc123',
+        sessionId: 'parent-session',
+      });
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        action: {
+          action_id: `fork_here_C123_${threadTs}`,
+          value: JSON.stringify({ threadTs }),
+        },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: messageTs },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      // Should include thread_ts in forkPointLink - check the message posted to the new fork thread
+      // (this is the first message IN the new thread, which contains the forkPointLink)
+      const forkThreadMessage = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].thread_ts !== undefined && call[0].text?.includes('Point-in-time fork from')
+      );
+      expect(forkThreadMessage).toBeDefined();
+      // Thread URL format includes thread_ts
+      const expectedUrlPart = `thread_ts=${threadTs}`;
+      expect(forkThreadMessage[0].text).toContain(expectedUrlPart);
+    });
+
+    it('should build correct forkPointLink for main channel context', async () => {
+      const handler = registeredHandlers['action_^fork_here_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const messageTs = '1000000100.000000';
+
+      vi.mocked(findForkPointMessageId).mockReturnValue({
+        messageId: 'msg_xyz789',
+        sessionId: 'parent-session',
+      });
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        action: {
+          action_id: 'fork_here_C123',
+          value: JSON.stringify({}),  // No threadTs
+        },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: messageTs },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      // Should NOT include thread_ts in forkPointLink (main channel URL)
+      // Check the message posted to the new fork thread
+      const forkThreadMessage = mockClient.chat.postMessage.mock.calls.find(
+        (call: any) => call[0].thread_ts !== undefined && call[0].text?.includes('Point-in-time fork from')
+      );
+      expect(forkThreadMessage).toBeDefined();
+      // Main channel URL should NOT have thread_ts (no ?thread_ts= in URL)
+      expect(forkThreadMessage[0].text).not.toContain('thread_ts=');
+    });
+  });
 });

@@ -431,7 +431,7 @@ describe('terminal-watcher', () => {
         undefined,  // userId
         500,  // charLimit from session
         false,  // stripEmptyTag
-        undefined  // forkInfo (undefined for main channel, only set for threads)
+        { threadTs: undefined, conversationKey: 'channel-1' }  // forkInfo for point-in-time forking
       );
     });
 

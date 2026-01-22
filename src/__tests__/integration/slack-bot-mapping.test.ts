@@ -85,15 +85,17 @@ describe('slack-bot message mapping', () => {
   });
 
   describe('assistant UUID tracking for /ff filtering', () => {
-    it('should save placeholder mapping for assistant UUID (interleaved posting)', async () => {
-      // Setup: Claude returns assistant message with UUID and text content
-      // With interleaved posting, responses are posted per-segment during finalizeGeneratingEntry
-      // without tracking ts, so we use placeholder mappings for /ff filtering
+    it('should save immediate mapping for assistant UUID when text is streamed', async () => {
+      // Setup: Claude returns assistant message with UUID and streams text via stream_event
+      // With immediate mapping, the UUID is linked to the real Slack ts when the response is posted
       vi.mocked(startClaudeQuery).mockReturnValue({
         [Symbol.asyncIterator]: async function* () {
           yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
           yield { type: 'assistant', uuid: 'assistant-uuid-123' };
-          yield { type: 'result', result: 'Test response with content' };
+          // Stream text via stream_event (this is how text is accumulated in interleaved posting)
+          yield { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello ' } } };
+          yield { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'world!' } } };
+          yield { type: 'result', result: 'Hello world!' };
         },
         interrupt: vi.fn(),
       } as any);
@@ -102,6 +104,8 @@ describe('slack-bot message mapping', () => {
 
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
+      // Ensure postMessage returns a real ts for immediate mapping
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'response-msg-ts' });
 
       vi.mocked(getSession).mockReturnValue({
         sessionId: 'existing-session',
@@ -125,11 +129,11 @@ describe('slack-bot message mapping', () => {
         client: mockClient,
       });
 
-      // With interleaved posting, assistant UUIDs get placeholder mappings
-      // since responses are posted per-segment without ts tracking
+      // With immediate mapping, assistant UUID is linked to real Slack ts when posted
+      // The mapping is saved inside uploadMarkdownAndPngWithResponse
       expect(saveMessageMapping).toHaveBeenCalledWith(
         'C123',
-        '_slack_assistant-uuid-123',  // Placeholder key
+        'response-msg-ts',  // Real Slack ts from postMessage
         expect.objectContaining({
           sdkMessageId: 'assistant-uuid-123',
           sessionId: 'session-123',

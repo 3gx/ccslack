@@ -412,8 +412,8 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
         state.userId,  // For ephemeral error notifications (may be undefined)
         charLimit,
         session?.stripEmptyTag,
-        // Add "Fork here" button for thread messages (creates independent fork, safe during watch)
-        state.threadTs ? { threadTs: state.threadTs, conversationKey: state.conversationKey } : undefined
+        // Add "Fork here" button for point-in-time forking (creates independent fork, safe during watch)
+        { threadTs: state.threadTs, conversationKey: state.conversationKey }
       );
 
       // Save mapping for thread forking

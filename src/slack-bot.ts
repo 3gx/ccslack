@@ -1161,7 +1161,7 @@ async function handleFastForwardSync(
 // Used by "Fork here" button
 async function createForkFromMessage(params: {
   channelId: string;
-  sourceThreadTs: string;   // Source thread where fork was triggered
+  sourceThreadTs?: string;   // Source thread (undefined for main channel fork)
   forkPointMessageTs: string;  // Message to fork from (via messageMap lookup)
   client: any;
   userId: string;
@@ -1191,7 +1191,9 @@ async function createForkFromMessage(params: {
   const mainSession = getSession(channelId);
 
   // 4. Build fork point link (used in anchor and thread messages)
-  const forkPointLink = `https://slack.com/archives/${channelId}/p${forkPointMessageTs.replace('.', '')}?thread_ts=${sourceThreadTs}&cid=${channelId}`;
+  const forkPointLink = sourceThreadTs
+    ? `https://slack.com/archives/${channelId}/p${forkPointMessageTs.replace('.', '')}?thread_ts=${sourceThreadTs}&cid=${channelId}`
+    : `https://slack.com/archives/${channelId}/p${forkPointMessageTs.replace('.', '')}`;
 
   // 5. Create fork anchor in main channel
   const anchorMessage = await withSlackRetry(() =>
@@ -1237,15 +1239,17 @@ async function createForkFromMessage(params: {
     })
   );
 
-  // 8. Notify in source thread
-  const newThreadLink = `https://slack.com/archives/${channelId}/p${newThreadTs.replace('.', '')}`;
-  await withSlackRetry(() =>
-    client.chat.postMessage({
-      channel: channelId,
-      thread_ts: sourceThreadTs,
-      text: `_Point-in-time fork created: <${newThreadLink}|view thread>_`,
-    })
-  );
+  // 8. Notify in source thread (skip for main channel forks)
+  if (sourceThreadTs) {
+    const newThreadLink = `https://slack.com/archives/${channelId}/p${newThreadTs.replace('.', '')}`;
+    await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: sourceThreadTs,
+        text: `_Point-in-time fork created: <${newThreadLink}|view thread>_`,
+      })
+    );
+  }
 
   return {
     success: true,
@@ -1377,7 +1381,8 @@ async function handleAskUserQuestion(
   client: any,
   getAccumulatedResponse: () => string,
   clearAccumulatedResponse: () => void,
-  isStillStreaming: () => boolean
+  isStillStreaming: () => boolean,
+  conversationKey: string
 ): Promise<PermissionResult> {
   const input = toolInput as unknown as AskUserQuestionInput;
   const answers: Record<string, string> = {};
@@ -1401,7 +1406,8 @@ async function handleAskUserQuestion(
       threadTs,
       undefined,  // userId
       500,        // threadCharLimit
-      false       // stripEmptyTag
+      false,      // stripEmptyTag
+      { threadTs, conversationKey }  // forkInfo for point-in-time forking
     );
 
     // Clear accumulated response so it's not posted again at the end
@@ -1662,7 +1668,8 @@ async function showPlanApprovalUI(params: {
         threadTs,
         userId,
         liveConfig.threadCharLimit,
-        liveConfig.stripEmptyTag
+        liveConfig.stripEmptyTag,
+        { threadTs, conversationKey }  // forkInfo for point-in-time forking
       );
     } catch (e) {
       console.error('[PlanApproval] Failed to read/display plan file:', e);
@@ -2263,7 +2270,8 @@ async function handleMessage(params: {
           client,
           () => currentResponse,           // Getter for current segment response
           () => { currentResponse = ''; },  // Clear current segment after posting
-          () => isActivelyStreaming         // Check if still in middle of streaming
+          () => isActivelyStreaming,        // Check if still in middle of streaming
+          conversationKey
         );
       }
 
@@ -2299,7 +2307,8 @@ async function handleMessage(params: {
           threadTs,
           undefined,  // userId
           liveConfig.threadCharLimit,
-          liveConfig.stripEmptyTag
+          liveConfig.stripEmptyTag,
+          { threadTs, conversationKey }  // forkInfo for point-in-time forking
         );
 
         // Clear current segment so it's not posted again (fullResponse keeps total)
@@ -2380,6 +2389,8 @@ async function handleMessage(params: {
     let newSessionId: string | null = null;
     let modelName: string | undefined;
     const assistantMessageUuids: Set<string> = new Set();  // Track ALL assistant UUIDs for message mapping
+    let currentAssistantUuid: string | null = null;  // Current assistant UUID for immediate mapping (point-in-time forking)
+    const mappedAssistantUuids: Set<string> = new Set();  // Track UUIDs that got immediate mapped (to skip placeholder)
     let costUsd: number | undefined;
     // Note: lastPostedActivityIndex is now in processingState for segment isolation
 
@@ -2515,7 +2526,14 @@ async function handleMessage(params: {
           // Add prefix for bot response
           const prefixedResponse = ':speech_balloon: *Response*\n' + slackResponse;
 
-          await uploadMarkdownAndPngWithResponse(
+          // Pass mapping info for immediate save (point-in-time forking)
+          // currentAssistantUuid is set when assistant message arrives
+          // newSessionId is set when init message arrives
+          const mappingInfo = (currentAssistantUuid && newSessionId)
+            ? { sdkMessageId: currentAssistantUuid, sessionId: newSessionId }
+            : undefined;
+
+          const uploadResult = await uploadMarkdownAndPngWithResponse(
             client,
             channelId,
             strippedResponse,
@@ -2523,9 +2541,17 @@ async function handleMessage(params: {
             threadTs,
             userId,
             liveConfig.threadCharLimit,
-            liveConfig.stripEmptyTag
+            liveConfig.stripEmptyTag,
+            { threadTs, conversationKey },  // forkInfo for point-in-time forking
+            mappingInfo  // NEW: immediate mapping save
           );
-          console.log(`[Interleaved] Posted response segment: ${currentResponse.length} chars`);
+
+          // Track successfully mapped UUIDs so we don't create placeholders for them
+          if (uploadResult?.ts && mappingInfo) {
+            mappedAssistantUuids.add(mappingInfo.sdkMessageId);
+          }
+
+          console.log(`[Interleaved] Posted response segment: ${currentResponse.length} chars${mappingInfo ? ` (mapped: ${mappingInfo.sdkMessageId})` : ''}`);
         } catch (error) {
           console.error('[Interleaved] Error posting response segment:', error);
         }
@@ -2700,6 +2726,7 @@ async function handleMessage(params: {
       if (msg.type === 'assistant' && (msg as any).uuid) {
         const uuid = (msg as any).uuid;
         assistantMessageUuids.add(uuid);
+        currentAssistantUuid = uuid;  // Track current UUID for immediate mapping
         console.log(`[Mapping] Captured assistant message UUID: ${uuid} (total: ${assistantMessageUuids.size})`);
         // Track generating activity for user visibility (shows text is being streamed)
         updateGeneratingEntry(currentResponse.length);
@@ -3067,23 +3094,17 @@ async function handleMessage(params: {
       }
     }
 
-    // Response segments are already posted by finalizeGeneratingEntry() during streaming
-    // We no longer post fullResponse at the end to avoid double-posting
-    // postedMessages is empty since segments don't track their ts values
-    // Message mapping will use placeholder mappings for all assistant UUIDs
-    const postedMessages: { ts: string }[] = [];
-
     // CRITICAL: Save message mappings for /ff filtering AFTER query completes
     // At this point, SDK has written all messages to the session file
     //
     // We track BOTH user and assistant UUIDs to prevent /ff from re-importing:
     // 1. User message - read UUID from session file (not available at init time)
-    // 2. Assistant messages - captured from stream events (may be multiple with extended thinking)
+    // 2. Assistant messages - ALREADY saved via immediate mapping in uploadMarkdownAndPngWithResponse
+    //    Only need placeholders for UUIDs that weren't immediately mapped (e.g., thinking UUIDs)
     //
     // Edge cases:
     // - newSessionId null: SDK crashed before init - skip (nothing to track)
     // - assistantMessageUuids empty: No assistant response - skip (nothing to track)
-    // - postedMessages empty: Content posted earlier (intermediate) or nothing to post - use placeholder
     if (newSessionId) {
       // 1. Capture user message UUID from session file (NOW it's written)
       if (originalTs) {
@@ -3109,50 +3130,29 @@ async function handleMessage(params: {
         }
       }
 
-      // 2. Save ALL assistant message UUIDs (thinking + text with extended thinking)
+      // 2. Save placeholder mappings ONLY for UUIDs that weren't immediately mapped
+      // With the new immediate mapping, most text UUIDs are mapped to real Slack ts
+      // We still need placeholders for:
+      // - Thinking UUIDs (extended thinking): SDK emits separate UUID for thinking content
+      // - Failed posts: if uploadMarkdownAndPngWithResponse returns null
       if (assistantMessageUuids.size > 0) {
-        if (postedMessages.length > 0 && originalTs) {
-          // Normal case: map first posted message to first assistant UUID
-          // Additional UUIDs get placeholder mappings
-          const uuidArray = Array.from(assistantMessageUuids);
-          const userMessageTs = originalTs;
+        const unmappedUuids = Array.from(assistantMessageUuids).filter(
+          uuid => !mappedAssistantUuids.has(uuid)
+        );
 
-          // Map first posted message to first UUID (for point-in-time forking)
-          postedMessages.forEach((slackMsg, index) => {
-            const isFirst = index === 0;
-            // Use first UUID for all posted messages (they're all from the same response)
-            saveMessageMapping(channelId, slackMsg.ts, {
-              sdkMessageId: uuidArray[0],
-              sessionId: newSessionId!,
-              type: 'assistant',
-              parentSlackTs: isFirst ? userMessageTs : undefined,
-              isContinuation: !isFirst,
-            });
-            console.log(`[Mapping] Linked Slack ts ${slackMsg.ts} → SDK UUID ${uuidArray[0]}${!isFirst ? ' (continuation)' : ''}`);
-          });
-
-          // Save placeholder mappings for additional UUIDs (e.g., thinking block UUID)
-          // This ensures /ff won't re-import them
-          for (let i = 1; i < uuidArray.length; i++) {
-            const placeholderTs = `_slack_${uuidArray[i]}`;
-            saveMessageMapping(channelId, placeholderTs, {
-              sdkMessageId: uuidArray[i],
-              sessionId: newSessionId!,
-              type: 'assistant',
-            });
-            console.log(`[Mapping] Saved placeholder for additional assistant UUID: ${uuidArray[i]}`);
-          }
-        } else {
-          // No final post OR posting failed: save placeholders for ALL UUIDs
-          for (const uuid of assistantMessageUuids) {
+        if (unmappedUuids.length > 0) {
+          console.log(`[Mapping] Saving placeholders for ${unmappedUuids.length} unmapped UUIDs (${mappedAssistantUuids.size} already mapped)`);
+          for (const uuid of unmappedUuids) {
             const placeholderTs = `_slack_${uuid}`;
             saveMessageMapping(channelId, placeholderTs, {
               sdkMessageId: uuid,
               sessionId: newSessionId!,
               type: 'assistant',
             });
-            console.log(`[Mapping] Saved placeholder for assistant UUID: ${uuid}`);
+            console.log(`[Mapping] Saved placeholder for unmapped assistant UUID: ${uuid}`);
           }
+        } else {
+          console.log(`[Mapping] All ${assistantMessageUuids.size} assistant UUIDs were immediately mapped`);
         }
       }
     }
@@ -4515,9 +4515,9 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
     return;
   }
 
-  // Parse { threadTs } from action.value
+  // Parse { threadTs } from action.value (threadTs may be undefined for main channel)
   const valueStr = 'value' in action ? (action.value || '{}') : '{}';
-  let forkInfo: { threadTs: string };
+  let forkInfo: { threadTs?: string };
   try {
     forkInfo = JSON.parse(valueStr);
   } catch {
@@ -4525,13 +4525,9 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
     return;
   }
 
-  const { threadTs } = forkInfo;
-  if (!threadTs) {
-    console.error('[ForkHere] Missing threadTs:', forkInfo);
-    return;
-  }
+  const { threadTs } = forkInfo;  // May be undefined for main channel
 
-  // Derive channelId from conversationKey (format: channelId_threadTs)
+  // Derive channelId from conversationKey (format: channelId or channelId_threadTs)
   const channelId = conversationKey.split('_')[0];
   const userId = body.user?.id || 'unknown';
 

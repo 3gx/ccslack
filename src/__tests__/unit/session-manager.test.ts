@@ -1333,6 +1333,104 @@ describe('session-manager', () => {
       const messageId = findForkPointMessageId('C123', '1234.001');
       expect(messageId).toBeNull();
     });
+
+    it('should ignore placeholder ts values (starting with _slack_) when finding fallback', () => {
+      // This tests the fix for point-in-time forking: placeholder ts values
+      // should not be considered when finding the last assistant message
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_text_001', sessionId: 'main-session-123', type: 'assistant' as const },  // Real assistant
+              '_slack_msg_thinking_001': { sdkMessageId: 'msg_thinking_001', sessionId: 'main-session-123', type: 'assistant' as const },  // Placeholder (thinking)
+              '1234.003': { sdkMessageId: 'user_002', sessionId: 'main-session-123', type: 'user' as const },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Should return real assistant message (1234.002), not placeholder
+      const result = findForkPointMessageId('C123', '1234.003');
+      expect(result).toEqual({
+        messageId: 'msg_text_001',  // Real assistant message, not thinking placeholder
+        sessionId: 'main-session-123',
+      });
+    });
+
+    it('should find previous assistant when exact ts not found and ignore placeholders', () => {
+      // User replies to a status message (not in messageMap) - should find last real assistant
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.001': { sdkMessageId: 'user_001', sessionId: 'main-session-123', type: 'user' as const },
+              '1234.002': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const },
+              '_slack_thinking_uuid': { sdkMessageId: 'thinking_uuid', sessionId: 'main-session-123', type: 'assistant' as const },
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Looking for 1234.005 (not in map) - should find 1234.002 as last real assistant
+      const result = findForkPointMessageId('C123', '1234.005');
+      expect(result).toEqual({
+        messageId: 'msg_001',
+        sessionId: 'main-session-123',
+      });
+    });
+
+    it('should not return future messages even with placeholder filtering', () => {
+      const mockStore = {
+        channels: {
+          'C123': {
+            sessionId: 'main-session-123',
+            workingDir: '/test',
+            mode: 'plan' as const,
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            pathConfigured: true,
+            configuredPath: '/test',
+            configuredBy: 'U123',
+            configuredAt: Date.now(),
+            messageMap: {
+              '1234.003': { sdkMessageId: 'msg_001', sessionId: 'main-session-123', type: 'assistant' as const },  // Future message
+            },
+          },
+        },
+      };
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockStore));
+
+      // Looking for 1234.001 - should not return 1234.003 (it's in the future)
+      const result = findForkPointMessageId('C123', '1234.001');
+      expect(result).toBeNull();
+    });
   });
 
   describe('getLastSyncedMessageId', () => {

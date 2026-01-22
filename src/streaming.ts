@@ -2,6 +2,7 @@ import { WebClient } from '@slack/web-api';
 import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { markdownToPng } from './markdown-png.js';
+import { saveMessageMapping } from './session-manager.js';
 
 // Throttle interval for fallback mode (2 seconds = 30 updates/min, well under 50/min limit)
 const UPDATE_INTERVAL_MS = 2000;
@@ -395,6 +396,15 @@ export async function uploadMarkdownWithResponse(
  *
  * Returns timestamps for message mapping, or null on complete failure.
  */
+/**
+ * Mapping info for immediate message mapping save after posting.
+ * This enables point-in-time forking by saving the mapping atomically with the post.
+ */
+export interface MappingInfo {
+  sdkMessageId: string;
+  sessionId: string;
+}
+
 export async function uploadMarkdownAndPngWithResponse(
   client: WebClient,
   channelId: string,
@@ -404,7 +414,8 @@ export async function uploadMarkdownAndPngWithResponse(
   userId?: string,
   threadCharLimit?: number,
   stripEmptyTag?: boolean,
-  forkInfo?: { threadTs: string; conversationKey: string }
+  forkInfo?: { threadTs?: string; conversationKey: string },
+  mappingInfo?: MappingInfo
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
   const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
 
@@ -417,7 +428,7 @@ export async function uploadMarkdownAndPngWithResponse(
       ? slackFormattedResponse
       : truncateWithClosedFormatting(slackFormattedResponse, limit);
 
-    // Build blocks with Fork here button if in a thread
+    // Build blocks with Fork here button for point-in-time forking
     const blocks = forkInfo ? [
       {
         type: 'section',
@@ -433,7 +444,7 @@ export async function uploadMarkdownAndPngWithResponse(
             type: 'button',
             text: {
               type: 'plain_text',
-              text: 'Fork here',
+              text: ':twisted_rightwards_arrows: Fork here',
               emoji: true,
             },
             action_id: `fork_here_${forkInfo.conversationKey}`,
@@ -454,6 +465,18 @@ export async function uploadMarkdownAndPngWithResponse(
 
     const textTs = (textResult as any).ts;
     const postedMessages: { ts: string }[] = textTs ? [{ ts: textTs }] : [];
+
+    // CRITICAL: Save message mapping IMMEDIATELY after posting for point-in-time forking
+    // This ensures the mapping is saved atomically with the post, not in a batch at the end
+    // Pattern follows terminal-watcher.ts for crash-resilience
+    if (textTs && mappingInfo) {
+      saveMessageMapping(channelId, textTs, {
+        sdkMessageId: mappingInfo.sdkMessageId,
+        sessionId: mappingInfo.sessionId,
+        type: 'assistant',
+      });
+      console.log(`[Mapping] Saved assistant mapping immediately: ${textTs} → ${mappingInfo.sdkMessageId}`);
+    }
 
     // Step 2: Generate PNG from markdown (may return null on failure)
     const pngBuffer = await markdownToPng(cleanMarkdown);

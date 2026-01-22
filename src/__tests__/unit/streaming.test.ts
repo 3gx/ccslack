@@ -1,7 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse, truncateWithClosedFormatting } from '../../streaming.js';
+import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse, uploadMarkdownAndPngWithResponse, truncateWithClosedFormatting } from '../../streaming.js';
 import { createMockSlackClient } from '../__fixtures__/slack-messages.js';
 import { createMockClaudeStream, mockSystemInit, mockAssistantText, mockAssistantContentBlocks, mockResult } from '../__fixtures__/claude-messages.js';
+
+// Mock markdownToPng to avoid timeout in tests
+vi.mock('../../markdown-png.js', () => ({
+  markdownToPng: vi.fn().mockResolvedValue(null),
+}));
+
+// Mock saveMessageMapping for testing immediate mapping
+vi.mock('../../session-manager.js', () => ({
+  saveMessageMapping: vi.fn(),
+}));
+
+import { saveMessageMapping } from '../../session-manager.js';
 
 describe('streaming', () => {
   beforeEach(() => {
@@ -533,6 +545,230 @@ describe('streaming', () => {
           text: response,
         })
       );
+    });
+  });
+
+  describe('uploadMarkdownAndPngWithResponse with forkInfo', () => {
+    it('should include Fork here button with emoji when forkInfo is provided', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Response',
+        'Response text',
+        'thread123',
+        'U456',
+        500,
+        false,
+        { threadTs: 'thread123', conversationKey: 'C123_thread123' }
+      );
+
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          blocks: expect.arrayContaining([
+            expect.objectContaining({
+              type: 'section',
+              text: expect.objectContaining({
+                type: 'mrkdwn',
+                text: 'Response text',
+              }),
+            }),
+            expect.objectContaining({
+              type: 'actions',
+              elements: expect.arrayContaining([
+                expect.objectContaining({
+                  type: 'button',
+                  text: expect.objectContaining({
+                    text: ':twisted_rightwards_arrows: Fork here',
+                  }),
+                  action_id: 'fork_here_C123_thread123',
+                }),
+              ]),
+            }),
+          ]),
+        })
+      );
+    });
+
+    it('should NOT include Fork here button when forkInfo is undefined', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Response',
+        'Response text',
+        'thread123',
+        'U456',
+        500,
+        false,
+        undefined  // No forkInfo
+      );
+
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          text: 'Response text',
+        })
+      );
+      // Should NOT have blocks (no forkInfo)
+      const call = mockClient.chat.postMessage.mock.calls[0][0];
+      expect(call.blocks).toBeUndefined();
+    });
+
+    it('should include forkInfo with undefined threadTs for main channel', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Response',
+        'Response text',
+        undefined,  // Main channel (no threadTs)
+        'U456',
+        500,
+        false,
+        { threadTs: undefined, conversationKey: 'C123' }  // Main channel forkInfo
+      );
+
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blocks: expect.arrayContaining([
+            expect.objectContaining({
+              type: 'actions',
+              elements: expect.arrayContaining([
+                expect.objectContaining({
+                  action_id: 'fork_here_C123',
+                  value: JSON.stringify({ threadTs: undefined }),
+                }),
+              ]),
+            }),
+          ]),
+        })
+      );
+    });
+  });
+
+  describe('uploadMarkdownAndPngWithResponse with mappingInfo (point-in-time forking)', () => {
+    beforeEach(() => {
+      vi.mocked(saveMessageMapping).mockClear();
+    });
+
+    it('should call saveMessageMapping when mappingInfo is provided', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'msg123' });
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Response',
+        'Response text',
+        'thread123',
+        'U456',
+        500,
+        false,
+        { threadTs: 'thread123', conversationKey: 'C123_thread123' },
+        { sdkMessageId: 'msg_uuid_abc123', sessionId: 'session_xyz789' }  // mappingInfo
+      );
+
+      expect(saveMessageMapping).toHaveBeenCalledWith('C123', 'msg123', {
+        sdkMessageId: 'msg_uuid_abc123',
+        sessionId: 'session_xyz789',
+        type: 'assistant',
+      });
+    });
+
+    it('should NOT call saveMessageMapping when mappingInfo is undefined', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'msg123' });
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Response',
+        'Response text',
+        'thread123',
+        'U456',
+        500,
+        false,
+        { threadTs: 'thread123', conversationKey: 'C123_thread123' },
+        undefined  // No mappingInfo
+      );
+
+      expect(saveMessageMapping).not.toHaveBeenCalled();
+    });
+
+    it('should NOT call saveMessageMapping when postMessage returns no ts', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true });  // No ts
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Response',
+        'Response text',
+        'thread123',
+        'U456',
+        500,
+        false,
+        undefined,
+        { sdkMessageId: 'msg_uuid_abc123', sessionId: 'session_xyz789' }
+      );
+
+      expect(saveMessageMapping).not.toHaveBeenCalled();
+    });
+
+    it('should return ts in result for tracking mapped UUIDs', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'msg456' });
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# Response',
+        'Response text',
+        undefined,
+        undefined,
+        500,
+        false,
+        undefined,
+        { sdkMessageId: 'msg_uuid', sessionId: 'session_123' }
+      );
+
+      expect(result).toEqual({
+        ts: 'msg456',
+        postedMessages: [{ ts: 'msg456' }],
+      });
     });
   });
 });
