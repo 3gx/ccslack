@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildStatusPanelBlocks } from '../../blocks.js';
 
-describe('View Log button during active session', () => {
+describe('Abort button during active session (View Log removed)', () => {
   const baseParams = {
     mode: 'plan' as const,
     toolsCompleted: 0,
@@ -9,8 +9,8 @@ describe('View Log button during active session', () => {
     conversationKey: 'C123',
   };
 
-  describe('buildStatusPanelBlocks - View Log button presence', () => {
-    it('should include View Log button for starting status', () => {
+  describe('buildStatusPanelBlocks - Abort button only (no View Log)', () => {
+    it('should include only Abort button for starting status', () => {
       const blocks = buildStatusPanelBlocks({
         ...baseParams,
         status: 'starting',
@@ -19,28 +19,33 @@ describe('View Log button during active session', () => {
       const actionsBlock = blocks.find((b: any) => b.type === 'actions');
       expect(actionsBlock).toBeDefined();
 
+      // Should have only 1 button (Abort)
+      expect(actionsBlock?.elements).toHaveLength(1);
+
+      const abortButton = actionsBlock?.elements?.[0];
+      expect(abortButton?.text?.text).toBe('Abort');
+      expect(abortButton?.style).toBe('danger');
+      expect(abortButton?.action_id).toContain('abort_query_');
+
+      // No View Log button
       const viewLogButton = actionsBlock?.elements?.find(
         (e: any) => e.action_id?.startsWith('view_activity_log_')
       );
-      expect(viewLogButton).toBeDefined();
-      expect(viewLogButton?.text?.text).toBe('View Log');
-      expect(viewLogButton?.value).toBe('C123');
+      expect(viewLogButton).toBeUndefined();
     });
 
-    it('should include View Log button for thinking status', () => {
+    it('should include only Abort button for thinking status', () => {
       const blocks = buildStatusPanelBlocks({
         ...baseParams,
         status: 'thinking',
       });
 
       const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      const viewLogButton = actionsBlock?.elements?.find(
-        (e: any) => e.action_id?.startsWith('view_activity_log_')
-      );
-      expect(viewLogButton).toBeDefined();
+      expect(actionsBlock?.elements).toHaveLength(1);
+      expect(actionsBlock?.elements?.[0]?.text?.text).toBe('Abort');
     });
 
-    it('should include View Log button for tool status', () => {
+    it('should include only Abort button for tool status', () => {
       const blocks = buildStatusPanelBlocks({
         ...baseParams,
         status: 'tool',
@@ -48,26 +53,22 @@ describe('View Log button during active session', () => {
       });
 
       const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      const viewLogButton = actionsBlock?.elements?.find(
-        (e: any) => e.action_id?.startsWith('view_activity_log_')
-      );
-      expect(viewLogButton).toBeDefined();
+      expect(actionsBlock?.elements).toHaveLength(1);
+      expect(actionsBlock?.elements?.[0]?.text?.text).toBe('Abort');
     });
 
-    it('should include View Log button for generating status', () => {
+    it('should include only Abort button for generating status', () => {
       const blocks = buildStatusPanelBlocks({
         ...baseParams,
         status: 'generating',
       });
 
       const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      const viewLogButton = actionsBlock?.elements?.find(
-        (e: any) => e.action_id?.startsWith('view_activity_log_')
-      );
-      expect(viewLogButton).toBeDefined();
+      expect(actionsBlock?.elements).toHaveLength(1);
+      expect(actionsBlock?.elements?.[0]?.text?.text).toBe('Abort');
     });
 
-    it('should NOT include View Log button for complete status', () => {
+    it('should NOT include any buttons for complete status', () => {
       const blocks = buildStatusPanelBlocks({
         ...baseParams,
         status: 'complete',
@@ -78,7 +79,7 @@ describe('View Log button during active session', () => {
       expect(actionsBlock).toBeUndefined();
     });
 
-    it('should NOT include View Log button for error status', () => {
+    it('should NOT include any buttons for error status', () => {
       const blocks = buildStatusPanelBlocks({
         ...baseParams,
         status: 'error',
@@ -89,7 +90,7 @@ describe('View Log button during active session', () => {
       expect(actionsBlock).toBeUndefined();
     });
 
-    it('should NOT include View Log button for aborted status', () => {
+    it('should NOT include any buttons for aborted status', () => {
       const blocks = buildStatusPanelBlocks({
         ...baseParams,
         status: 'aborted',
@@ -99,28 +100,7 @@ describe('View Log button during active session', () => {
       expect(actionsBlock).toBeUndefined();
     });
 
-    it('should place View Log button before Abort button', () => {
-      const blocks = buildStatusPanelBlocks({
-        ...baseParams,
-        status: 'thinking',
-      });
-
-      const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      const elements = actionsBlock?.elements || [];
-
-      const viewLogIndex = elements.findIndex(
-        (e: any) => e.action_id?.startsWith('view_activity_log_')
-      );
-      const abortIndex = elements.findIndex(
-        (e: any) => e.action_id?.startsWith('abort_query_')
-      );
-
-      expect(viewLogIndex).toBe(0);
-      expect(abortIndex).toBe(1);
-      expect(viewLogIndex).toBeLessThan(abortIndex);
-    });
-
-    it('should include both View Log and Abort buttons during active status', () => {
+    it('should have Abort button as only element during active status', () => {
       const blocks = buildStatusPanelBlocks({
         ...baseParams,
         status: 'tool',
@@ -128,12 +108,9 @@ describe('View Log button during active session', () => {
       });
 
       const actionsBlock = blocks.find((b: any) => b.type === 'actions');
-      expect(actionsBlock?.elements).toHaveLength(2);
+      expect(actionsBlock?.elements).toHaveLength(1);
 
-      const viewLogButton = actionsBlock?.elements?.[0];
-      const abortButton = actionsBlock?.elements?.[1];
-
-      expect(viewLogButton?.text?.text).toBe('View Log');
+      const abortButton = actionsBlock?.elements?.[0];
       expect(abortButton?.text?.text).toBe('Abort');
       expect(abortButton?.style).toBe('danger');
     });

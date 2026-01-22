@@ -313,33 +313,34 @@ describe('slack-bot mention handlers', () => {
       expect(combinedCall.channel).toBe('C123');
       expect(combinedCall.text).toBe('Claude is starting...');
 
-      // Verify combined blocks: activity section + divider + status panel (3 blocks)
+      // Verify new combined blocks: Beginning + status line + activity + spinner + abort
       const blocks = combinedCall.blocks;
       expect(blocks).toBeDefined();
-      expect(blocks.length).toBe(5); // activity section + divider + 3 status panel blocks
+      expect(blocks.length).toBe(5); // Beginning + status line + activity + spinner + abort
 
-      // First block: activity log section
+      // First block: "Beginning" header
       expect(blocks[0].type).toBe('section');
-      expect(blocks[0].text.text).toContain('Analyzing request');
+      expect(blocks[0].text.text).toBe('*Beginning*');
 
-      // Second block: divider
-      expect(blocks[1].type).toBe('divider');
+      // Second block: simple status line (mode | model)
+      expect(blocks[1].type).toBe('context');
+      expect(blocks[1].elements[0].text).toContain('Plan');
 
-      // Third block: status header section
+      // Third block: activity log section
       expect(blocks[2].type).toBe('section');
-      expect(blocks[2].text.text).toContain('Claude is working');
+      expect(blocks[2].text.text).toContain('Analyzing request');
 
-      // Fourth block: status context with mode
+      // Fourth block: spinner + elapsed
       expect(blocks[3].type).toBe('context');
-      expect(blocks[3].elements[0].text).toContain('Plan');
 
-      // Fifth block: View Log and Abort buttons
+      // Fifth block: View Log + Abort buttons
       expect(blocks[4].type).toBe('actions');
-      // View Log button is first
+      expect(blocks[4].elements.length).toBe(2);
+      // View Log button first
       expect(blocks[4].elements[0].type).toBe('button');
       expect(blocks[4].elements[0].text.text).toBe('View Log');
       expect(blocks[4].elements[0].action_id).toMatch(/^view_activity_log_/);
-      // Abort button is second
+      // Abort button second
       expect(blocks[4].elements[1].type).toBe('button');
       expect(blocks[4].elements[1].text.text).toBe('Abort');
       expect(blocks[4].elements[1].style).toBe('danger');

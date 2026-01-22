@@ -1353,19 +1353,16 @@ describe('blocks', () => {
         expect((blocks[1] as any).elements[0].text).toContain('Starting');
       });
 
-      it('should include View Log and Abort buttons', () => {
+      it('should include Abort button only (no View Log)', () => {
         const blocks = buildStatusPanelBlocks({
           ...baseParams,
           status: 'starting',
         });
 
         expect(blocks[2].type).toBe('actions');
-        // View Log button is first
-        const viewLogButton = (blocks[2] as any).elements[0];
-        expect(viewLogButton.text.text).toBe('View Log');
-        expect(viewLogButton.action_id).toContain('view_activity_log_');
-        // Abort button is second
-        const abortButton = (blocks[2] as any).elements[1];
+        // Only Abort button (no View Log)
+        expect((blocks[2] as any).elements.length).toBe(1);
+        const abortButton = (blocks[2] as any).elements[0];
         expect(abortButton.text.text).toBe('Abort');
         expect(abortButton.style).toBe('danger');
         expect(abortButton.action_id).toContain('abort_query_');
@@ -2963,7 +2960,7 @@ describe('blocks', () => {
       spinner: '|',
     };
 
-    it('should return activity section + divider + status panel', () => {
+    it('should return Beginning header + status line + activity + spinner + buttons', () => {
       const entries: ActivityEntry[] = [
         { timestamp: Date.now(), type: 'starting' },
       ];
@@ -2973,15 +2970,23 @@ describe('blocks', () => {
         inProgress: true,
       });
 
-      // Should have at least 4 blocks: activity section, divider, and status panel blocks
-      expect(blocks.length).toBeGreaterThanOrEqual(4);
-      // First block should be activity log section
+      // Should have 5 blocks: Beginning, status line, activity, spinner, buttons
+      expect(blocks.length).toBe(5);
+      // First block should be "Beginning" header
       expect(blocks[0].type).toBe('section');
-      expect((blocks[0] as any).text.text).toContain(':brain:');
-      // Second should be divider
-      expect(blocks[1].type).toBe('divider');
-      // Status panel blocks follow
-      expect(blocks.some(b => b.type === 'actions')).toBe(true);
+      expect((blocks[0] as any).text.text).toBe('*Beginning*');
+      // Second should be simple status line
+      expect(blocks[1].type).toBe('context');
+      // Third should be activity log section
+      expect(blocks[2].type).toBe('section');
+      expect((blocks[2] as any).text.text).toContain(':brain:');
+      // Fourth should be spinner + elapsed
+      expect(blocks[3].type).toBe('context');
+      // Fifth should be View Log + Abort buttons
+      expect(blocks[4].type).toBe('actions');
+      expect((blocks[4] as any).elements.length).toBe(2);
+      expect((blocks[4] as any).elements[0].text.text).toBe('View Log');
+      expect((blocks[4] as any).elements[1].text.text).toBe('Abort');
     });
 
     it('should include abort button during processing', () => {
@@ -3020,8 +3025,8 @@ describe('blocks', () => {
         inProgress: true,
       });
 
-      // Activity log section should have text under the limit
-      const activitySection = blocks[0];
+      // Activity log section is now blocks[2] (after Beginning header and status line)
+      const activitySection = blocks[2];
       expect((activitySection as any).text.text.length).toBeLessThanOrEqual(ACTIVITY_LOG_MAX_CHARS + 100); // Allow some margin
     });
 
@@ -3037,9 +3042,9 @@ describe('blocks', () => {
         inProgress: true,
       });
 
-      // Activity section should show thinking
-      expect((blocks[0] as any).text.text).toContain(':brain:');
-      expect((blocks[0] as any).text.text).toContain('Thinking');
+      // Activity section is now blocks[2] (after Beginning header and status line)
+      expect((blocks[2] as any).text.text).toContain(':brain:');
+      expect((blocks[2] as any).text.text).toContain('Thinking');
     });
   });
 

@@ -1350,24 +1350,16 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
           text: `_${modeLabel} | Starting..._`,
         }],
       });
-      // View Log and Abort buttons
+      // Abort button only (no View Log)
       blocks.push({
         type: 'actions',
         block_id: `status_panel_${conversationKey}`,
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'View Log' },
-            action_id: `view_activity_log_${conversationKey}`,
-            value: conversationKey,
-          },
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Abort' },
-            style: 'danger',
-            action_id: `abort_query_${conversationKey}`,
-          },
-        ],
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Abort' },
+          style: 'danger',
+          action_id: `abort_query_${conversationKey}`,
+        }],
       });
       break;
 
@@ -1409,24 +1401,16 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
           text: `_${activityParts.join(' | ')}_`,
         }],
       });
-      // View Log and Abort buttons
+      // Abort button only (no View Log)
       blocks.push({
         type: 'actions',
         block_id: `status_panel_${conversationKey}`,
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'View Log' },
-            action_id: `view_activity_log_${conversationKey}`,
-            value: conversationKey,
-          },
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Abort' },
-            style: 'danger',
-            action_id: `abort_query_${conversationKey}`,
-          },
-        ],
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Abort' },
+          style: 'danger',
+          action_id: `abort_query_${conversationKey}`,
+        }],
       });
       break;
 
@@ -1534,15 +1518,67 @@ export interface CombinedStatusParams extends StatusPanelParams {
 
 /**
  * Build combined status blocks (activity log + status panel in single message).
- * Activity log at top, status panel + abort button at bottom.
- * This keeps the abort button always visible during long thinking sessions.
+ * New layout:
+ * - "Beginning" header at top
+ * - Simple status line (mode | model)
+ * - Activity log
+ * - Spinner + elapsed (in-progress) or "Complete"/"Aborted"/"Error" (terminal)
+ * - Abort button at very end (in-progress only) or stats line (terminal)
  */
 export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[] {
-  const { activityLog, inProgress, ...statusParams } = params;
+  const {
+    activityLog,
+    inProgress,
+    status,
+    mode,
+    model,
+    currentTool,
+    toolsCompleted,
+    elapsedMs,
+    inputTokens,
+    outputTokens,
+    contextPercent,
+    compactPercent,
+    costUsd,
+    conversationKey,
+    errorMessage,
+    spinner,
+    rateLimitHits,
+    customStatus,
+  } = params;
+
   const blocks: Block[] = [];
 
-  // 1. Activity log section (top)
-  // Use expand: true to prevent Slack's "see more" collapse on long text
+  // SDK mode labels for display
+  const modeLabels: Record<PermissionMode, string> = {
+    plan: 'Plan',
+    default: 'Default',
+    bypassPermissions: 'Bypass',
+    acceptEdits: 'AcceptEdits',
+  };
+  const modeLabel = modeLabels[mode] || mode;
+
+  // Format elapsed time
+  const elapsedSec = (elapsedMs / 1000).toFixed(1);
+
+  // 1. "Beginning" header
+  blocks.push({
+    type: 'section',
+    text: { type: 'mrkdwn', text: '*Beginning*' },
+  });
+
+  // 2. Simple status line (mode | model only)
+  const simpleStatusParts = [modeLabel];
+  if (model) simpleStatusParts.push(model);
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: `_${simpleStatusParts.join(' | ')}_`,
+    }],
+  });
+
+  // 3. Activity log section
   const activityText = buildActivityLogText(activityLog, inProgress, ACTIVITY_LOG_MAX_CHARS);
   blocks.push({
     type: 'section',
@@ -1550,11 +1586,115 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     expand: true,
   } as Block);
 
-  // 2. Divider
-  blocks.push({ type: 'divider' });
+  // 4 & 5: Footer depends on status
+  const isInProgress = ['starting', 'thinking', 'tool', 'generating'].includes(status);
 
-  // 3. Status panel blocks (bottom)
-  blocks.push(...buildStatusPanelBlocks(statusParams));
+  if (isInProgress) {
+    // 4. Spinner + elapsed at bottom of activity
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: `${spinner || ''} [${elapsedSec}s]`,
+      }],
+    });
+
+    // 5. View Log (for current segment) + Abort
+    blocks.push({
+      type: 'actions',
+      block_id: `status_panel_${conversationKey}`,
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'View Log' },
+          action_id: `view_activity_log_${conversationKey}`,
+          value: conversationKey,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Abort' },
+          style: 'danger',
+          action_id: `abort_query_${conversationKey}`,
+        },
+      ],
+    });
+  } else if (status === 'complete') {
+    // 4. "Complete" footer
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Complete*' },
+    });
+
+    // 5. Full stats line
+    const statsParts = [modeLabel];
+    if (model) statsParts.push(model);
+    if (customStatus) {
+      statsParts.push(customStatus);
+    } else {
+      if (inputTokens || outputTokens) {
+        const inStr = inputTokens ? inputTokens.toLocaleString() : '0';
+        const outStr = outputTokens ? outputTokens.toLocaleString() : '0';
+        statsParts.push(`${inStr} in / ${outStr} out`);
+      }
+      if (contextPercent !== undefined) {
+        if (compactPercent !== undefined && compactPercent > 0) {
+          statsParts.push(`${contextPercent}% ctx (${compactPercent}% to compact)`);
+        } else if (compactPercent !== undefined && compactPercent <= 0) {
+          statsParts.push(`${contextPercent}% ctx (compact soon)`);
+        } else {
+          statsParts.push(`${contextPercent}% ctx`);
+        }
+      }
+      if (costUsd !== undefined) {
+        statsParts.push(`$${costUsd.toFixed(4)}`);
+      }
+    }
+    statsParts.push(`${elapsedSec}s`);
+    if (rateLimitHits && rateLimitHits > 0) {
+      statsParts.push(`:warning: ${rateLimitHits} rate limit${rateLimitHits > 1 ? 's' : ''}`);
+    }
+
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: `_${statsParts.join(' | ')}_`,
+      }],
+    });
+  } else if (status === 'aborted') {
+    // 4. "Aborted" footer
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Aborted*' },
+    });
+
+    // 5. Status line
+    const abortedParts = [modeLabel];
+    if (model) abortedParts.push(model);
+    abortedParts.push('aborted');
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: `_${abortedParts.join(' | ')}_`,
+      }],
+    });
+  } else if (status === 'error') {
+    // 4. "Error" footer
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Error*' },
+    });
+
+    // 5. Error message
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: `_${customStatus || errorMessage || 'Unknown error'}_`,
+      }],
+    });
+  }
 
   return blocks;
 }
