@@ -3100,9 +3100,8 @@ async function handleMessage(params: {
             );
             console.log(`[Interleaved] Posted trailing activity: ${trailingActivity.length} entries, key: ${segmentKey}`);
 
-            // Clean up lookup map
-            segmentToConversationKey.delete(segmentKey);
-            processingState.currentSegmentKey = null;
+            // Note: segment stays in segmentToConversationKey until finally block
+            // This allows View Log to detect live vs completed segments
           } catch (error) {
             console.error('[Interleaved] Error posting trailing activity:', error);
           }
@@ -3387,6 +3386,14 @@ async function handleMessage(params: {
     activeQueries.delete(conversationKey);
     clearAborted(conversationKey);
     cleanupMutex(conversationKey);
+
+    // Clean up all segment-to-conversation mappings for this query
+    // This marks segments as "completed" so View Log shows first page
+    for (const [segKey, convKey] of segmentToConversationKey.entries()) {
+      if (convKey === conversationKey) {
+        segmentToConversationKey.delete(segKey);
+      }
+    }
   }
 }
 
@@ -4416,12 +4423,19 @@ app.action(/^view_segment_log_(.+)$/, async ({ action, ack, body, client }) => {
 
   console.log(`[ViewLog] Showing ${activityLog.length} entries for segment`);
 
-  // Open modal with first page - uses segment key for pagination state
+  // Determine if segment is from a live/in-progress query
+  // Segments stay in segmentToConversationKey until query completes (finally block)
+  const isLiveSegment = segmentToConversationKey.has(segmentKey);
+
+  // Open modal - start from last page if live (to see latest activity), first page if completed
   const totalPages = Math.ceil(activityLog.length / MODAL_PAGE_SIZE);
+  const startPage = isLiveSegment ? totalPages : 1;
+  console.log(`[ViewLog] isLive=${isLiveSegment}, startPage=${startPage}, totalPages=${totalPages}`);
+
   try {
     await client.views.open({
       trigger_id: triggerId,
-      view: buildActivityLogModalView(activityLog, 1, totalPages, segmentKey),
+      view: buildActivityLogModalView(activityLog, startPage, totalPages, segmentKey),
     });
   } catch (error) {
     console.error('Error opening segment log modal:', error);
