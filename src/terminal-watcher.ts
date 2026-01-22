@@ -4,6 +4,7 @@
  */
 
 import { WebClient } from '@slack/web-api';
+import * as fs from 'fs';
 import { Session, getSession, getThreadSession, saveMessageMapping } from './session-manager.js';
 import {
   getSessionFilePath,
@@ -38,6 +39,8 @@ export interface WatchState {
   // Activity message tracking per turn (keyed by userInput UUID)
   // Stores Slack ts for each turn's activity message, enabling update-in-place
   activityMessages: Map<string, string>;
+  // Tracked plan file path for ExitPlanMode display
+  planFilePath: string | null;
 }
 
 /**
@@ -104,6 +107,7 @@ export function startWatching(
     updateRateMs,
     userId,
     activityMessages: new Map(),
+    planFilePath: null,
   };
 
   // Start polling - poll immediately, then on interval
@@ -218,6 +222,14 @@ async function pollForChanges(state: WatchState): Promise<void> {
       infiniteRetry: false,  // /watch uses limited retries
       postTextMessage: (s, msg, isLastMessage) => postTerminalMessage(state, msg, isLastMessage),
       activityMessages: state.activityMessages,  // Pass activity ts map for update-in-place
+      onPlanFileDetected: (path) => {
+        state.planFilePath = path;
+        console.log(`[TerminalWatcher] Plan file detected: ${path}`);
+      },
+      onExitPlanMode: async (planPath) => {
+        console.log(`[TerminalWatcher] ExitPlanMode detected, plan: ${planPath || state.planFilePath}`);
+        await displayPlanContent(state, planPath || state.planFilePath);
+      },
     });
 
     console.log(`[TerminalWatcher] Poll result: synced=${syncResult.syncedCount}/${syncResult.totalToSync}`);
@@ -451,6 +463,57 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
       console.error(`[TerminalWatcher] Failed to post assistant message:`, error);
       return false;
     }
+  }
+}
+
+/**
+ * Display plan content when ExitPlanMode detected.
+ * Reads plan from disk and posts to Slack (observation only, no approval buttons).
+ */
+async function displayPlanContent(
+  state: WatchState,
+  planFilePath: string | null
+): Promise<void> {
+  if (!planFilePath) {
+    await withSlackRetry(() =>
+      state.client.chat.postMessage({
+        channel: state.channelId,
+        thread_ts: state.threadTs,
+        text: ':warning: ExitPlanMode called but no plan file path detected.',
+      })
+    );
+    return;
+  }
+
+  try {
+    const planContent = await fs.promises.readFile(planFilePath, 'utf-8');
+    const slackFormatted = markdownToSlack(planContent);
+
+    // Get session config for limits
+    const session = state.threadTs
+      ? getThreadSession(state.channelId, state.threadTs)
+      : getSession(state.channelId);
+    const charLimit = session?.threadCharLimit ?? 500;
+
+    await uploadMarkdownAndPngWithResponse(
+      state.client,
+      state.channelId,
+      planContent,
+      ':clipboard: *Plan (from terminal)*\n' + slackFormatted,
+      state.threadTs,
+      state.userId,
+      charLimit,
+      session?.stripEmptyTag
+    );
+  } catch (e) {
+    console.error('[TerminalWatcher] Failed to read plan file:', e);
+    await withSlackRetry(() =>
+      state.client.chat.postMessage({
+        channel: state.channelId,
+        thread_ts: state.threadTs,
+        text: ':warning: Could not read plan file from terminal session.',
+      })
+    );
   }
 }
 

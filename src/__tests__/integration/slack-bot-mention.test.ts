@@ -74,6 +74,17 @@ vi.mock('../../session-reader.js', () => ({
   getSessionFilePath: vi.fn().mockReturnValue('/test/session.jsonl'),
   sessionFileExists: vi.fn().mockReturnValue(false),
   readLastUserMessageUuid: vi.fn().mockReturnValue(null),
+  extractPlanFilePathFromInput: vi.fn((input) => {
+    // Use real logic for plan path detection
+    if (!input) return null;
+    const planPath = (input.file_path || input.path) as string | undefined;
+    if (typeof planPath === 'string' &&
+        planPath.includes('.claude/plans/') &&
+        planPath.endsWith('.md')) {
+      return planPath;
+    }
+    return null;
+  }),
 }));
 
 // Import utilities from setup

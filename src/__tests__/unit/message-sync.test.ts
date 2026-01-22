@@ -14,6 +14,8 @@ vi.mock('../../session-reader.js', () => ({
   }),
   groupMessagesByTurn: vi.fn(() => []),
   isTurnComplete: vi.fn((turn) => turn.trailingActivity.length === 0 && turn.segments.length > 0),
+  extractPlanFilePathFromMessage: vi.fn(() => null),  // Plan detection for /watch
+  hasExitPlanMode: vi.fn(() => false),  // ExitPlanMode detection for /watch
 }));
 
 // Mock session-manager module

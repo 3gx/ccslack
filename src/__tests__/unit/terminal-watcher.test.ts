@@ -26,6 +26,8 @@ vi.mock('../../session-reader.js', () => ({
   buildActivityEntriesFromMessage: vi.fn(() => []),  // Default to no activity
   groupMessagesByTurn: vi.fn(() => []),  // Default to empty turns
   isTurnComplete: vi.fn((turn) => turn.trailingActivity.length === 0 && turn.segments.length > 0),
+  extractPlanFilePathFromMessage: vi.fn(() => null),  // Plan detection for /watch
+  hasExitPlanMode: vi.fn(() => false),  // ExitPlanMode detection for /watch
 }));
 
 // Mock session-manager (for getSession, getThreadSession, saveMessageMapping, mergeActivityLog, getMessageMapUuids)

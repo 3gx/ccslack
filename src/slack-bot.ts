@@ -77,6 +77,7 @@ import {
   getSessionFilePath,
   sessionFileExists,
   readLastUserMessageUuid,
+  extractPlanFilePathFromInput,
 } from './session-reader.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
 import fs from 'fs';
@@ -911,6 +912,7 @@ async function handleFastForwardSync(
       updateRateMs: (effectiveSession.updateRateSeconds ?? 2) * 1000,
       userId,
       activityMessages: new Map(),  // Track activity ts during sync (update-in-place)
+      planFilePath: null,  // Not used for /ff
     };
 
     // Track current status message ts (will change as we move it to bottom)
@@ -1645,6 +1647,14 @@ async function showPlanApprovalUI(params: {
       );
     } catch (e) {
       console.error('[PlanApproval] Failed to read/display plan file:', e);
+      // Show warning to user
+      await withSlackRetry(async () =>
+        client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: ':warning: Could not read plan file. It may have been deleted or moved.',
+        })
+      );
     }
   } else {
     // No plan file path detected - show warning
@@ -2871,14 +2881,13 @@ async function handleMessage(params: {
           }
 
           // Parse file tool input to capture plan file path
-          // Write/Edit/Read use file_path, Grep/Glob use path
+          // Uses shared function to filter out directory paths (must end with .md)
           if (processingState.fileToolInputs.has(event.index)) {
             try {
               const inputJson = processingState.fileToolInputs.get(event.index) || '{}';
               const input = JSON.parse(inputJson);
-              // Check both file_path (Write/Edit/Read) and path (Grep/Glob)
-              const planPath = input.file_path || input.path;
-              if (typeof planPath === 'string' && planPath.includes('.claude/plans/')) {
+              const planPath = extractPlanFilePathFromInput(input);
+              if (planPath) {
                 processingState.planFilePath = planPath;
                 // Persist to session for cross-turn access
                 if (threadTs) {

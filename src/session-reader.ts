@@ -419,6 +419,57 @@ export function groupMessagesByTurn(messages: SessionFileMessage[]): Turn[] {
   return turns;
 }
 
+// ============================================================================
+// Plan File Path Detection (shared by @bot and /watch)
+// ============================================================================
+
+/**
+ * Extract plan file path from tool input.
+ * Works for ANY tool - Write, Edit, Read, Grep, Glob, etc.
+ * Single source of truth for both @bot and /watch.
+ */
+export function extractPlanFilePathFromInput(
+  input: Record<string, unknown> | undefined
+): string | null {
+  if (!input) return null;
+  const planPath = (input.file_path || input.path) as string | undefined;
+  // Must be a file (ends with .md), not a directory
+  if (typeof planPath === 'string' &&
+      planPath.includes('.claude/plans/') &&
+      planPath.endsWith('.md')) {
+    return planPath;
+  }
+  return null;
+}
+
+/**
+ * Extract plan file path from a session message.
+ * Scans all tool_use blocks for plan file paths.
+ */
+export function extractPlanFilePathFromMessage(
+  msg: SessionFileMessage
+): string | null {
+  const content = msg.message?.content;
+  if (!Array.isArray(content)) return null;
+
+  for (const block of content) {
+    if (block.type === 'tool_use' && block.input) {
+      const path = extractPlanFilePathFromInput(block.input as Record<string, unknown>);
+      if (path) return path;
+    }
+  }
+  return null;
+}
+
+/**
+ * Check if message contains ExitPlanMode tool call.
+ */
+export function hasExitPlanMode(msg: SessionFileMessage): boolean {
+  const content = msg.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(b => b.type === 'tool_use' && b.name === 'ExitPlanMode');
+}
+
 export function buildActivityEntriesFromMessage(msg: SessionFileMessage): ImportedActivityEntry[] {
   const entries: ImportedActivityEntry[] = [];
   const timestamp = new Date(msg.timestamp).getTime();

@@ -88,6 +88,8 @@ vi.mock('../../session-reader.js', () => ({
     return msg?.message?.content?.find((b: any) => b.type === 'text')?.text || '';
   }),
   groupMessagesByTurn: vi.fn().mockReturnValue([]),
+  extractPlanFilePathFromMessage: vi.fn().mockReturnValue(null),  // Plan detection for /watch
+  hasExitPlanMode: vi.fn().mockReturnValue(false),  // ExitPlanMode detection for /watch
 }));
 
 vi.mock('../../session-event-stream.js', () => ({

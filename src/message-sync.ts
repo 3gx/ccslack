@@ -13,6 +13,8 @@ import {
   groupMessagesByTurn,
   Turn,
   TurnSegment,
+  extractPlanFilePathFromMessage,
+  hasExitPlanMode,
 } from './session-reader.js';
 import {
   getMessageMapUuids,
@@ -64,6 +66,10 @@ export interface SyncOptions {
   stripEmptyTag?: boolean;
   /** Activity message ts per turn (for update-in-place). Key: userInput UUID, Value: Slack ts */
   activityMessages?: Map<string, string>;
+  /** Callback when plan file path detected */
+  onPlanFileDetected?: (path: string) => void;
+  /** Callback when ExitPlanMode detected with plan path */
+  onExitPlanMode?: (planFilePath: string | null) => Promise<void>;
 }
 
 /**
@@ -171,6 +177,8 @@ export async function syncMessagesFromOffset(
     charLimit = 500,
     stripEmptyTag = false,
     activityMessages,
+    onPlanFileDetected,
+    onExitPlanMode,
   } = options;
 
   // 1. Read messages from file
@@ -241,7 +249,7 @@ export async function syncMessagesFromOffset(
       turnActivity,
       alreadyPosted,
       messageMap,
-      { charLimit, stripEmptyTag, infiniteRetry, postTextMessage, activityMessages },
+      { charLimit, stripEmptyTag, infiniteRetry, postTextMessage, activityMessages, onPlanFileDetected, onExitPlanMode },
       isFinalTurn
     );
 
@@ -348,16 +356,43 @@ async function postTurn(
     infiniteRetry?: boolean;
     postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage, isLastMessage?: boolean) => Promise<boolean>;
     activityMessages?: Map<string, string>;
+    onPlanFileDetected?: (path: string) => void;
+    onExitPlanMode?: (planFilePath: string | null) => Promise<void>;
   },
   isFinalTurn: boolean = false
 ): Promise<{ success: boolean; postedUuids: string[] }> {
   const postedUuids: string[] = [];
-  const { charLimit, stripEmptyTag, infiniteRetry = false, postTextMessage, activityMessages } = options;
+  const { charLimit, stripEmptyTag, infiniteRetry = false, postTextMessage, activityMessages, onPlanFileDetected, onExitPlanMode } = options;
   const turnKey = turn.userInput.uuid;
   const activityLogKey = state.conversationKey;
   // messageTs for segment keys: use threadTs if in thread, conversationKey as fallback
   const segmentMessageTs = state.threadTs || state.conversationKey;
   const turnStartTime = new Date(turn.userInput.timestamp).getTime();
+
+  // Scan all messages in turn for plan file path and ExitPlanMode
+  let detectedPlanPath: string | null = null;
+  let exitPlanModeFound = false;
+
+  // Check activity messages in segments
+  for (const segment of turn.segments) {
+    for (const activityMsg of segment.activityMessages) {
+      const path = extractPlanFilePathFromMessage(activityMsg);
+      if (path) detectedPlanPath = path;
+      if (hasExitPlanMode(activityMsg)) exitPlanModeFound = true;
+    }
+  }
+
+  // Check trailing activity
+  for (const activityMsg of turn.trailingActivity) {
+    const path = extractPlanFilePathFromMessage(activityMsg);
+    if (path) detectedPlanPath = path;
+    if (hasExitPlanMode(activityMsg)) exitPlanModeFound = true;
+  }
+
+  // Notify callbacks
+  if (detectedPlanPath && onPlanFileDetected) {
+    onPlanFileDetected(detectedPlanPath);
+  }
 
   // 1. Post user input (skip if already posted - partial turn recovery)
   if (!alreadyPosted.has(turn.userInput.uuid)) {
@@ -532,6 +567,11 @@ async function postTurn(
         }
       }
     }
+  }
+
+  // Trigger ExitPlanMode callback after all posting is done
+  if (exitPlanModeFound && onExitPlanMode) {
+    await onExitPlanMode(detectedPlanPath);
   }
 
   return { success: true, postedUuids };
