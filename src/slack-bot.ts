@@ -3727,7 +3727,15 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
 
   // Get plan file path before clearing (from activeQuery's processingState)
   const activeQuery = activeQueries.get(conversationKey);
-  const planFilePath = activeQuery?.processingState?.planFilePath;
+  let planFilePath = activeQuery?.processingState?.planFilePath;
+
+  // Fallback: read from persisted session if activeQuery cleanup already happened
+  if (!planFilePath) {
+    const session = threadTs
+      ? getThreadSession(channelId, threadTs)
+      : getSession(channelId);
+    planFilePath = session?.planFilePath || null;
+  }
 
   // Clear session (set sessionId to null) and set bypass mode (thread-aware)
   if (threadTs) {

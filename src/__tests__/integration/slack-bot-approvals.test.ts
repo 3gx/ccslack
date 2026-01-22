@@ -326,6 +326,110 @@ describe('slack-bot approval handlers', () => {
         expect.anything()
       );
     });
+
+    it('option 1: should use planFilePath from session when activeQuery is gone (main channel)', async () => {
+      const option1Handler = registeredHandlers['action_^plan_clear_bypass_(.+)$'];
+      const mockClient = createMockSlackClient();
+
+      // Session has planFilePath (persisted during query)
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: '/Users/test/.claude/plans/my-plan.md',
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await option1Handler({
+        action: { action_id: 'plan_clear_bypass_C123' },
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      // Should use planFilePath from session fallback
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'Execute the plan at /Users/test/.claude/plans/my-plan.md',
+        expect.anything()
+      );
+    });
+
+    it('option 1: should use planFilePath from thread session when activeQuery is gone (thread)', async () => {
+      const option1Handler = registeredHandlers['action_^plan_clear_bypass_(.+)$'];
+      const mockClient = createMockSlackClient();
+
+      // Main session (checked first for workingDir)
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: null, // Main session has no planFilePath
+      });
+
+      // Thread session has planFilePath
+      vi.mocked(getThreadSession).mockReturnValue({
+        sessionId: 'thread-session',
+        forkedFrom: 'main-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: '/Users/test/.claude/plans/thread-plan.md',
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          yield { type: 'result', result: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Thread conversation key format: C123_threadTs
+      await option1Handler({
+        action: { action_id: 'plan_clear_bypass_C123_1234567890.123456' },
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U123' },
+        },
+        client: mockClient,
+      });
+
+      // Should use planFilePath from thread session fallback
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'Execute the plan at /Users/test/.claude/plans/thread-plan.md',
+        expect.anything()
+      );
+    });
   });
 
   describe('tool approval handlers', () => {
