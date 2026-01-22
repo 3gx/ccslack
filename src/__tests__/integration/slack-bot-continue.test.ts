@@ -43,6 +43,12 @@ vi.mock('../../session-manager.js', () => ({
   getMessageMapUuids: vi.fn().mockReturnValue(new Set()),
   clearSyncedMessageUuids: vi.fn(),
   isSlackOriginatedUserUuid: vi.fn().mockReturnValue(false),  // Default: not Slack-originated
+  // Segment activity log functions
+  getSegmentActivityLog: vi.fn().mockReturnValue(null),
+  saveSegmentActivityLog: vi.fn(),
+  updateSegmentActivityLog: vi.fn(),
+  generateSegmentKey: vi.fn((channelId, messageTs) => `${channelId}_${messageTs}_seg_mock-uuid`),
+  clearSegmentActivityLogs: vi.fn(),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({

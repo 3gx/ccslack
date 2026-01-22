@@ -2211,6 +2211,8 @@ async function handleMessage(params: {
   // Post single combined message (activity log + status panel)
   // Activity log at top, status panel with abort button at bottom
   let statusMsgTs: string | undefined;
+  // Start segment before initial post so View Log works immediately
+  startNewSegment();
   try {
     const combinedResult = await withSlackRetry(async () =>
       client.chat.postMessage({
@@ -2225,6 +2227,7 @@ async function handleMessage(params: {
           elapsedMs: 0,
           conversationKey,
           spinner: SPINNER_FRAMES[0],  // Show spinner immediately
+          segmentKey: processingState.currentSegmentKey || undefined,
         }),
         text: 'Claude is starting...',
       })
@@ -2656,6 +2659,13 @@ async function handleMessage(params: {
           try {
             // Only show trailing activity (from lastPostedActivityIndex onwards)
             const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
+
+            // Save segment activity log so View Log shows current state during processing
+            const segmentKey = processingState.currentSegmentKey;
+            if (segmentKey) {
+              saveSegmentActivityLog(segmentKey, trailingActivity);
+            }
+
             await withSlackRetry(
               () =>
                 client.chat.update({
@@ -2673,6 +2683,7 @@ async function handleMessage(params: {
                     conversationKey,
                     spinner,
                     rateLimitHits: processingState.rateLimitHits,
+                    segmentKey: processingState.currentSegmentKey || undefined,
                   }),
                   text: 'Claude is working...',
                 }),
@@ -3256,6 +3267,7 @@ async function handleMessage(params: {
                 elapsedMs: Date.now() - processingState.startTime,
                 conversationKey,
                 errorMessage: error.message,
+                segmentKey: processingState.currentSegmentKey || undefined,
               }),
               text: `Error: ${error.message}`,
             });
@@ -3479,6 +3491,7 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
               toolsCompleted: active.processingState.toolsCompleted,
               elapsedMs,
               conversationKey,
+              segmentKey: active.processingState.currentSegmentKey || undefined,
             }),
             text: `${active.model || 'Claude'} | ${active.mode} | aborted`,
           });

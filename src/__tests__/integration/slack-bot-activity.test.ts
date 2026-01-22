@@ -74,7 +74,7 @@ vi.mock('fs', () => ({
 import { createMockSlackClient } from './slack-bot-setup.js';
 
 // Import mocked modules
-import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog, getSegmentActivityLog } from '../../session-manager.js';
+import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog, getSegmentActivityLog, saveSegmentActivityLog } from '../../session-manager.js';
 import { isSessionActiveInTerminal } from '../../concurrent-check.js';
 import { startClaudeQuery } from '../../claude-client.js';
 import fs from 'fs';
@@ -428,6 +428,52 @@ describe('slack-bot activity handlers', () => {
           content: expect.stringMatching(/TOOL COMPLETE: Edit \(1500ms\)/),
         })
       );
+    });
+  });
+
+  describe('activity log updates during processing', () => {
+    it('should save segment activity log during periodic updates', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session',
+        workingDir: '/test/dir',
+        mode: 'default',
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock SDK to emit events over time (simulating processing with periodic updates)
+      let resolveThinking: () => void;
+      const thinkingPromise = new Promise<void>(resolve => { resolveThinking = resolve; });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+          // Wait to allow periodic update to fire
+          await new Promise(resolve => setTimeout(resolve, 100));
+          yield { type: 'result', result: 'Done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+        client: mockClient,
+      });
+
+      // Verify saveSegmentActivityLog was called (at least once during initial post and updates)
+      expect(saveSegmentActivityLog).toHaveBeenCalled();
+
+      // Verify it was called with a segment key pattern
+      const calls = vi.mocked(saveSegmentActivityLog).mock.calls;
+      const segmentKeyCalls = calls.filter(
+        (call: any[]) => typeof call[0] === 'string' && call[0].includes('_seg_')
+      );
+      expect(segmentKeyCalls.length).toBeGreaterThan(0);
     });
   });
 });

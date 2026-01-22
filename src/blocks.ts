@@ -1514,6 +1514,7 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
 export interface CombinedStatusParams extends StatusPanelParams {
   activityLog: ActivityEntry[];
   inProgress: boolean;
+  segmentKey?: string;  // Real segment key for View Log button (required for active queries)
 }
 
 /**
@@ -1545,6 +1546,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     spinner,
     rateLimitHits,
     customStatus,
+    segmentKey,
   } = params;
 
   const blocks: Block[] = [];
@@ -1600,6 +1602,8 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     });
 
     // 5. View Log (for current segment) + Abort
+    // Use segmentKey for View Log to match the stored activity log key
+    const viewLogKey = segmentKey || conversationKey;
     blocks.push({
       type: 'actions',
       block_id: `status_panel_${conversationKey}`,
@@ -1607,8 +1611,8 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
         {
           type: 'button',
           text: { type: 'plain_text', text: 'View Log' },
-          action_id: `view_segment_log_${conversationKey}`,
-          value: conversationKey,
+          action_id: `view_segment_log_${viewLogKey}`,
+          value: viewLogKey,
         },
         {
           type: 'button',

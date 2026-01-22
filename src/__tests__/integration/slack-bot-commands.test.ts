@@ -39,6 +39,10 @@ vi.mock('../../session-manager.js', () => ({
   getActivityLog: vi.fn().mockResolvedValue(null),
   clearSyncedMessageUuids: vi.fn(),
   // Segment activity log functions
+  getSegmentActivityLog: vi.fn().mockReturnValue(null),
+  saveSegmentActivityLog: vi.fn(),
+  updateSegmentActivityLog: vi.fn(),
+  generateSegmentKey: vi.fn((channelId, messageTs) => `${channelId}_${messageTs}_seg_mock-uuid`),
   clearSegmentActivityLogs: vi.fn(),
 }));
 

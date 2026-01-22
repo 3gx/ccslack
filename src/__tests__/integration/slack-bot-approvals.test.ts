@@ -37,6 +37,11 @@ vi.mock('../../session-manager.js', () => ({
   deleteSession: vi.fn(),
   saveActivityLog: vi.fn().mockResolvedValue(undefined),
   getActivityLog: vi.fn().mockResolvedValue(null),
+  getSegmentActivityLog: vi.fn().mockReturnValue(null),
+  saveSegmentActivityLog: vi.fn(),
+  updateSegmentActivityLog: vi.fn(),
+  generateSegmentKey: vi.fn((channelId, messageTs) => `${channelId}_${messageTs}_seg_mock-uuid`),
+  clearSegmentActivityLogs: vi.fn(),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({
