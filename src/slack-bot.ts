@@ -1646,7 +1646,9 @@ async function showPlanApprovalUI(params: {
         client.chat.update({
           channel: channelId,
           ts: statusMsgTs,
-          blocks: buildStatusPanelBlocks({
+          blocks: buildCombinedStatusBlocks({
+            activityLog: processingState.activityLog,
+            inProgress: false,
             status: 'complete',
             mode: session.mode,
             model: processingState.model,
