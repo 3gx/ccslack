@@ -31,6 +31,7 @@ import {
   buildWatchingStatusSection,
   buildTopStatusLine,
   buildBottomStatsLine,
+  buildForkToChannelModalView,
 } from '../../blocks.js';
 import type { ModelInfo } from '../../model-cache.js';
 import type { LastUsage } from '../../session-manager.js';
@@ -3581,6 +3582,69 @@ describe('blocks', () => {
 
       expect(block1.elements![0].text.text).toContain('(2s)');
       expect(block2.elements![0].text.text).toContain('(10s)');
+    });
+  });
+
+  describe('buildForkToChannelModalView', () => {
+    it('should have callback_id fork_to_channel_modal', () => {
+      const view = buildForkToChannelModalView({
+        sourceChannelId: 'C123',
+        sourceMessageTs: '1234567890.123456',
+        conversationKey: 'C123',
+      });
+
+      expect(view.callback_id).toBe('fork_to_channel_modal');
+    });
+
+    it('should store source info in private_metadata', () => {
+      const view = buildForkToChannelModalView({
+        sourceChannelId: 'C123',
+        sourceMessageTs: '1234567890.123456',
+        conversationKey: 'C123_thread',
+        threadTs: '1234567890.111111',
+      });
+
+      const metadata = JSON.parse(view.private_metadata);
+      expect(metadata.sourceChannelId).toBe('C123');
+      expect(metadata.sourceMessageTs).toBe('1234567890.123456');
+      expect(metadata.conversationKey).toBe('C123_thread');
+      expect(metadata.threadTs).toBe('1234567890.111111');
+    });
+
+    it('should have channel name input with 80 char max', () => {
+      const view = buildForkToChannelModalView({
+        sourceChannelId: 'C123',
+        sourceMessageTs: '1234567890.123456',
+        conversationKey: 'C123',
+      });
+
+      const inputBlock = view.blocks.find((b: any) => b.block_id === 'channel_name_block');
+      expect(inputBlock).toBeDefined();
+      expect(inputBlock.element.type).toBe('plain_text_input');
+      expect(inputBlock.element.action_id).toBe('channel_name_input');
+      expect(inputBlock.element.max_length).toBe(80);
+    });
+
+    it('should have submit and close buttons', () => {
+      const view = buildForkToChannelModalView({
+        sourceChannelId: 'C123',
+        sourceMessageTs: '1234567890.123456',
+        conversationKey: 'C123',
+      });
+
+      expect(view.submit.text).toBe('Create Channel');
+      expect(view.close.text).toBe('Cancel');
+    });
+
+    it('should have modal type and title', () => {
+      const view = buildForkToChannelModalView({
+        sourceChannelId: 'C123',
+        sourceMessageTs: '1234567890.123456',
+        conversationKey: 'C123',
+      });
+
+      expect(view.type).toBe('modal');
+      expect(view.title.text).toBe('Fork to New Channel');
     });
   });
 

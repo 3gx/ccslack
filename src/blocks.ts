@@ -1185,6 +1185,70 @@ export function buildForkAnchorBlocks(params: ForkAnchorBlockParams): Block[] {
 }
 
 // ============================================================================
+// Fork to Channel Modal
+// ============================================================================
+
+export interface ForkToChannelModalMetadata {
+  sourceChannelId: string;
+  sourceMessageTs: string;
+  conversationKey: string;
+  threadTs?: string;
+  sdkMessageId?: string;
+  sessionId?: string;
+}
+
+/**
+ * Build modal view for "Fork here" → new channel creation.
+ * User enters channel name, modal creates channel with forked session.
+ */
+export function buildForkToChannelModalView(params: {
+  sourceChannelId: string;
+  sourceMessageTs: string;
+  conversationKey: string;
+  threadTs?: string;
+  sdkMessageId?: string;
+  sessionId?: string;
+  suggestedChannelName?: string;
+}): any {
+  const inputElement: any = {
+    type: 'plain_text_input',
+    action_id: 'channel_name_input',
+    placeholder: { type: 'plain_text', text: 'my-fork-channel' },
+    max_length: 80,
+  };
+
+  // Prefill with suggested name if provided
+  if (params.suggestedChannelName) {
+    inputElement.initial_value = params.suggestedChannelName;
+  }
+
+  return {
+    type: 'modal',
+    callback_id: 'fork_to_channel_modal',
+    private_metadata: JSON.stringify(params),
+    title: { type: 'plain_text', text: 'Fork to New Channel' },
+    submit: { type: 'plain_text', text: 'Create Channel' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'Create a new channel with a forked conversation state from this point.',
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'channel_name_block',
+        element: inputElement,
+        label: { type: 'plain_text', text: 'Channel Name' },
+        hint: { type: 'plain_text', text: 'Lowercase letters, numbers, hyphens, and underscores only' },
+      },
+    ],
+  };
+}
+
+// ============================================================================
 // Path Configuration Blocks
 // ============================================================================
 
@@ -1517,7 +1581,7 @@ export interface CombinedStatusParams extends StatusPanelParams {
   sessionId?: string;  // Current session ID (n/a initially)
   isNewSession?: boolean;  // Show [new] prefix in TOP line
   isFinalSegment?: boolean;  // Show Fork button on completion
-  forkInfo?: { threadTs?: string; conversationKey: string };  // For Fork button
+  forkInfo?: { threadTs?: string; conversationKey: string; sdkMessageId?: string; sessionId?: string };  // For Fork button
   hasFailedUpload?: boolean;  // Show retry button when upload failed
   retryUploadInfo?: {
     activityLogKey: string;   // Key for getActivityLog() - NOT conversationKey
@@ -1819,7 +1883,11 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
           emoji: true,
         },
         action_id: `fork_here_${forkInfo.conversationKey}`,
-        value: JSON.stringify({ threadTs: forkInfo.threadTs }),
+        value: JSON.stringify({
+          threadTs: forkInfo.threadTs,
+          sdkMessageId: forkInfo.sdkMessageId,
+          sessionId: forkInfo.sessionId,
+        }),
       });
     }
 
@@ -2016,7 +2084,7 @@ export function buildLiveActivityBlocks(
   segmentKey: string,
   inProgress: boolean = true,
   isFinalSegment: boolean = false,
-  forkInfo?: { threadTs?: string; conversationKey: string }
+  forkInfo?: { threadTs?: string; conversationKey: string; sdkMessageId?: string; sessionId?: string }
 ): Block[] {
   const activityText = buildActivityLogText(activityEntries, inProgress, ACTIVITY_LOG_MAX_CHARS);
 
@@ -2040,7 +2108,11 @@ export function buildLiveActivityBlocks(
         emoji: true,
       },
       action_id: `fork_here_${forkInfo.conversationKey}`,
-      value: JSON.stringify({ threadTs: forkInfo.threadTs }),
+      value: JSON.stringify({
+        threadTs: forkInfo.threadTs,
+        sdkMessageId: forkInfo.sdkMessageId,
+        sessionId: forkInfo.sessionId,
+      }),
     });
   }
 

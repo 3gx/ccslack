@@ -49,6 +49,7 @@ import {
   buildSdkQuestionBlocks,
   buildAnsweredBlocks,
   buildWatchingStatusSection,
+  buildForkToChannelModalView,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -64,7 +65,7 @@ import { parseCommand, UPDATE_RATE_DEFAULT, MESSAGE_SIZE_DEFAULT } from './comma
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { processSlackFiles, SlackFile } from './file-handler.js';
 import { buildMessageContent, ContentBlock } from './content-builder.js';
-import { withSlackRetry } from './retry.js';
+import { withSlackRetry, withRetry } from './retry.js';
 import {
   startWatching,
   stopWatching,
@@ -1261,6 +1262,325 @@ async function createForkFromMessage(params: {
   };
 }
 
+// Create a fork to a new channel (point-in-time fork to separate channel)
+// Used by "Fork here" modal submission
+async function createForkToChannel(params: {
+  channelName: string;
+  sourceChannelId: string;
+  sourceMessageTs: string;
+  threadTs?: string;
+  conversationKey: string;
+  userId: string;
+  client: any;
+  sdkMessageId?: string;
+  sessionId?: string;
+}): Promise<{ success: boolean; error?: string; newChannelId?: string }> {
+  const { channelName, sourceChannelId, sourceMessageTs, threadTs, userId, client } = params;
+
+  // 1. Use fork point from button value (no lookup needed)
+  if (!params.sdkMessageId || !params.sessionId) {
+    return { success: false, error: 'Missing fork point info' };
+  }
+  const forkPoint = { messageId: params.sdkMessageId, sessionId: params.sessionId };
+  console.log(`[ForkToChannel] Fork point: ${forkPoint.messageId} in session ${forkPoint.sessionId}`);
+
+  // 2. Create channel (let Slack validate name, show error to user if rejected)
+  let createResult: any;
+  try {
+    createResult = await withSlackRetry(() =>
+      client.conversations.create({ name: channelName, is_private: false })
+    );
+  } catch (error: any) {
+    // Slack returns specific error codes - show them to user
+    const errorCode = error?.data?.error || error?.message || 'unknown_error';
+    const errorMessages: Record<string, string> = {
+      name_taken: `Channel "${channelName}" already exists`,
+      invalid_name_specials: 'Use only lowercase letters, numbers, hyphens, underscores',
+      invalid_name_maxlength: 'Channel name must be 80 characters or less',
+      invalid_name: 'Invalid channel name',
+    };
+    return { success: false, error: errorMessages[errorCode] || errorCode };
+  }
+
+  if (!createResult.ok) {
+    const errorCode = createResult.error || 'unknown_error';
+    const errorMessages: Record<string, string> = {
+      name_taken: `Channel "${channelName}" already exists`,
+      invalid_name_specials: 'Use only lowercase letters, numbers, hyphens, underscores',
+      invalid_name_maxlength: 'Channel name must be 80 characters or less',
+      invalid_name: 'Invalid channel name',
+    };
+    return { success: false, error: errorMessages[errorCode] || errorCode };
+  }
+
+  const newChannelId = createResult.channel.id;
+  const actualName = createResult.channel.name;
+
+  // 3. Invite user to the new channel (bot is auto-added, user is not)
+  try {
+    await withSlackRetry(() =>
+      client.conversations.invite({
+        channel: newChannelId,
+        users: userId,
+      })
+    );
+  } catch (error: any) {
+    // If invite fails, log but continue - channel exists, user can join manually
+    console.error('[ForkToChannel] Failed to invite user to channel:', error?.data?.error || error);
+  }
+
+  // 4. Fork SDK session with null prompt (uses synthetic message, like CLI --fork-session)
+  // Use retry logic to handle transient SDK errors
+  let forkedSessionId: string | null = null;
+  try {
+    forkedSessionId = await withRetry(
+      async () => {
+        const forkQuery = startClaudeQuery(null, {
+          sessionId: forkPoint.sessionId,
+          forkSession: true,
+          resumeSessionAt: forkPoint.messageId,
+          workingDir: getSession(sourceChannelId)?.workingDir ?? process.cwd(),
+        });
+
+        for await (const event of forkQuery) {
+          if (event.type === 'system' && (event as any).subtype === 'init') {
+            return (event as any).session_id as string;
+          }
+        }
+        throw new Error('No session ID received from fork');
+      },
+      {
+        maxAttempts: 3,
+        baseDelayMs: 1000,
+        shouldRetry: () => true,  // Always retry SDK process errors
+        onRetry: (err, attempt, delay) => {
+          console.log(`[ForkToChannel] Fork attempt ${attempt} failed, retrying in ${delay}ms:`, err);
+        },
+      }
+    );
+  } catch (err) {
+    console.error('[ForkToChannel] SDK fork failed after retries:', err);
+    return { success: false, error: 'Failed to fork session' };
+  }
+
+  // 4. Get permalink to source message
+  const forkLink = await getMessagePermalink(client, sourceChannelId, sourceMessageTs);
+
+  // 5. Post first message in new channel with sessionId
+  await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: newChannelId,
+      text: `🔀 This is a fork of ${forkLink}`,
+      blocks: [{
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `🔀 Point-in-time fork from <${forkLink}|this message>\n\nSession: \`${forkedSessionId}\``,
+        },
+      }],
+    })
+  );
+
+  // 6. Create session for new channel with sessionId already populated
+  const mainSession = getSession(sourceChannelId);
+  await saveSession(newChannelId, {
+    sessionId: forkedSessionId,  // Already have it!
+    workingDir: mainSession?.workingDir ?? process.cwd(),
+    mode: mainSession?.mode ?? 'default',
+    model: mainSession?.model,
+    createdAt: Date.now(),
+    lastActiveAt: Date.now(),
+    pathConfigured: mainSession?.pathConfigured ?? false,
+    configuredPath: mainSession?.configuredPath ?? null,
+    configuredBy: mainSession?.configuredBy ?? null,
+    configuredAt: mainSession?.configuredAt ?? null,
+    maxThinkingTokens: mainSession?.maxThinkingTokens,
+    updateRateSeconds: mainSession?.updateRateSeconds,
+    threadCharLimit: mainSession?.threadCharLimit,
+    stripEmptyTag: mainSession?.stripEmptyTag,
+    // Fork tracking (for restoring Fork here button if this channel is deleted)
+    forkedFromChannelId: sourceChannelId,
+    forkedFromMessageTs: sourceMessageTs,
+    forkedFromThreadTs: threadTs,
+    forkedFromSdkMessageId: params.sdkMessageId,
+    forkedFromSessionId: params.sessionId,
+    forkedFromConversationKey: params.conversationKey,
+  });
+
+  // 7. Update source message - replace "Fork here" with channel link + Refresh fork button
+  await updateSourceMessageWithJumpLink(client, sourceChannelId, sourceMessageTs, newChannelId, actualName, {
+    threadTs,
+    sdkMessageId: params.sdkMessageId,
+    sessionId: params.sessionId,
+    conversationKey: params.conversationKey,
+  });
+
+  return { success: true, newChannelId };
+}
+
+// Update source message: replace "Fork here" button with fork link + "Refresh fork" button
+// Uses mutex to prevent race condition if multiple forks happen simultaneously
+async function updateSourceMessageWithJumpLink(
+  client: any,
+  channelId: string,
+  messageTs: string,
+  forkChannelId: string,
+  forkChannelName: string,
+  forkInfo: {
+    threadTs?: string;
+    sdkMessageId?: string;
+    sessionId?: string;
+    conversationKey?: string;
+  }
+): Promise<void> {
+  // Use mutex to prevent race condition if multiple forks happen simultaneously
+  const mutexKey = `${channelId}_${messageTs}`;
+  const mutex = getUpdateMutex(mutexKey);
+
+  await mutex.runExclusive(async () => {
+    const historyResult = await withSlackRetry(() =>
+      client.conversations.history({
+        channel: channelId,
+        latest: messageTs,
+        inclusive: true,
+        limit: 1,
+      })
+    ) as { messages?: any[] };
+
+    const msg = historyResult.messages?.[0];
+    if (!msg?.blocks) return;
+
+    const updatedBlocks: any[] = [];
+    for (const block of msg.blocks) {
+      if (block.type === 'actions') {
+        // Filter out fork_here button, keep other buttons (like View Log)
+        const remainingElements = block.elements.filter(
+          (el: any) => !el.action_id?.startsWith('fork_here_')
+        );
+        // Add context block with channel mention link BEFORE actions
+        // Channel mention <#ID|name> navigates within Slack app (no browser)
+        updatedBlocks.push({
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: `↗️ Fork: <#${forkChannelId}|${forkChannelName}>`,
+          }],
+        });
+        // Add "Refresh fork" button to restore Fork here if forked channel is deleted
+        const refreshForkButton = {
+          type: 'button',
+          text: { type: 'plain_text', text: '🔄 Refresh fork', emoji: true },
+          action_id: `refresh_fork_${forkInfo.conversationKey || channelId}`,
+          value: JSON.stringify({
+            forkChannelId,
+            threadTs: forkInfo.threadTs,
+            sdkMessageId: forkInfo.sdkMessageId,
+            sessionId: forkInfo.sessionId,
+            conversationKey: forkInfo.conversationKey,
+          }),
+        };
+        remainingElements.push(refreshForkButton);
+        updatedBlocks.push({ ...block, elements: remainingElements });
+      } else {
+        updatedBlocks.push(block);
+      }
+    }
+
+    await withSlackRetry(() =>
+      client.chat.update({ channel: channelId, ts: messageTs, blocks: updatedBlocks, text: msg.text })
+    );
+  });
+}
+
+// Restore Fork here button when a forked channel is deleted
+// Replaces the "Fork: #deleted-channel" context block with a Fork here button
+async function restoreForkHereButton(
+  client: any,
+  forkInfo: {
+    sourceChannelId: string;
+    sourceMessageTs: string;
+    threadTs?: string;
+    sdkMessageId?: string;
+    sessionId?: string;
+    conversationKey?: string;
+  }
+): Promise<void> {
+  const { sourceChannelId, sourceMessageTs, threadTs, sdkMessageId, sessionId, conversationKey } = forkInfo;
+
+  // Can't restore button without fork point info
+  if (!sdkMessageId || !sessionId || !conversationKey) {
+    console.log('[RestoreForkHere] Missing fork point info, cannot restore button');
+    return;
+  }
+
+  // Use mutex to prevent race condition
+  const mutexKey = `${sourceChannelId}_${sourceMessageTs}`;
+  const mutex = getUpdateMutex(mutexKey);
+
+  await mutex.runExclusive(async () => {
+    const historyResult = await withSlackRetry(() =>
+      client.conversations.history({
+        channel: sourceChannelId,
+        latest: sourceMessageTs,
+        inclusive: true,
+        limit: 1,
+      })
+    ) as { messages?: any[] };
+
+    const msg = historyResult.messages?.[0];
+    if (!msg?.blocks) return;
+
+    // Find and remove fork context block, filter refresh_fork from actions
+    const updatedBlocks: any[] = [];
+    let actionsBlockIndex = -1;
+
+    for (let i = 0; i < msg.blocks.length; i++) {
+      const block = msg.blocks[i];
+
+      // Skip fork context blocks (they contain "Fork:" text)
+      if (block.type === 'context' &&
+          block.elements?.[0]?.text?.includes('Fork:')) {
+        continue;
+      }
+
+      // Filter out refresh_fork button from actions block
+      if (block.type === 'actions') {
+        actionsBlockIndex = updatedBlocks.length;
+        const filteredElements = block.elements.filter(
+          (el: any) => !el.action_id?.startsWith('refresh_fork_')
+        );
+        updatedBlocks.push({ ...block, elements: filteredElements });
+        continue;
+      }
+
+      updatedBlocks.push(block);
+    }
+
+    // Create Fork here button
+    const forkHereButton = {
+      type: 'button',
+      text: { type: 'plain_text', text: ':twisted_rightwards_arrows: Fork here', emoji: true },
+      action_id: `fork_here_${conversationKey}`,
+      value: JSON.stringify({ threadTs, sdkMessageId, sessionId }),
+    };
+
+    // Add button to existing actions block, or create new one
+    if (actionsBlockIndex >= 0) {
+      updatedBlocks[actionsBlockIndex].elements.push(forkHereButton);
+    } else {
+      // No actions block - add one at the end
+      updatedBlocks.push({
+        type: 'actions',
+        elements: [forkHereButton],
+      });
+    }
+
+    await withSlackRetry(() =>
+      client.chat.update({ channel: sourceChannelId, ts: sourceMessageTs, blocks: updatedBlocks, text: msg.text })
+    );
+  });
+}
+
 // Start reminder interval for tool approval (matches MCP ask_user behavior)
 function startToolApprovalReminder(
   approvalId: string,
@@ -1568,8 +1888,9 @@ app.message(async ({ message, client }) => {
  * Handle channel deletion - clean up all sessions and SDK files
  *
  * When a channel is deleted:
- * 1. Delete main session + all thread sessions from sessions.json
- * 2. Delete all corresponding SDK .jsonl files
+ * 1. If this was a forked channel, restore Fork here button on source message
+ * 2. Delete main session + all thread sessions from sessions.json
+ * 3. Delete all corresponding SDK .jsonl files
  *
  * Terminal forks (created via --fork-session) are NOT deleted
  * as they may be user's personal sessions.
@@ -3087,7 +3408,12 @@ async function handleMessage(params: {
               sessionId: newSessionId || session.sessionId || undefined,
               isNewSession: newSessionId !== null && session.sessionId === null,
               isFinalSegment: isQueryComplete,  // Show Fork button on successful completion
-              forkInfo: { threadTs, conversationKey },
+              forkInfo: {
+                threadTs,
+                conversationKey,
+                sdkMessageId: currentAssistantUuid || undefined,
+                sessionId: newSessionId || session.sessionId || undefined,
+              },
               hasFailedUpload: processingState.uploadFailed,
               retryUploadInfo: processingState.uploadFailed
                 ? {
@@ -3673,6 +3999,40 @@ app.view(/^freetext_modal_(.+)$/, async ({ ack, body, view, client }) => {
     console.log(`Wrote answer file: ${answerFile}`);
   } catch (error) {
     console.error('Error writing answer file:', error);
+  }
+});
+
+// Handle "Fork to New Channel" modal submission
+app.view('fork_to_channel_modal', async ({ ack, body, view, client }) => {
+  const channelName = (view.state.values.channel_name_block?.channel_name_input?.value || '').trim();
+
+  // Basic validation - let Slack validate the rest
+  if (channelName.length === 0) {
+    await ack({
+      response_action: 'errors',
+      errors: { channel_name_block: 'Channel name is required' },
+    });
+    return;
+  }
+
+  await ack(); // Close modal
+
+  const metadata = JSON.parse(view.private_metadata || '{}');
+  const result = await createForkToChannel({
+    channelName,
+    ...metadata,
+    userId: body.user?.id || 'unknown',
+    client: client as any,
+  });
+
+  if (!result.success) {
+    await withSlackRetry(() =>
+      (client as any).chat.postMessage({
+        channel: metadata.sourceChannelId,
+        thread_ts: metadata.threadTs,
+        text: `❌ Failed to create fork channel: ${result.error}`,
+      })
+    );
   }
 });
 
@@ -4553,7 +4913,7 @@ app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) =>
   }
 });
 
-// Handle "Fork here" button click - creates point-in-time fork from a specific message
+// Handle "Fork here" button click - opens modal for new channel creation
 app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
   await ack();
 
@@ -4565,14 +4925,16 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
   // Get messageTs from the message the button is on (Slack provides this)
   const bodyWithMessage = body as any;
   const messageTs = bodyWithMessage.message?.ts;
-  if (!messageTs) {
-    console.error('[ForkHere] Could not get message timestamp from body');
+  const triggerId = bodyWithMessage.trigger_id;
+
+  if (!messageTs || !triggerId) {
+    console.error('[ForkHere] Could not get message timestamp or trigger_id from body');
     return;
   }
 
-  // Parse { threadTs } from action.value (threadTs may be undefined for main channel)
+  // Parse { threadTs, sdkMessageId, sessionId } from action.value
   const valueStr = 'value' in action ? (action.value || '{}') : '{}';
-  let forkInfo: { threadTs?: string };
+  let forkInfo: { threadTs?: string; sdkMessageId?: string; sessionId?: string };
   try {
     forkInfo = JSON.parse(valueStr);
   } catch {
@@ -4580,33 +4942,122 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
     return;
   }
 
-  const { threadTs } = forkInfo;  // May be undefined for main channel
-
   // Derive channelId from conversationKey (format: channelId or channelId_threadTs)
   const channelId = conversationKey.split('_')[0];
-  const userId = body.user?.id || 'unknown';
 
-  // Create the point-in-time fork
-  const result = await createForkFromMessage({
-    channelId,
-    sourceThreadTs: threadTs,
-    forkPointMessageTs: messageTs,
-    client: client as any,
-    userId,
-  });
+  // Get current channel name and find next available fork name
+  let suggestedName = '';
+  try {
+    const channelInfo = await (client as any).conversations.info({ channel: channelId });
+    if (channelInfo.ok && channelInfo.channel?.name) {
+      const baseForkName = `${channelInfo.channel.name}-fork`;
 
-  if (!result.success) {
-    // Post error message in thread
+      // List channels to find existing forks with this pattern
+      const existingNames = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const listResult = await (client as any).conversations.list({
+          types: 'public_channel,private_channel',
+          limit: 200,
+          cursor,
+        });
+        if (listResult.ok && listResult.channels) {
+          for (const ch of listResult.channels) {
+            if (ch.name?.startsWith(baseForkName)) {
+              existingNames.add(ch.name);
+            }
+          }
+        }
+        cursor = listResult.response_metadata?.next_cursor;
+      } while (cursor);
+
+      // Find next available name
+      if (!existingNames.has(baseForkName)) {
+        suggestedName = baseForkName;
+      } else {
+        // Find next available number
+        let num = 1;
+        while (existingNames.has(`${baseForkName}-${num}`)) {
+          num++;
+        }
+        suggestedName = `${baseForkName}-${num}`;
+      }
+    }
+  } catch (error) {
+    // Ignore - just won't prefill
+    console.log('[ForkHere] Could not get channel name for prefill:', error);
+  }
+
+  // Open modal for channel name input
+  try {
+    await (client as any).views.open({
+      trigger_id: triggerId,
+      view: buildForkToChannelModalView({
+        sourceChannelId: channelId,
+        sourceMessageTs: messageTs,
+        conversationKey,
+        threadTs: forkInfo.threadTs,
+        sdkMessageId: forkInfo.sdkMessageId,
+        sessionId: forkInfo.sessionId,
+        suggestedChannelName: suggestedName,
+      }),
+    });
+  } catch (error) {
+    console.error('[ForkHere] Error opening modal:', error);
+  }
+});
+
+// Handle "Refresh fork" button click - restore Fork here if forked channel was deleted
+app.action(/^refresh_fork_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const bodyWithMessage = body as any;
+  const channelId = bodyWithMessage.channel?.id;
+  const messageTs = bodyWithMessage.message?.ts;
+
+  if (!channelId || !messageTs) {
+    console.error('[RefreshFork] Missing channel or message info');
+    return;
+  }
+
+  // Parse fork info from button value
+  const valueStr = 'value' in action ? (action.value || '{}') : '{}';
+  let forkInfo: {
+    forkChannelId?: string;
+    threadTs?: string;
+    sdkMessageId?: string;
+    sessionId?: string;
+    conversationKey?: string;
+  };
+  try {
+    forkInfo = JSON.parse(valueStr);
+  } catch {
+    console.error('[RefreshFork] Invalid button value');
+    return;
+  }
+
+  // Check if forked channel still exists
+  if (forkInfo.forkChannelId) {
     try {
-      await (client as any).chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: `❌ ${result.error}`,
-      });
-    } catch (error) {
-      console.error('[ForkHere] Error posting error message:', error);
+      await (client as any).conversations.info({ channel: forkInfo.forkChannelId });
+      // Channel exists, do nothing
+      console.log(`[RefreshFork] Channel ${forkInfo.forkChannelId} still exists, no action needed`);
+      return;
+    } catch (error: any) {
+      // Channel doesn't exist (deleted) - proceed to restore Fork here
+      console.log(`[RefreshFork] Channel ${forkInfo.forkChannelId} not found, restoring Fork here button`);
     }
   }
+
+  // Restore Fork here button
+  await restoreForkHereButton(client, {
+    sourceChannelId: channelId,
+    sourceMessageTs: messageTs,
+    threadTs: forkInfo.threadTs,
+    sdkMessageId: forkInfo.sdkMessageId,
+    sessionId: forkInfo.sessionId,
+    conversationKey: forkInfo.conversationKey,
+  });
 });
 
 // Handle "Generate Output" retry button click when upload failed

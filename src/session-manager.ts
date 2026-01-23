@@ -65,6 +65,19 @@ export interface Session {
   syncedMessageUuids?: string[];
   // UUIDs of user messages that originated from Slack bot (to skip in /ff)
   slackOriginatedUserUuids?: string[];
+  // Channel-to-channel fork tracking (for "Fork here" → new channel)
+  /** Channel ID this session was forked from (for channel-to-channel forks) */
+  forkedFromChannelId?: string;
+  /** Message timestamp in source channel where fork originated */
+  forkedFromMessageTs?: string;
+  /** Thread timestamp in source channel (undefined for main channel forks) */
+  forkedFromThreadTs?: string;
+  /** SDK message ID at fork point (needed to restore Fork here button) */
+  forkedFromSdkMessageId?: string;
+  /** Session ID containing fork point (needed to restore Fork here button) */
+  forkedFromSessionId?: string;
+  /** Conversation key of source (needed to restore Fork here button) */
+  forkedFromConversationKey?: string;
 }
 
 /**

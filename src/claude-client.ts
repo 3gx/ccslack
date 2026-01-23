@@ -47,10 +47,10 @@ export interface ClaudeQuery extends AsyncGenerator<SDKMessage, void, unknown> {
  * Start a Claude query and return the Query object.
  * The Query object can be iterated for messages and has an interrupt() method.
  *
- * @param prompt - Either a simple string or ContentBlock[] for multi-modal messages (with images)
+ * @param prompt - Either a simple string, ContentBlock[] for multi-modal messages, or null for fork-only (no new message)
  */
 export function startClaudeQuery(
-  prompt: string | ContentBlock[],
+  prompt: string | ContentBlock[] | null,
   options: StreamOptions
 ): ClaudeQuery {
   // Pass permission mode directly to SDK (we use SDK mode names)
@@ -136,6 +136,28 @@ export function startClaudeQuery(
   if (options.canUseTool) {
     queryOptions.canUseTool = options.canUseTool;
     console.log('canUseTool callback configured for manual approval');
+  }
+
+  // Handle fork-only - API rejects empty and whitespace-only text, so use minimal real content
+  // marked as synthetic to indicate this is a fork operation, not a real user message
+  if (prompt === null) {
+    const syntheticMessage: SDKUserMessage = {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '.' }] },
+      parent_tool_use_id: null,
+      session_id: options.sessionId || '',
+      isSynthetic: true,
+    };
+
+    async function* syntheticStream(): AsyncIterable<SDKUserMessage> {
+      yield syntheticMessage;
+    }
+
+    console.log('Starting Claude query with synthetic message (fork-only)');
+    return query({
+      prompt: syntheticStream(),
+      options: queryOptions,
+    }) as ClaudeQuery;
   }
 
   // Handle multi-modal content (with images)
