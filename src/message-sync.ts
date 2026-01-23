@@ -370,6 +370,8 @@ async function postTurn(
   const turnStartTime = new Date(turn.userInput.timestamp).getTime();
 
   // Scan all messages in turn for plan file path and ExitPlanMode
+  // Only trigger ExitPlanMode callback for NEW messages (not already posted)
+  // to avoid showing plan twice when new messages are added to the same turn
   let detectedPlanPath: string | null = null;
   let exitPlanModeFound = false;
 
@@ -378,7 +380,9 @@ async function postTurn(
     for (const activityMsg of segment.activityMessages) {
       const path = extractPlanFilePathFromMessage(activityMsg);
       if (path) detectedPlanPath = path;
-      if (hasExitPlanMode(activityMsg)) exitPlanModeFound = true;
+      if (hasExitPlanMode(activityMsg) && !alreadyPosted.has(activityMsg.uuid)) {
+        exitPlanModeFound = true;
+      }
     }
   }
 
@@ -386,7 +390,9 @@ async function postTurn(
   for (const activityMsg of turn.trailingActivity) {
     const path = extractPlanFilePathFromMessage(activityMsg);
     if (path) detectedPlanPath = path;
-    if (hasExitPlanMode(activityMsg)) exitPlanModeFound = true;
+    if (hasExitPlanMode(activityMsg) && !alreadyPosted.has(activityMsg.uuid)) {
+      exitPlanModeFound = true;
+    }
   }
 
   // Notify callbacks

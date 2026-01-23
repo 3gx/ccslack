@@ -913,6 +913,124 @@ describe('message-sync', () => {
       expect(textCall[0].text.length).toBeLessThan(1000);
       expect(textCall[0].text).toContain('truncated');
     });
+
+    it('should NOT trigger onExitPlanMode twice when new messages added to same turn', async () => {
+      // This test verifies the fix for duplicate plan display in /watch.
+      // Scenario:
+      // Poll 1: Turn has [user, ExitPlanMode] - plan displayed
+      // Poll 2: Turn has [user, ExitPlanMode, newText] - plan should NOT display again
+      //
+      // The bug was that the scan checked ALL activity messages for ExitPlanMode,
+      // not just NEW ones. So when the turn was re-processed (due to newText),
+      // ExitPlanMode was found again and plan was displayed twice.
+
+      const userMsg = {
+        type: 'user', uuid: 'u1', timestamp: '2024-01-01T00:00:00Z', sessionId: 's1',
+        message: { role: 'user', content: 'Plan something' },
+      };
+      const exitPlanModeMsg = {
+        type: 'assistant', uuid: 'exit-plan-uuid', timestamp: '2024-01-01T00:00:01Z', sessionId: 's1',
+        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'ExitPlanMode', input: {} }] },
+      };
+      const newTextMsg = {
+        type: 'assistant', uuid: 'new-text-uuid', timestamp: '2024-01-01T00:00:02Z', sessionId: 's1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Ready for approval' }] },
+      };
+
+      // Configure hasExitPlanMode to return true for the ExitPlanMode message
+      vi.mocked(sessionReader.hasExitPlanMode).mockImplementation((msg) =>
+        msg.uuid === 'exit-plan-uuid'
+      );
+
+      // Poll 2 scenario: ExitPlanMode already posted (from Poll 1), but newText is not
+      vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(
+        new Set(['u1', 'exit-plan-uuid'])  // ExitPlanMode already posted
+      );
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [userMsg, exitPlanModeMsg, newTextMsg],
+        newOffset: 3000,
+      });
+
+      // Turn structure after CLI continues: ExitPlanMode moved to segment activity
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: userMsg,
+        segments: [{
+          activityMessages: [exitPlanModeMsg],  // ExitPlanMode now in segment (was in trailing)
+          textOutput: newTextMsg,               // New text output
+        }],
+        trailingActivity: [],
+        allMessageUuids: ['u1', 'exit-plan-uuid', 'new-text-uuid'],
+      }]);
+
+      vi.mocked(sessionReader.extractTextContent).mockImplementation((msg) =>
+        msg.uuid === 'new-text-uuid' ? 'Ready for approval' : ''
+      );
+      vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([]);
+
+      const onExitPlanMode = vi.fn().mockResolvedValue(undefined);
+
+      await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0, {
+        onExitPlanMode,
+      });
+
+      // Key assertion: onExitPlanMode should NOT be called
+      // because ExitPlanMode message UUID is already in alreadyPosted
+      expect(onExitPlanMode).not.toHaveBeenCalled();
+
+      // But the new text should still be posted
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'Ready for approval',
+        })
+      );
+    });
+
+    it('should trigger onExitPlanMode when ExitPlanMode is NEW', async () => {
+      // Complementary test: verify onExitPlanMode IS called when ExitPlanMode is new
+
+      const userMsg = {
+        type: 'user', uuid: 'u1', timestamp: '2024-01-01T00:00:00Z', sessionId: 's1',
+        message: { role: 'user', content: 'Plan something' },
+      };
+      const exitPlanModeMsg = {
+        type: 'assistant', uuid: 'exit-plan-uuid', timestamp: '2024-01-01T00:00:01Z', sessionId: 's1',
+        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'ExitPlanMode', input: {} }] },
+      };
+
+      vi.mocked(sessionReader.hasExitPlanMode).mockImplementation((msg) =>
+        msg.uuid === 'exit-plan-uuid'
+      );
+      vi.mocked(sessionReader.extractPlanFilePathFromMessage).mockReturnValue('/path/to/plan.md');
+
+      // Nothing posted yet
+      vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(new Set());
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [userMsg, exitPlanModeMsg],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: userMsg,
+        segments: [],
+        trailingActivity: [exitPlanModeMsg],
+        allMessageUuids: ['u1', 'exit-plan-uuid'],
+      }]);
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('');
+      vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([]);
+
+      const onExitPlanMode = vi.fn().mockResolvedValue(undefined);
+      const onPlanFileDetected = vi.fn();
+
+      await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0, {
+        onExitPlanMode,
+        onPlanFileDetected,
+      });
+
+      // onExitPlanMode SHOULD be called because ExitPlanMode is new
+      expect(onExitPlanMode).toHaveBeenCalledWith('/path/to/plan.md');
+      expect(onPlanFileDetected).toHaveBeenCalledWith('/path/to/plan.md');
+    });
   });
 
   describe('groupMessagesByTurn', () => {
