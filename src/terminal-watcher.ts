@@ -15,7 +15,7 @@ import {
 } from './session-reader.js';
 import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
-import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse } from './streaming.js';
+import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse, uploadMarkdownWithResponse } from './streaming.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
 import { buildWatchingStatusSection } from './blocks.js';
 
@@ -332,12 +332,40 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
   }
 
   if (msg.type === 'user') {
-    // User input: simple text post (no file attachments)
-    let slackText = markdownToSlack(rawText);
+    const slackText = markdownToSlack(rawText);
+    const prefix = ':inbox_tray: *Terminal Input*\n';
+
+    // If content exceeds limit, upload .md file (no PNG for user input)
     if (slackText.length > charLimit) {
-      slackText = truncateWithClosedFormatting(slackText, charLimit);
+      try {
+        const uploaded = await uploadMarkdownWithResponse(
+          state.client,
+          state.channelId,
+          rawText,  // Original markdown for .md file
+          prefix + slackText,  // Slack-formatted with prefix
+          state.threadTs,
+          state.userId,
+          charLimit
+        );
+
+        // Save mapping for thread forking
+        if (uploaded?.ts) {
+          await saveMessageMapping(state.channelId, uploaded.ts, {
+            sdkMessageId: msg.uuid,
+            sessionId: state.sessionId,
+            type: 'user',
+          });
+          return true;
+        }
+        return false;
+      } catch (error) {
+        console.error(`[TerminalWatcher] Failed to upload user input:`, error);
+        return false;
+      }
     }
-    const fullText = ':inbox_tray: *Terminal Input*\n' + slackText;
+
+    // Short content: simple text post (no file attachment)
+    const fullText = prefix + slackText;
 
     try {
       const result = await withSlackRetry(() =>

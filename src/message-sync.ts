@@ -31,7 +31,7 @@ import {
 } from './session-event-stream.js';
 import { buildLiveActivityBlocks } from './blocks.js';
 import { withSlackRetry, withInfiniteRetry, sleep } from './retry.js';
-import { truncateWithClosedFormatting } from './streaming.js';
+import { truncateWithClosedFormatting, uploadMarkdownWithResponse } from './streaming.js';
 
 /**
  * State required for posting messages to Slack.
@@ -604,13 +604,42 @@ async function postUserInput(
   }
 
   const textContent = extractTextContent(msg);
+  const prefix = ':inbox_tray: *Terminal Input*\n';
 
-  // Truncate long user inputs (charLimit applies to content, not prefix)
-  const truncatedContent = textContent.length > charLimit
-    ? truncateWithClosedFormatting(textContent, charLimit)
-    : textContent;
+  // If content exceeds limit, upload .md file (no PNG for user input)
+  if (textContent.length > charLimit) {
+    const uploadWithMd = async () => {
+      try {
+        const uploaded = await uploadMarkdownWithResponse(
+          state.client,
+          state.channelId,
+          textContent,  // Original content for .md file
+          prefix + textContent,  // Full text with prefix (function handles truncation)
+          state.threadTs,
+          undefined,  // No userId available in MessageSyncState
+          charLimit
+        );
+        return uploaded?.ts ? { ts: uploaded.ts } : null;
+      } catch (error) {
+        console.error(`[MessageSync] Failed to upload user input:`, error);
+        return null;
+      }
+    };
 
-  const displayText = `:inbox_tray: *Terminal Input*\n${truncatedContent}`;
+    if (infiniteRetry) {
+      return await withInfiniteRetry(uploadWithMd, {
+        baseDelayMs: 3000,
+        maxDelayMs: 30000,
+        onRetry: (error, attempt, delayMs) => {
+          console.log(`[MessageSync] User input ${msg.uuid} upload failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+        },
+      });
+    }
+    return await uploadWithMd();
+  }
+
+  // Short content: simple text post (no file attachment)
+  const displayText = prefix + textContent;
 
   const post = async () => {
     try {

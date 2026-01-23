@@ -57,9 +57,10 @@ vi.mock('../../retry.js', () => ({
   withSlackRetry: vi.fn((fn) => fn()),
 }));
 
-// Mock streaming (for uploadMarkdownAndPngWithResponse, truncateWithClosedFormatting)
+// Mock streaming (for uploadMarkdownAndPngWithResponse, uploadMarkdownWithResponse, truncateWithClosedFormatting)
 vi.mock('../../streaming.js', () => ({
   uploadMarkdownAndPngWithResponse: vi.fn(() => Promise.resolve({ ts: 'upload-ts' })),
+  uploadMarkdownWithResponse: vi.fn(() => Promise.resolve({ ts: 'upload-md-ts' })),
   truncateWithClosedFormatting: vi.fn((text, limit) => text.substring(0, limit) + '\n\n_...truncated. Full response attached._'),
 }));
 
@@ -115,6 +116,7 @@ describe('terminal-watcher', () => {
     vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(new Set<string>());
     vi.mocked(sessionManager.saveMessageMapping).mockImplementation(() => {});
     vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mockResolvedValue({ ts: 'upload-ts' });
+    vi.mocked(streaming.uploadMarkdownWithResponse).mockResolvedValue({ ts: 'upload-md-ts' });
 
     mockClient = {
       chat: {
@@ -589,7 +591,7 @@ describe('terminal-watcher', () => {
       expect(streaming.uploadMarkdownAndPngWithResponse).toHaveBeenCalled();
     });
 
-    it('should truncate long messages for user input', async () => {
+    it('should upload .md file for long user input (not just truncate)', async () => {
       const longText = 'x'.repeat(1000);
       const mockMessage = {
         type: 'user',
@@ -617,11 +619,58 @@ describe('terminal-watcher', () => {
       await vi.advanceTimersByTimeAsync(2000);
       await vi.advanceTimersByTimeAsync(0); // flush microtasks
 
-      // User messages use truncateWithClosedFormatting when over limit
-      expect(streaming.truncateWithClosedFormatting).toHaveBeenCalledWith(
-        longText,
-        500  // charLimit from session
+      // Long user input should use uploadMarkdownWithResponse (.md only, no PNG)
+      expect(streaming.uploadMarkdownWithResponse).toHaveBeenCalledWith(
+        mockClient,
+        'channel-1',
+        longText,  // Original markdown for .md file
+        expect.stringContaining('Terminal Input'),  // Prefix + content
+        undefined,  // threadTs
+        undefined,  // userId
+        500  // charLimit
       );
+
+      // Should NOT use uploadMarkdownAndPngWithResponse for user input
+      expect(streaming.uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
+    });
+
+    it('should NOT upload .md file for short user input', async () => {
+      const shortText = 'Hello from terminal';
+      const mockMessage = {
+        type: 'user',
+        uuid: '456',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: [{ type: 'text', text: shortText }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockMessage],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue(shortText);
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockMessage as any,
+        segments: [],
+        trailingActivity: [],
+        allMessageUuids: ['456'],
+      }]);
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Short user input should use simple text post
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Terminal Input'),
+        })
+      );
+
+      // Should NOT upload any files for short input
+      expect(streaming.uploadMarkdownWithResponse).not.toHaveBeenCalled();
+      expect(streaming.uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
     });
 
     it('should NOT post fallback when uploadSucceeded is true (prevents duplicate)', async () => {

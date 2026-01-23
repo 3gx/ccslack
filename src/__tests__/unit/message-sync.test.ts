@@ -49,6 +49,13 @@ vi.mock('../../retry.js', () => ({
   sleep: vi.fn(() => Promise.resolve()),
 }));
 
+// Mock streaming module
+import * as streaming from '../../streaming.js';
+vi.mock('../../streaming.js', () => ({
+  truncateWithClosedFormatting: vi.fn((text, limit) => text.substring(0, limit) + '\n\n_...truncated. Full response attached._'),
+  uploadMarkdownWithResponse: vi.fn(() => Promise.resolve({ ts: 'upload-md-ts' })),
+}));
+
 // Mock fs module for getMessageMap
 import * as fs from 'fs';
 vi.mock('fs', async () => {
@@ -104,6 +111,7 @@ describe('message-sync', () => {
     vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([]);
     vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(new Set<string>());
     vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([]);
+    vi.mocked(streaming.uploadMarkdownWithResponse).mockResolvedValue({ ts: 'upload-md-ts' });
   });
 
   describe('syncMessagesFromOffset', () => {
@@ -912,6 +920,87 @@ describe('message-sync', () => {
       expect(textCall[0].text).toContain('xxx'); // Contains x's
       expect(textCall[0].text.length).toBeLessThan(1000);
       expect(textCall[0].text).toContain('truncated');
+    });
+
+    it('should upload .md file for long user input (not just truncate)', async () => {
+      const longUserInput = 'x'.repeat(1000);
+      const userMsg = {
+        type: 'user', uuid: 'u1', timestamp: '2024-01-01T00:00:00Z', sessionId: 's1',
+        message: { role: 'user', content: longUserInput },
+      };
+      const textMsg = {
+        type: 'assistant', uuid: 'a1', timestamp: '2024-01-01T00:00:01Z', sessionId: 's1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Short response' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [userMsg, textMsg],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: userMsg,
+        segments: [{ activityMessages: [], textOutput: textMsg }],
+        trailingActivity: [],
+        allMessageUuids: ['u1', 'a1'],
+      }]);
+      vi.mocked(sessionReader.extractTextContent).mockImplementation((msg) =>
+        msg.uuid === 'u1' ? longUserInput : 'Short response'
+      );
+
+      await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0, {
+        charLimit: 100,
+      });
+
+      // Long user input should use uploadMarkdownWithResponse (.md only, no PNG)
+      expect(streaming.uploadMarkdownWithResponse).toHaveBeenCalledWith(
+        mockClient,
+        'channel-1',
+        longUserInput,  // Original content for .md file
+        expect.stringContaining(':inbox_tray:'),  // Prefix included
+        undefined,  // threadTs
+        undefined,  // userId (not available in MessageSyncState)
+        100  // charLimit
+      );
+    });
+
+    it('should NOT upload .md file for short user input', async () => {
+      const shortUserInput = 'Hello';
+      const userMsg = {
+        type: 'user', uuid: 'u1', timestamp: '2024-01-01T00:00:00Z', sessionId: 's1',
+        message: { role: 'user', content: shortUserInput },
+      };
+      const textMsg = {
+        type: 'assistant', uuid: 'a1', timestamp: '2024-01-01T00:00:01Z', sessionId: 's1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Response' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [userMsg, textMsg],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: userMsg,
+        segments: [{ activityMessages: [], textOutput: textMsg }],
+        trailingActivity: [],
+        allMessageUuids: ['u1', 'a1'],
+      }]);
+      vi.mocked(sessionReader.extractTextContent).mockImplementation((msg) =>
+        msg.uuid === 'u1' ? shortUserInput : 'Response'
+      );
+
+      await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0, {
+        charLimit: 100,
+      });
+
+      // Short user input should use simple text post
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining(':inbox_tray:'),
+        })
+      );
+
+      // Should NOT upload any files for short input
+      expect(streaming.uploadMarkdownWithResponse).not.toHaveBeenCalled();
     });
 
     it('should NOT trigger onExitPlanMode twice when new messages added to same turn', async () => {
