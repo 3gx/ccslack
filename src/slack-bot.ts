@@ -61,6 +61,8 @@ import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.j
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
 import { parseCommand, UPDATE_RATE_DEFAULT } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
+import { processSlackFiles, SlackFile } from './file-handler.js';
+import { buildMessageContent, ContentBlock } from './content-builder.js';
 import { withSlackRetry } from './retry.js';
 import {
   startWatching,
@@ -1482,6 +1484,9 @@ app.event('app_mention', async ({ event, client }) => {
     // Remove the @mention from the text
     const userText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
 
+    // Extract files from event (if any)
+    const eventFiles = (event as any).files as SlackFile[] | undefined;
+
     await handleMessage({
       channelId: event.channel,
       userId: event.user,
@@ -1489,6 +1494,7 @@ app.event('app_mention', async ({ event, client }) => {
       originalTs: event.ts,
       threadTs: event.thread_ts, // Only set if already in a thread
       client,
+      files: eventFiles,
     });
   } catch (error) {
     // NEVER let errors crash the bot - always report gracefully
@@ -1523,6 +1529,9 @@ app.message(async ({ message, client }) => {
     const userId = 'user' in message ? message.user : 'unknown';
     const messageTs = 'ts' in message ? message.ts : undefined;
 
+    // Extract files from message (if any)
+    const messageFiles = 'files' in message ? (message as any).files as SlackFile[] : undefined;
+
     console.log(`Received DM from ${userId}: ${userText}`);
 
     await handleMessage({
@@ -1531,6 +1540,7 @@ app.message(async ({ message, client }) => {
       userText,
       originalTs: messageTs,
       client,
+      files: messageFiles,
     });
   } catch (error) {
     // NEVER let errors crash the bot - always report gracefully
@@ -1731,8 +1741,9 @@ async function handleMessage(params: {
   threadTs?: string;
   client: any;
   skipConcurrentCheck?: boolean;
+  files?: SlackFile[];
 }) {
-  const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck } = params;
+  const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck, files } = params;
   const conversationKey = getConversationKey(channelId, threadTs);
   // Activity log key must be unique per message (not per conversation)
   // For threads: threadTs is unique; for main channel: use originalTs
@@ -2365,6 +2376,25 @@ async function handleMessage(params: {
       });
     };
 
+    // Process uploaded files (if any)
+    let messageContent: string | ContentBlock[] = userText!;
+    if (files && files.length > 0) {
+      console.log(`[FileUpload] Processing ${files.length} file(s)`);
+      try {
+        const { files: processedFiles, warnings } = await processSlackFiles(
+          files,
+          process.env.SLACK_BOT_TOKEN!
+        );
+        messageContent = buildMessageContent(userText!, processedFiles, warnings);
+        if (Array.isArray(messageContent)) {
+          console.log(`[FileUpload] Built ${messageContent.length} content blocks`);
+        }
+      } catch (error) {
+        console.error('[FileUpload] Error processing files:', error);
+        // Continue with just the text if file processing fails
+      }
+    }
+
     // Start Claude query (returns Query object with interrupt() method)
     // For new thread forks, use forkSession flag with parent session ID
     // Also detect uninitialized forks created by /fork-thread (sessionId null but forkedFrom set)
@@ -2373,7 +2403,7 @@ async function handleMessage(params: {
     const maxThinkingTokens = session.maxThinkingTokens === 0
       ? 0  // Disabled
       : (session.maxThinkingTokens ?? 31999);  // Use configured or default
-    const claudeQuery = startClaudeQuery(userText!, {
+    const claudeQuery = startClaudeQuery(messageContent, {
       sessionId: needsFork ? forkedFromSessionId ?? undefined : session.sessionId ?? undefined,
       workingDir: session.workingDir,
       mode: session.mode,

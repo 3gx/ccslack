@@ -26,6 +26,7 @@ export enum ErrorCode {
   WORKING_DIR_NOT_FOUND = 'WORKING_DIR_NOT_FOUND',
   FILE_READ_ERROR = 'FILE_READ_ERROR',
   FILE_WRITE_ERROR = 'FILE_WRITE_ERROR',
+  FILE_DOWNLOAD_ERROR = 'FILE_DOWNLOAD_ERROR',
 
   // Git errors
   GIT_CONFLICT = 'GIT_CONFLICT',
@@ -90,6 +91,9 @@ export function toUserMessage(error: unknown): string {
 
       case ErrorCode.FILE_WRITE_ERROR:
         return `Could not write file: ${error.message}`;
+
+      case ErrorCode.FILE_DOWNLOAD_ERROR:
+        return `Could not download file: ${error.message}`;
 
       case ErrorCode.EMPTY_MESSAGE:
         return 'Please provide a message. Example: `@claude help me with this code`';
@@ -270,5 +274,12 @@ export const Errors = {
       cause ? `${path}: ${cause}` : path,
       ErrorCode.FILE_WRITE_ERROR,
       false
+    ),
+
+  fileDownloadError: (filename: string, cause?: string) =>
+    new SlackBotError(
+      `Failed to download ${filename}${cause ? `: ${cause}` : ''}`,
+      ErrorCode.FILE_DOWNLOAD_ERROR,
+      true  // Recoverable - can retry
     ),
 };

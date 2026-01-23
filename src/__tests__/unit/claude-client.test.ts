@@ -278,6 +278,92 @@ describe('claude-client', () => {
       });
     });
 
+    describe('Multi-Modal Content Blocks', () => {
+      it('uses AsyncIterable prompt when ContentBlock[] is passed', () => {
+        const contentBlocks = [
+          { type: 'text' as const, text: 'Describe this image' },
+          { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png', data: 'abc123' } },
+        ];
+
+        startClaudeQuery(contentBlocks, {});
+
+        const callArgs = vi.mocked(query).mock.calls[0][0];
+        // prompt should be an AsyncIterable (generator function), not a string
+        expect(typeof callArgs.prompt).not.toBe('string');
+        expect(typeof callArgs.prompt[Symbol.asyncIterator]).toBe('function');
+      });
+
+      it('sets empty session_id when no sessionId option provided (new session)', () => {
+        const contentBlocks = [
+          { type: 'text' as const, text: 'Test' },
+        ];
+
+        startClaudeQuery(contentBlocks, {});
+
+        const callArgs = vi.mocked(query).mock.calls[0][0];
+        // Extract the yielded message from the AsyncIterable
+        const asyncIterator = callArgs.prompt[Symbol.asyncIterator]();
+        return asyncIterator.next().then((result: any) => {
+          expect(result.value.session_id).toBe('');
+        });
+      });
+
+      it('sets session_id to sessionId option when forking (for SDK compatibility)', async () => {
+        const contentBlocks = [
+          { type: 'text' as const, text: 'Test with image' },
+          { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png', data: 'xyz789' } },
+        ];
+
+        startClaudeQuery(contentBlocks, {
+          sessionId: 'fork-session-123',
+          forkSession: true,
+        });
+
+        const callArgs = vi.mocked(query).mock.calls[0][0];
+        const asyncIterator = callArgs.prompt[Symbol.asyncIterator]();
+        const result = await asyncIterator.next();
+
+        // session_id in SDKUserMessage must match the session being forked
+        expect(result.value.session_id).toBe('fork-session-123');
+      });
+
+      it('sets session_id when resuming a session (not forking)', async () => {
+        const contentBlocks = [
+          { type: 'text' as const, text: 'Continue with image' },
+        ];
+
+        startClaudeQuery(contentBlocks, {
+          sessionId: 'resume-session-456',
+          // No forkSession - just resuming
+        });
+
+        const callArgs = vi.mocked(query).mock.calls[0][0];
+        const asyncIterator = callArgs.prompt[Symbol.asyncIterator]();
+        const result = await asyncIterator.next();
+
+        expect(result.value.session_id).toBe('resume-session-456');
+      });
+
+      it('SDKUserMessage has correct structure for images', async () => {
+        const contentBlocks = [
+          { type: 'text' as const, text: 'What is this?' },
+          { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/jpeg', data: 'imagedata' } },
+        ];
+
+        startClaudeQuery(contentBlocks, { sessionId: 'test-session' });
+
+        const callArgs = vi.mocked(query).mock.calls[0][0];
+        const asyncIterator = callArgs.prompt[Symbol.asyncIterator]();
+        const result = await asyncIterator.next();
+
+        expect(result.value.type).toBe('user');
+        expect(result.value.message.role).toBe('user');
+        expect(result.value.message.content).toEqual(contentBlocks);
+        expect(result.value.parent_tool_use_id).toBeNull();
+        expect(result.value.session_id).toBe('test-session');
+      });
+    });
+
     describe('PermissionResult Type Format', () => {
       // These tests verify the type shape that SDK expects
       it('allow result has correct shape with behavior and updatedInput', () => {

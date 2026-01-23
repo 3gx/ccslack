@@ -1,7 +1,8 @@
-import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { PermissionMode } from './session-manager.js';
+import { ContentBlock } from './content-builder.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,9 +46,11 @@ export interface ClaudeQuery extends AsyncGenerator<SDKMessage, void, unknown> {
 /**
  * Start a Claude query and return the Query object.
  * The Query object can be iterated for messages and has an interrupt() method.
+ *
+ * @param prompt - Either a simple string or ContentBlock[] for multi-modal messages (with images)
  */
 export function startClaudeQuery(
-  prompt: string,
+  prompt: string | ContentBlock[],
   options: StreamOptions
 ): ClaudeQuery {
   // Pass permission mode directly to SDK (we use SDK mode names)
@@ -135,6 +138,30 @@ export function startClaudeQuery(
     console.log('canUseTool callback configured for manual approval');
   }
 
+  // Handle multi-modal content (with images)
+  if (Array.isArray(prompt)) {
+    // ContentBlock[] - wrap in AsyncIterable<SDKUserMessage> for SDK
+    // When forking/resuming, session_id must match the session being used
+    // Empty string only works for new sessions
+    const userMessage: SDKUserMessage = {
+      type: 'user',
+      message: { role: 'user', content: prompt },
+      parent_tool_use_id: null,
+      session_id: options.sessionId || '',
+    };
+
+    async function* messageStream(): AsyncIterable<SDKUserMessage> {
+      yield userMessage;
+    }
+
+    console.log(`Starting Claude query with ${prompt.length} content blocks (multi-modal)`);
+    return query({
+      prompt: messageStream(),
+      options: queryOptions,
+    }) as ClaudeQuery;
+  }
+
+  // Simple string prompt (existing path)
   return query({
     prompt,
     options: queryOptions,
