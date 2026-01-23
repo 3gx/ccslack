@@ -1,0 +1,92 @@
+/**
+ * SDK-Live Tests for /ff Activity - Duration
+ *
+ * Run with: npm test -- src/__tests__/sdk-live/ff-activity-duration.test.ts
+ */
+
+import { describe, it, expect, afterAll } from 'vitest';
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { readActivityLog } from '../../session-event-stream.js';
+
+const SKIP_LIVE = process.env.SKIP_SDK_TESTS === 'true';
+const workingDir = process.cwd();
+
+function getSessionFilePath(sessionId: string): string {
+  const projectPath = workingDir.replace(/\//g, '-').replace(/^-/, '-');
+  return path.join(os.homedir(), '.claude/projects', projectPath, `${sessionId}.jsonl`);
+}
+
+describe.skipIf(SKIP_LIVE)('/ff Activity - Duration', { timeout: 120000 }, () => {
+  const createdSessions: string[] = [];
+
+  afterAll(() => {
+    for (const sessionId of createdSessions) {
+      const filePath = getSessionFilePath(sessionId);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+  });
+
+  async function runQuery(
+    prompt: string,
+    options: { permissionMode?: string; maxThinkingTokens?: number } = {}
+  ): Promise<string> {
+    const q = query({
+      prompt,
+      options: {
+        maxTurns: 1,
+        permissionMode: options.permissionMode as any,
+        maxThinkingTokens: options.maxThinkingTokens,
+      },
+    });
+
+    let sessionId: string | null = null;
+
+    for await (const msg of q) {
+      if (msg.type === 'system' && (msg as any).subtype === 'init') {
+        sessionId = (msg as any).session_id;
+        createdSessions.push(sessionId);
+      }
+      if (msg.type === 'result') break;
+    }
+
+    if (!sessionId) {
+      throw new Error('Failed to get session ID from query');
+    }
+
+    return sessionId;
+  }
+
+  it('readActivityLog produces tool_complete with durationMs', async () => {
+    const sessionId = await runQuery('Run this command: echo hello', {
+      permissionMode: 'bypassPermissions',
+    });
+
+    const sessionFilePath = getSessionFilePath(sessionId);
+    const activityLog = await readActivityLog(sessionFilePath);
+
+    const toolCompletes = activityLog.filter((a) => a.type === 'tool_complete');
+    expect(toolCompletes.length).toBeGreaterThan(0);
+    expect(toolCompletes[0].tool).toBe('Bash');
+    expect(toolCompletes[0].durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('tool_complete durationMs reflects actual execution time', async () => {
+    const sessionId = await runQuery('Use Bash to run: sleep 0.3 && echo done', {
+      permissionMode: 'bypassPermissions',
+    });
+    const sessionFilePath = getSessionFilePath(sessionId);
+
+    const activityLog = await readActivityLog(sessionFilePath);
+
+    const bashComplete = activityLog.find(
+      (a) => a.type === 'tool_complete' && a.tool === 'Bash'
+    );
+    expect(bashComplete).toBeDefined();
+    expect(bashComplete!.durationMs).toBeGreaterThanOrEqual(200);
+  });
+});
