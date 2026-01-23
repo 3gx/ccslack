@@ -637,4 +637,161 @@ describe('slack-bot button handlers', () => {
       expect(saveSession).not.toHaveBeenCalledWith('C123', { mode: 'default' });
     });
   });
+
+  describe('ack() failure resilience', () => {
+    it('should still write answer file when ack() throws', async () => {
+      const handler = registeredHandlers['action_^answer_(.+)_(\\d+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('Slack timeout'));
+
+      await handler({
+        action: {
+          action_id: 'answer_q_123456_0',
+          value: 'eggs',
+        },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      // Handler should NOT throw - ack error is caught
+      expect(ack).toHaveBeenCalled();
+      // Answer file should still be written even if ack fails
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/tmp/ccslack-answers/q_123456.json',
+        expect.stringContaining('"answer":"eggs"')
+      );
+    });
+
+    it('should still write abort file when ack() throws', async () => {
+      const handler = registeredHandlers['action_^abort_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('Rate limited'));
+
+      await handler({
+        action: { action_id: 'abort_q_789' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/tmp/ccslack-answers/q_789.json',
+        expect.stringContaining('__ABORTED__')
+      );
+    });
+
+    it('should still open modal when freetext ack() throws', async () => {
+      const handler = registeredHandlers['action_^freetext_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      await handler({
+        action: { action_id: 'freetext_q_456' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.open).toHaveBeenCalled();
+    });
+
+    it('should still submit multiselect when ack() throws', async () => {
+      const selectHandler = registeredHandlers['action_^multiselect_(?!submit_)(.+)$'];
+      const submitHandler = registeredHandlers['action_^multiselect_submit_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const selectAck = vi.fn().mockResolvedValue(undefined);
+      const submitAck = vi.fn().mockRejectedValue(new Error('Timeout'));
+
+      await selectHandler({
+        action: {
+          action_id: 'multiselect_q_test',
+          selected_options: [{ value: 'Option1' }],
+        },
+        ack: selectAck,
+        body: {},
+        client: mockClient,
+      });
+
+      await submitHandler({
+        action: { action_id: 'multiselect_submit_q_test' },
+        ack: submitAck,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(submitAck).toHaveBeenCalled();
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/tmp/ccslack-answers/q_test.json',
+        expect.stringContaining('Option1')
+      );
+    });
+
+    it('should still store selection when multiselect ack() throws', async () => {
+      const selectHandler = registeredHandlers['action_^multiselect_(?!submit_)(.+)$'];
+      const submitHandler = registeredHandlers['action_^multiselect_submit_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const selectAck = vi.fn().mockRejectedValue(new Error('Network error'));
+      const submitAck = vi.fn().mockResolvedValue(undefined);
+
+      await selectHandler({
+        action: {
+          action_id: 'multiselect_q_test2',
+          selected_options: [{ value: 'SelectedItem' }],
+        },
+        ack: selectAck,
+        body: {},
+        client: mockClient,
+      });
+
+      await submitHandler({
+        action: { action_id: 'multiselect_submit_q_test2' },
+        ack: submitAck,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      // Even though select ack failed, submission should still work
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/tmp/ccslack-answers/q_test2.json',
+        expect.stringContaining('SelectedItem')
+      );
+    });
+
+    it('should still interrupt query when abort_query ack() throws', async () => {
+      const handler = registeredHandlers['action_^abort_query_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('Slack API error'));
+
+      // Handler should not throw when ack fails
+      await handler({
+        action: { action_id: 'abort_query_C123_thread456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Handler completes without throwing
+    });
+  });
 });

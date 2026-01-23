@@ -3295,7 +3295,12 @@ async function handleMessage(params: {
 
 // Handle button clicks for ask_user tool
 app.action(/^answer_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging button click:', error);
+    // ack() failed but we should still try to process the answer
+  }
 
   // Extract question ID from action_id: "answer_{questionId}_{index}"
   // Use regex to properly extract questionId (which contains underscores)
@@ -3333,7 +3338,12 @@ app.action(/^answer_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
 
 // Handle "Abort" button for ask_user questions
 app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging abort click:', error);
+    // ack() failed but we should still try to process the abort
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^abort_(.+)$/);
@@ -3371,7 +3381,12 @@ app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
 
 // Handle multi-select selection changes (stores selection, doesn't submit yet)
 app.action(/^multiselect_(?!submit_)(.+)$/, async ({ action, ack }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging multiselect change:', error);
+    // ack() failed but we should still try to store the selection
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^multiselect_(.+)$/);
@@ -3389,7 +3404,12 @@ app.action(/^multiselect_(?!submit_)(.+)$/, async ({ action, ack }) => {
 
 // Handle multi-select submit button
 app.action(/^multiselect_submit_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging multiselect submit:', error);
+    // ack() failed but we should still try to process the submission
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^multiselect_submit_(.+)$/);
@@ -3431,7 +3451,12 @@ app.action(/^multiselect_submit_(.+)$/, async ({ action, ack, body, client }) =>
 
 // Handle abort query button (abort during processing)
 app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging abort query click:', error);
+    // ack() failed but we should still try to abort the query
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^abort_query_(.+)$/);
@@ -3502,7 +3527,12 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
 
 // Handle "Type something" button - opens modal for free text input
 app.action(/^freetext_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging freetext click:', error);
+    // ack() failed but we should still try to open the modal
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^freetext_(.+)$/);
@@ -3964,11 +3994,16 @@ app.action(/^tool_deny_(.+)$/, async ({ action, ack, body, client }) => {
 });
 
 // Handle SDK AskUserQuestion option button click
-app.action(/^sdkq_([^_]+)_(\d+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+app.action(/^sdkq_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging SDK question option click:', error);
+    // ack() failed but we should still try to process the answer
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^sdkq_([^_]+)_(\d+)$/);
+  const match = actionId.match(/^sdkq_(.+)_(\d+)$/);
   const questionId = match ? match[1] : '';
 
   console.log(`SDK question option clicked for: ${questionId}`);
@@ -4001,7 +4036,12 @@ app.action(/^sdkq_([^_]+)_(\d+)$/, async ({ action, ack, body, client }) => {
 
 // Handle SDK AskUserQuestion multi-select change
 app.action(/^sdkq_multi_(.+)$/, async ({ action, ack }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging SDK question multi-select change:', error);
+    // ack() failed but we should still try to store the selection
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^sdkq_multi_(.+)$/);
@@ -4017,7 +4057,12 @@ app.action(/^sdkq_multi_(.+)$/, async ({ action, ack }) => {
 
 // Handle SDK AskUserQuestion multi-select submit
 app.action(/^sdkq_submit_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging SDK question submit:', error);
+    // ack() failed but we should still try to process the submission
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^sdkq_submit_(.+)$/);
@@ -4056,7 +4101,12 @@ app.action(/^sdkq_submit_(.+)$/, async ({ action, ack, body, client }) => {
 
 // Handle SDK AskUserQuestion abort button
 app.action(/^sdkq_abort_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging SDK question abort:', error);
+    // ack() failed but we should still try to process the abort
+  }
 
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^sdkq_abort_(.+)$/);
@@ -4099,7 +4149,12 @@ app.action(/^sdkq_abort_(.+)$/, async ({ action, ack, body, client }) => {
 
 // Handle SDK AskUserQuestion "Other" button (free-text input)
 app.action(/^sdkq_other_(.+)$/, async ({ ack, body, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging SDK question other click:', error);
+    // ack() failed but we should still try to open the modal
+  }
 
   const bodyWithTrigger = body as any;
   const actionId = bodyWithTrigger.actions?.[0]?.action_id || '';
@@ -4147,7 +4202,12 @@ app.action(/^sdkq_other_(.+)$/, async ({ ack, body, client }) => {
 
 // Handle SDK AskUserQuestion free-text modal submission
 app.view(/^sdkq_freetext_modal_(.+)$/, async ({ ack, body, view, client }) => {
-  await ack();
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging SDK question free-text modal:', error);
+    // ack() failed but we should still try to process the answer
+  }
 
   const callbackId = view.callback_id;
   const match = callbackId.match(/^sdkq_freetext_modal_(.+)$/);

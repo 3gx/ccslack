@@ -230,7 +230,7 @@ describe('slack-bot question handlers', () => {
 
   describe('SDK question button handlers', () => {
     it('should resolve pending question on option click', async () => {
-      const handler = registeredHandlers['action_^sdkq_([^_]+)_(\\d+)$'];
+      const handler = registeredHandlers['action_^sdkq_(.+)_(\\d+)$'];
       expect(handler).toBeDefined();
 
       const mockClient = createMockSlackClient();
@@ -249,6 +249,38 @@ describe('slack-bot question handlers', () => {
       expect(ack).toHaveBeenCalled();
       // Note: Without a pending question in the Map, update won't be called
       // This test verifies the handler exists and acknowledges
+    });
+
+    it('should match real action_id format with multiple underscores in questionId', async () => {
+      // Real questionId format: askuserq_<timestamp>_<random> e.g. askuserq_1705000000000_abc123xyz
+      // Full action_id: sdkq_askuserq_1705000000000_abc123xyz_0
+      // The regex must use .+ (not [^_]+) to match questionIds containing underscores
+      const handler = registeredHandlers['action_^sdkq_(.+)_(\\d+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Use the REAL action_id format with timestamp and random string
+      const realActionId = 'sdkq_askuserq_1705000000000_abc123xyz_0';
+
+      await handler({
+        action: { action_id: realActionId, value: 'Selected Option' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+
+      // Verify the regex correctly extracts questionId with underscores
+      const match = realActionId.match(/^sdkq_(.+)_(\d+)$/);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe('askuserq_1705000000000_abc123xyz'); // Full questionId with underscores
+      expect(match![2]).toBe('0'); // Option index
     });
 
     it('should handle abort button click', async () => {
@@ -337,6 +369,123 @@ describe('slack-bot question handlers', () => {
 
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
+
+      await handler({
+        ack,
+        body: {},
+        view: {
+          callback_id: 'sdkq_freetext_modal_askuserq_ghi',
+          state: {
+            values: {
+              answer_block: {
+                answer_input: { value: 'Custom answer' },
+              },
+            },
+          },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+    });
+  });
+
+  describe('SDK question ack() failure resilience', () => {
+    it('should handle ack() failure on option click gracefully', async () => {
+      const handler = registeredHandlers['action_^sdkq_(.+)_(\\d+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('Slack timeout'));
+
+      // Handler should NOT throw when ack fails
+      await handler({
+        action: { action_id: 'sdkq_askuserq_123_0', value: 'OAuth' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Handler completes without throwing
+    });
+
+    it('should handle ack() failure on abort click gracefully', async () => {
+      const handler = registeredHandlers['action_^sdkq_abort_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('Rate limited'));
+
+      await handler({
+        action: { action_id: 'sdkq_abort_askuserq_456' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+    });
+
+    it('should handle ack() failure on multi-select change gracefully', async () => {
+      const handler = registeredHandlers['action_^sdkq_multi_(.+)$'];
+      const ack = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      await handler({
+        action: {
+          action_id: 'sdkq_multi_askuserq_789',
+          selected_options: [{ value: 'Option1' }],
+        },
+        ack,
+        body: {},
+        client: createMockSlackClient(),
+      });
+
+      expect(ack).toHaveBeenCalled();
+    });
+
+    it('should handle ack() failure on submit click gracefully', async () => {
+      const handler = registeredHandlers['action_^sdkq_submit_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('Timeout'));
+
+      await handler({
+        action: { action_id: 'sdkq_submit_askuserq_abc' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+    });
+
+    it('should handle ack() failure on Other button click gracefully', async () => {
+      const handler = registeredHandlers['action_^sdkq_other_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('API error'));
+
+      await handler({
+        action: { action_id: 'sdkq_other_askuserq_def' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+          actions: [{ action_id: 'sdkq_other_askuserq_def' }],
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+    });
+
+    it('should handle ack() failure on free-text modal submission gracefully', async () => {
+      const handler = registeredHandlers['view_^sdkq_freetext_modal_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn().mockRejectedValue(new Error('Connection reset'));
 
       await handler({
         ack,
