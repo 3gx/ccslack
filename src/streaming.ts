@@ -3,6 +3,7 @@ import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { markdownToPng } from './markdown-png.js';
 import { saveMessageMapping } from './session-manager.js';
+import { MESSAGE_SIZE_DEFAULT } from './commands.js';
 
 // Throttle interval for fallback mode (2 seconds = 30 updates/min, well under 50/min limit)
 const UPDATE_INTERVAL_MS = 2000;
@@ -50,8 +51,6 @@ async function pollForFileShares(
   return null;
 }
 
-// Default char limit for truncation (when to truncate long responses)
-const THREAD_CHAR_DEFAULT = 500;
 
 export interface StreamingOptions {
   channel: string;
@@ -372,7 +371,7 @@ export async function uploadMarkdownWithResponse(
   threadCharLimit?: number,
   stripEmptyTag?: boolean
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
-  const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
+  const limit = threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
 
   // Strip markdown code fence wrapper if present (e.g., ```markdown ... ```)
   const cleanMarkdown = stripMarkdownCodeFence(markdown, { stripEmptyTag });
@@ -459,7 +458,7 @@ export async function uploadMarkdownAndPngWithResponse(
   stripEmptyTag?: boolean,
   mappingInfo?: MappingInfo
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[]; uploadSucceeded?: boolean } | null> {
-  const limit = threadCharLimit ?? THREAD_CHAR_DEFAULT;
+  const limit = threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
 
   // Strip markdown code fence wrapper if present (e.g., ```markdown ... ```)
   const cleanMarkdown = stripMarkdownCodeFence(markdown, { stripEmptyTag });

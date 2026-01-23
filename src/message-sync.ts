@@ -32,6 +32,7 @@ import {
 import { buildLiveActivityBlocks } from './blocks.js';
 import { withSlackRetry, withInfiniteRetry, sleep } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownWithResponse } from './streaming.js';
+import { MESSAGE_SIZE_DEFAULT } from './commands.js';
 
 /**
  * State required for posting messages to Slack.
@@ -174,7 +175,7 @@ export async function syncMessagesFromOffset(
     onProgress,
     pacingDelayMs = 0,
     postTextMessage,
-    charLimit = 500,
+    charLimit = MESSAGE_SIZE_DEFAULT,
     stripEmptyTag = false,
     activityMessages,
     onPlanFileDetected,

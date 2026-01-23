@@ -28,7 +28,7 @@ export const UPDATE_RATE_DEFAULT = 2;
 // Message size limit (characters before response is truncated)
 const MESSAGE_SIZE_MIN = 100;
 const MESSAGE_SIZE_MAX = 36000;  // 90% of Slack's 40000 char limit
-const MESSAGE_SIZE_DEFAULT = 500;
+export const MESSAGE_SIZE_DEFAULT = 500;
 
 export interface CommandResult {
   handled: boolean;

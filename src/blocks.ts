@@ -5,6 +5,7 @@
 
 import { PermissionMode, LastUsage } from './session-manager.js';
 import type { ModelInfo } from './model-cache.js';
+import { MESSAGE_SIZE_DEFAULT } from './commands.js';
 
 // Slack Block Kit types (simplified for our use case)
 export interface Block {
@@ -645,8 +646,6 @@ export interface StatusDisplayParams {
 const THINKING_TOKENS_DEFAULT = 31999;
 // Default update rate for display
 const UPDATE_RATE_DEFAULT = 2;
-// Default message size for display
-const MESSAGE_SIZE_DEFAULT = 500;
 
 /**
  * Build blocks for /status command response.

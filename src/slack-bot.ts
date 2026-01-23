@@ -59,7 +59,7 @@ import { uploadMarkdownAndPngWithResponse } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
-import { parseCommand, UPDATE_RATE_DEFAULT } from './commands.js';
+import { parseCommand, UPDATE_RATE_DEFAULT, MESSAGE_SIZE_DEFAULT } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { processSlackFiles, SlackFile } from './file-handler.js';
 import { buildMessageContent, ContentBlock } from './content-builder.js';
@@ -266,7 +266,7 @@ function getLiveSessionConfig(channelId: string, threadTs?: string) {
     : getSession(channelId);
   return {
     updateRateSeconds: session?.updateRateSeconds ?? UPDATE_RATE_DEFAULT,
-    threadCharLimit: session?.threadCharLimit ?? 500,
+    threadCharLimit: session?.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
     stripEmptyTag: session?.stripEmptyTag ?? false,
   };
 }
@@ -1006,6 +1006,7 @@ async function handleFastForwardSync(
       pacingDelayMs: FF_PACING_DELAY_MS,
       postTextMessage: (s, msg) => postTerminalMessage(watchState, msg),
       activityMessages: watchState.activityMessages,  // Pass activity ts map for update-in-place
+      charLimit: effectiveSession.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,  // Use session's message size setting
       onProgress: async (synced, total) => {
         lastReportedTotal = total;
         // Update initial status on first message
@@ -1397,6 +1398,7 @@ async function handleAskUserQuestion(
     const strippedResponse = stripMarkdownCodeFence(accumulatedContent);
     const slackResponse = markdownToSlack(strippedResponse);
 
+    const liveConfig = getLiveSessionConfig(channelId, threadTs);
     await uploadMarkdownAndPngWithResponse(
       client,
       channelId,
@@ -1404,8 +1406,8 @@ async function handleAskUserQuestion(
       slackResponse,
       threadTs,
       undefined,  // userId
-      500,        // threadCharLimit
-      false       // stripEmptyTag
+      liveConfig.threadCharLimit,
+      liveConfig.stripEmptyTag
       // Note: Fork button now on activity message, not response
     );
 

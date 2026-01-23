@@ -18,6 +18,7 @@ import { withSlackRetry } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse, uploadMarkdownWithResponse } from './streaming.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
 import { buildWatchingStatusSection } from './blocks.js';
+import { MESSAGE_SIZE_DEFAULT } from './commands.js';
 
 /**
  * State for an active terminal watcher.
@@ -218,10 +219,16 @@ async function pollForChanges(state: WatchState): Promise<void> {
       client: state.client,
     };
 
+    // Get session for charLimit (live read for user input truncation)
+    const session = state.threadTs
+      ? getThreadSession(state.channelId, state.threadTs)
+      : getSession(state.channelId);
+
     const syncResult = await syncMessagesFromOffset(syncState, filePath, state.fileOffset, {
       infiniteRetry: false,  // /watch uses limited retries
       postTextMessage: (s, msg, isLastMessage) => postTerminalMessage(state, msg, isLastMessage),
       activityMessages: state.activityMessages,  // Pass activity ts map for update-in-place
+      charLimit: session?.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,  // Use session's message size setting
       onPlanFileDetected: async (path) => {
         state.planFilePath = path;
         // Persist to session for cross-turn access (like slack-bot does)
@@ -324,7 +331,7 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
   const session = state.threadTs
     ? getThreadSession(state.channelId, state.threadTs)
     : getSession(state.channelId);
-  const charLimit = session?.threadCharLimit ?? 500;
+  const charLimit = session?.threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
 
   // If no text content, nothing to post - activity-only messages are handled by message-sync.ts
   if (!rawText.trim()) {
@@ -527,7 +534,7 @@ async function displayPlanContent(
     const session = state.threadTs
       ? getThreadSession(state.channelId, state.threadTs)
       : getSession(state.channelId);
-    const charLimit = session?.threadCharLimit ?? 500;
+    const charLimit = session?.threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
 
     await uploadMarkdownAndPngWithResponse(
       state.client,
