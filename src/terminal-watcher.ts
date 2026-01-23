@@ -5,7 +5,7 @@
 
 import { WebClient } from '@slack/web-api';
 import * as fs from 'fs';
-import { Session, getSession, getThreadSession, saveMessageMapping } from './session-manager.js';
+import { Session, getSession, getThreadSession, saveMessageMapping, saveSession, saveThreadSession } from './session-manager.js';
 import {
   getSessionFilePath,
   getFileSize,
@@ -107,7 +107,7 @@ export function startWatching(
     updateRateMs,
     userId,
     activityMessages: new Map(),
-    planFilePath: null,
+    planFilePath: session.planFilePath ?? null,
   };
 
   // Start polling - poll immediately, then on interval
@@ -222,9 +222,15 @@ async function pollForChanges(state: WatchState): Promise<void> {
       infiniteRetry: false,  // /watch uses limited retries
       postTextMessage: (s, msg, isLastMessage) => postTerminalMessage(state, msg, isLastMessage),
       activityMessages: state.activityMessages,  // Pass activity ts map for update-in-place
-      onPlanFileDetected: (path) => {
+      onPlanFileDetected: async (path) => {
         state.planFilePath = path;
-        console.log(`[TerminalWatcher] Plan file detected: ${path}`);
+        // Persist to session for cross-turn access (like slack-bot does)
+        if (state.threadTs) {
+          await saveThreadSession(state.channelId, state.threadTs, { planFilePath: path });
+        } else {
+          await saveSession(state.channelId, { planFilePath: path });
+        }
+        console.log(`[TerminalWatcher] Plan file detected and persisted: ${path}`);
       },
       onExitPlanMode: async (planPath) => {
         console.log(`[TerminalWatcher] ExitPlanMode detected, plan: ${planPath || state.planFilePath}`);

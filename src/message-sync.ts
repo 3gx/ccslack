@@ -67,7 +67,7 @@ export interface SyncOptions {
   /** Activity message ts per turn (for update-in-place). Key: userInput UUID, Value: Slack ts */
   activityMessages?: Map<string, string>;
   /** Callback when plan file path detected */
-  onPlanFileDetected?: (path: string) => void;
+  onPlanFileDetected?: (path: string) => void | Promise<void>;
   /** Callback when ExitPlanMode detected with plan path */
   onExitPlanMode?: (planFilePath: string | null) => Promise<void>;
 }
@@ -356,7 +356,7 @@ async function postTurn(
     infiniteRetry?: boolean;
     postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage, isLastMessage?: boolean) => Promise<boolean>;
     activityMessages?: Map<string, string>;
-    onPlanFileDetected?: (path: string) => void;
+    onPlanFileDetected?: (path: string) => void | Promise<void>;
     onExitPlanMode?: (planFilePath: string | null) => Promise<void>;
   },
   isFinalTurn: boolean = false
@@ -397,7 +397,7 @@ async function postTurn(
 
   // Notify callbacks
   if (detectedPlanPath && onPlanFileDetected) {
-    onPlanFileDetected(detectedPlanPath);
+    await onPlanFileDetected(detectedPlanPath);
   }
 
   // 1. Post user input (skip if already posted - partial turn recovery)

@@ -38,6 +38,8 @@ vi.mock('../../session-manager.js', async (importOriginal) => {
     getSession: vi.fn(() => ({ threadCharLimit: 500, stripEmptyTag: false })),
     getThreadSession: vi.fn(() => null),
     saveMessageMapping: vi.fn(),
+    saveSession: vi.fn(),  // For planFilePath persistence
+    saveThreadSession: vi.fn(),  // For planFilePath persistence in threads
     mergeActivityLog: vi.fn(),  // Now using merge instead of save
     getMessageMapUuids: vi.fn(() => new Set<string>()),  // Default to empty set (no messages posted yet)
     isSlackOriginatedUserUuid: vi.fn(() => false),  // Default: not Slack-originated (terminal input)
@@ -1303,6 +1305,164 @@ describe('terminal-watcher', () => {
         (call: any[]) => call[2]?.sdkMessageId === 'empty-msg-uuid'
       );
       expect(emptyMsgCalls.length).toBe(0);
+    });
+  });
+
+  describe('planFilePath persistence', () => {
+    it('should initialize planFilePath from session on startup', async () => {
+      const sessionWithPlanFile = {
+        ...mockSession,
+        planFilePath: '/path/to/existing-plan.md',
+      };
+
+      startWatching('channel-1', undefined, sessionWithPlanFile, mockClient, 'status-ts');
+
+      const watcher = getWatcher('channel-1');
+      expect(watcher?.planFilePath).toBe('/path/to/existing-plan.md');
+    });
+
+    it('should initialize planFilePath to null when session has no planFilePath', async () => {
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      const watcher = getWatcher('channel-1');
+      expect(watcher?.planFilePath).toBeNull();
+    });
+
+    it('should persist planFilePath to session when detected in main channel', async () => {
+      // Mock plan file detection during message sync
+      vi.mocked(sessionReader.extractPlanFilePathFromMessage).mockReturnValue('/path/to/new-plan.md');
+
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-plan-1',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'enter plan mode' },
+      };
+      const mockEnterPlanMode = {
+        type: 'assistant',
+        uuid: 'enter-plan-1',
+        timestamp: '2024-01-01T00:00:01Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'EnterPlanMode' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockUserInput, mockEnterPlanMode],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [mockEnterPlanMode as any], textOutput: null }],
+        trailingActivity: [],
+        allMessageUuids: ['user-plan-1', 'enter-plan-1'],
+      }]);
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // Advance timer to trigger poll
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Should have persisted planFilePath to main channel session
+      expect(sessionManager.saveSession).toHaveBeenCalledWith('channel-1', {
+        planFilePath: '/path/to/new-plan.md',
+      });
+      expect(sessionManager.saveThreadSession).not.toHaveBeenCalled();
+
+      // Reset mock for next test
+      vi.mocked(sessionReader.extractPlanFilePathFromMessage).mockReturnValue(null);
+    });
+
+    it('should persist planFilePath to thread session when detected in thread', async () => {
+      // Mock plan file detection during message sync
+      vi.mocked(sessionReader.extractPlanFilePathFromMessage).mockReturnValue('/path/to/thread-plan.md');
+
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-plan-thread',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'enter plan mode' },
+      };
+      const mockEnterPlanMode = {
+        type: 'assistant',
+        uuid: 'enter-plan-thread',
+        timestamp: '2024-01-01T00:00:01Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'EnterPlanMode' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockUserInput, mockEnterPlanMode],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [mockEnterPlanMode as any], textOutput: null }],
+        trailingActivity: [],
+        allMessageUuids: ['user-plan-thread', 'enter-plan-thread'],
+      }]);
+
+      // Start watching a thread
+      startWatching('channel-1', 'thread-ts-123', mockSession, mockClient, 'status-ts');
+
+      // Advance timer to trigger poll
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Should have persisted planFilePath to thread session
+      expect(sessionManager.saveThreadSession).toHaveBeenCalledWith('channel-1', 'thread-ts-123', {
+        planFilePath: '/path/to/thread-plan.md',
+      });
+      expect(sessionManager.saveSession).not.toHaveBeenCalled();
+
+      // Reset mock for next test
+      vi.mocked(sessionReader.extractPlanFilePathFromMessage).mockReturnValue(null);
+    });
+
+    it('should update watcher state planFilePath when detected', async () => {
+      // Mock plan file detection during message sync
+      vi.mocked(sessionReader.extractPlanFilePathFromMessage).mockReturnValue('/path/to/detected-plan.md');
+
+      const mockUserInput = {
+        type: 'user',
+        uuid: 'user-plan-update',
+        timestamp: '2024-01-01T00:00:00Z',
+        sessionId: 'sess-1',
+        message: { role: 'user', content: 'enter plan mode' },
+      };
+      const mockEnterPlanMode = {
+        type: 'assistant',
+        uuid: 'enter-plan-update',
+        timestamp: '2024-01-01T00:00:01Z',
+        sessionId: 'sess-1',
+        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'EnterPlanMode' }] },
+      };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [mockUserInput, mockEnterPlanMode],
+        newOffset: 2000,
+      });
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('');
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: mockUserInput as any,
+        segments: [{ activityMessages: [mockEnterPlanMode as any], textOutput: null }],
+        trailingActivity: [],
+        allMessageUuids: ['user-plan-update', 'enter-plan-update'],
+      }]);
+
+      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+
+      // Advance timer to trigger poll
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Watcher state should be updated
+      const watcher = getWatcher('channel-1');
+      expect(watcher?.planFilePath).toBe('/path/to/detected-plan.md');
+
+      // Reset mock for next test
+      vi.mocked(sessionReader.extractPlanFilePathFromMessage).mockReturnValue(null);
     });
   });
 });
