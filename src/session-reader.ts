@@ -279,12 +279,19 @@ export function readLastUserMessageUuid(sessionFilePath: string): string | null 
     const content = fs.readFileSync(sessionFilePath, 'utf-8');
     const lines = content.trim().split('\n');
 
-    // Search from end to find last user message
+    // Search from end to find last user TEXT input (not tool_result)
+    // Tool results are also type: 'user' but have content[0].type === 'tool_result'
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const parsed = JSON.parse(lines[i]);
-        if (parsed.type === 'user' && parsed.uuid) {
-          return parsed.uuid;
+        if (parsed.type === 'user' && parsed.uuid && parsed.message?.content) {
+          // Check if this is actual user text input, not a tool_result
+          const content = parsed.message.content;
+          const isTextInput = typeof content === 'string' ||
+            (Array.isArray(content) && content.length > 0 && content[0].type === 'text');
+          if (isTextInput) {
+            return parsed.uuid;
+          }
         }
       } catch {
         continue;

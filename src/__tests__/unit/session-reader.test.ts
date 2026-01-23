@@ -665,6 +665,68 @@ describe('session-reader', () => {
       // Should find the user message even though assistant message is last
       expect(result).toBe('uuid-user');
     });
+
+    it('should return user text UUID, not tool_result UUID when tools are used', () => {
+      // This is the critical test case for the /ff import bug fix:
+      // When Claude uses tools, tool_result messages have type: 'user' but should NOT
+      // be returned - only actual user text input should be returned.
+      const userTextMsg = {
+        type: 'user',
+        uuid: 'uuid-user-text',
+        message: { role: 'user', content: [{ type: 'text', text: 'analyze this file' }] }
+      };
+      const toolResultMsg = {
+        type: 'user',
+        uuid: 'uuid-tool-result',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-123', content: 'file contents here' }] }
+      };
+      const assistantMsg = {
+        type: 'assistant',
+        uuid: 'uuid-assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Analysis complete' }] }
+      };
+      const content = [userTextMsg, toolResultMsg, assistantMsg]
+        .map(m => JSON.stringify(m))
+        .join('\n');
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = readLastUserMessageUuid('/some/file.jsonl');
+
+      // Should return the user TEXT input UUID, NOT the tool_result UUID
+      expect(result).toBe('uuid-user-text');
+    });
+
+    it('should return user text UUID when multiple tool_results follow', () => {
+      // Multiple tool calls create multiple tool_result messages
+      const userTextMsg = {
+        type: 'user',
+        uuid: 'uuid-user-text',
+        message: { role: 'user', content: 'read these files' }  // string content
+      };
+      const toolResult1 = {
+        type: 'user',
+        uuid: 'uuid-tool-result-1',
+        message: { role: 'user', content: [{ type: 'tool_result', content: 'file1 content' }] }
+      };
+      const toolResult2 = {
+        type: 'user',
+        uuid: 'uuid-tool-result-2',
+        message: { role: 'user', content: [{ type: 'tool_result', content: 'file2 content' }] }
+      };
+      const content = [userTextMsg, toolResult1, toolResult2]
+        .map(m => JSON.stringify(m))
+        .join('\n');
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = readLastUserMessageUuid('/some/file.jsonl');
+
+      // Should skip both tool_results and return the user text input
+      expect(result).toBe('uuid-user-text');
+    });
   });
 
   describe('buildActivityEntriesFromMessage', () => {
