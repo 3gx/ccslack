@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { randomUUID } from 'crypto';
 
 const SKIP_LIVE = process.env.SKIP_SDK_TESTS === 'true';
 
@@ -14,9 +15,10 @@ describe.skipIf(SKIP_LIVE)('acceptEdits canUseTool - Edit', { timeout: 120000 },
     let canUseToolCalledForEdit = false;
     const toolsCalled: string[] = [];
     const toolsUsed: string[] = [];
+    const testFile = `/tmp/ccslack-test-acceptedits-${randomUUID()}.txt`;
 
     const result = query({
-      prompt: 'Create a file at /tmp/ccslack-test-acceptedits.txt with content "test". Use the Write tool.',
+      prompt: `Create a file at ${testFile} with content "test". Use the Write tool.`,
       options: {
         permissionMode: 'acceptEdits',
         maxTurns: 3,
