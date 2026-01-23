@@ -30,6 +30,9 @@ export function createMockSlackClient() {
       startStream: vi.fn().mockRejectedValue(new Error('Native streaming not available')),
       appendStream: vi.fn().mockResolvedValue({}),
       stopStream: vi.fn().mockResolvedValue({}),
+      getPermalink: vi.fn().mockImplementation(({ channel, message_ts }) =>
+        Promise.resolve({ ok: true, permalink: `https://test-workspace.slack.com/archives/${channel}/p${message_ts.replace('.', '')}` })
+      ),
     },
     conversations: {
       history: vi.fn().mockResolvedValue({ ok: true, messages: [] }),

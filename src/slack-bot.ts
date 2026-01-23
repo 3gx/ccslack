@@ -184,6 +184,30 @@ const activeQueries = new Map<string, ActiveQuery>();
 // Mutexes for serializing updates (prevents abort race conditions)
 const updateMutexes = new Map<string, Mutex>();
 
+// Get permalink URL for a message using Slack API
+// Returns workspace-specific URL that works properly on iOS mobile app
+async function getMessagePermalink(
+  client: any,
+  channel: string,
+  messageTs: string
+): Promise<string> {
+  try {
+    const result = await withSlackRetry(() =>
+      client.chat.getPermalink({
+        channel,
+        message_ts: messageTs,
+      })
+    ) as { ok?: boolean; permalink?: string };
+    if (result.ok && result.permalink) {
+      return result.permalink;
+    }
+  } catch (error) {
+    console.error('[getMessagePermalink] Failed to get permalink, using fallback:', error);
+  }
+  // Fallback to manual URL construction (works on desktop but may not open in iOS app)
+  return `https://slack.com/archives/${channel}/p${messageTs.replace('.', '')}`;
+}
+
 function getUpdateMutex(conversationKey: string): Mutex {
   if (!updateMutexes.has(conversationKey)) {
     updateMutexes.set(conversationKey, new Mutex());
@@ -1165,9 +1189,8 @@ async function createForkFromMessage(params: {
   const mainSession = getSession(channelId);
 
   // 4. Build fork point link (used in anchor and thread messages)
-  const forkPointLink = sourceThreadTs
-    ? `https://slack.com/archives/${channelId}/p${forkPointMessageTs.replace('.', '')}?thread_ts=${sourceThreadTs}&cid=${channelId}`
-    : `https://slack.com/archives/${channelId}/p${forkPointMessageTs.replace('.', '')}`;
+  // Use Slack API to get workspace-specific permalink (works on iOS mobile)
+  const forkPointLink = await getMessagePermalink(client, channelId, forkPointMessageTs);
 
   // 5. Create fork anchor in main channel
   const anchorMessage = await withSlackRetry(() =>
@@ -1215,7 +1238,7 @@ async function createForkFromMessage(params: {
 
   // 8. Notify in source thread (skip for main channel forks)
   if (sourceThreadTs) {
-    const newThreadLink = `https://slack.com/archives/${channelId}/p${newThreadTs.replace('.', '')}`;
+    const newThreadLink = await getMessagePermalink(client, channelId, newThreadTs);
     await withSlackRetry(() =>
       client.chat.postMessage({
         channel: channelId,
@@ -1805,7 +1828,8 @@ async function handleMessage(params: {
     if (isNewFork) {
       // Build link to the fork point - the message user replied to (threadTs)
       // With point-in-time forking, we fork from this specific message, not the last one
-      const forkPointLink = `https://slack.com/archives/${channelId}/p${threadTs.replace('.', '')}`;
+      // Use Slack API to get workspace-specific permalink (works on iOS mobile)
+      const forkPointLink = await getMessagePermalink(client, channelId, threadTs);
       const forkMessage = `🔀 _Forked with conversation state through: <${forkPointLink}|this message>_`;
 
       // Notify user about fork with link to actual fork point

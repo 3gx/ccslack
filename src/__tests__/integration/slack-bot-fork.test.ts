@@ -222,7 +222,8 @@ describe('slack-bot fork handlers', () => {
 
       // With point-in-time forking, link should point to threadTs (the message being replied to)
       // NOT to the last message in main conversation
-      const expectedLink = `https://slack.com/archives/C123/p${threadTs.replace('.', '')}`;
+      // Uses workspace-specific URL from chat.getPermalink API (works on iOS mobile)
+      const expectedLink = `https://test-workspace.slack.com/archives/C123/p${threadTs.replace('.', '')}`;
       expect(forkNotificationCall[0].text).toContain(expectedLink);
       expect(forkNotificationCall[0].text).toContain('this message');
     });
@@ -295,7 +296,8 @@ describe('slack-bot fork handlers', () => {
       );
 
       expect(forkNotificationCall).toBeDefined();
-      const expectedLink = `https://slack.com/archives/C123/p${threadTs.replace('.', '')}`;
+      // Uses workspace-specific URL from chat.getPermalink API (works on iOS mobile)
+      const expectedLink = `https://test-workspace.slack.com/archives/C123/p${threadTs.replace('.', '')}`;
       expect(forkNotificationCall[0].text).toContain(expectedLink);
     });
 
@@ -359,7 +361,8 @@ describe('slack-bot fork handlers', () => {
       );
 
       expect(forkNotificationCall).toBeDefined();
-      const expectedLink = `https://slack.com/archives/C123/p${threadTs.replace('.', '')}`;
+      // Uses workspace-specific URL from chat.getPermalink API (works on iOS mobile)
+      const expectedLink = `https://test-workspace.slack.com/archives/C123/p${threadTs.replace('.', '')}`;
       expect(forkNotificationCall[0].text).toContain(expectedLink);
     });
 
@@ -690,6 +693,14 @@ describe('slack-bot fork handlers', () => {
         configuredAt: Date.now(),
       });
 
+      // Override getPermalink to return thread-aware URL (simulating Slack API behavior for threaded messages)
+      mockClient.chat.getPermalink.mockImplementation(({ channel, message_ts }: { channel: string; message_ts: string }) =>
+        Promise.resolve({
+          ok: true,
+          permalink: `https://test-workspace.slack.com/archives/${channel}/p${message_ts.replace('.', '')}?thread_ts=${threadTs}&cid=${channel}`,
+        })
+      );
+
       await handler({
         action: {
           action_id: `fork_here_C123_${threadTs}`,
@@ -710,7 +721,7 @@ describe('slack-bot fork handlers', () => {
         (call: any) => call[0].thread_ts !== undefined && call[0].text?.includes('Point-in-time fork from')
       );
       expect(forkThreadMessage).toBeDefined();
-      // Thread URL format includes thread_ts
+      // Thread URL format includes thread_ts (from Slack's chat.getPermalink API)
       const expectedUrlPart = `thread_ts=${threadTs}`;
       expect(forkThreadMessage[0].text).toContain(expectedUrlPart);
     });
