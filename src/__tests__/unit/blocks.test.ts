@@ -3286,6 +3286,166 @@ describe('blocks', () => {
       expect((blocks[1] as any).text.text).toContain(':brain:');
       expect((blocks[1] as any).text.text).toContain('Thinking');
     });
+
+    describe('Generate Output button (failed upload retry)', () => {
+      const completeBaseParams = {
+        activityLog: [{ timestamp: Date.now(), type: 'starting' as const }],
+        inProgress: false,
+        status: 'complete' as const,
+        mode: 'bypassPermissions' as const,
+        conversationKey: 'C123_thread456',
+        toolsCompleted: 0,
+        elapsedMs: 1000,
+      };
+
+      it('should show Generate Output button when hasFailedUpload is true', () => {
+        const blocks = buildCombinedStatusBlocks({
+          ...completeBaseParams,
+          hasFailedUpload: true,
+          retryUploadInfo: {
+            activityLogKey: 'C123_thread456',
+            channelId: 'C123',
+            threadTs: 'thread456',
+            statusMsgTs: '1234567890.123456',
+          },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        expect(actionsBlock).toBeDefined();
+        const retryButton = (actionsBlock as any).elements.find(
+          (e: any) => e.action_id.startsWith('retry_upload_')
+        );
+        expect(retryButton).toBeDefined();
+        expect(retryButton.text.text).toContain('Generate Output');
+        expect(retryButton.action_id).toBe('retry_upload_1234567890.123456');
+        // Verify value contains JSON with activityLogKey for file lookup
+        const value = JSON.parse(retryButton.value);
+        expect(value.activityLogKey).toBe('C123_thread456');
+        expect(value.channelId).toBe('C123');
+        expect(value.threadTs).toBe('thread456');
+      });
+
+      it('should NOT show Generate Output button when hasFailedUpload is false', () => {
+        const blocks = buildCombinedStatusBlocks({
+          ...completeBaseParams,
+          hasFailedUpload: false,
+          retryUploadInfo: {
+            activityLogKey: 'C123_thread456',
+            channelId: 'C123',
+            statusMsgTs: '1234567890.123456',
+          },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        const retryButton = (actionsBlock as any)?.elements?.find(
+          (e: any) => e.action_id?.startsWith('retry_upload_')
+        );
+        expect(retryButton).toBeUndefined();
+      });
+
+      it('should NOT show Generate Output button when retryUploadInfo is missing', () => {
+        const blocks = buildCombinedStatusBlocks({
+          ...completeBaseParams,
+          hasFailedUpload: true,
+          // retryUploadInfo omitted
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        const retryButton = (actionsBlock as any)?.elements?.find(
+          (e: any) => e.action_id?.startsWith('retry_upload_')
+        );
+        expect(retryButton).toBeUndefined();
+      });
+
+      it('should NOT show Generate Output button during inProgress', () => {
+        const blocks = buildCombinedStatusBlocks({
+          ...completeBaseParams,
+          inProgress: true,
+          status: 'thinking',
+          hasFailedUpload: true,
+          retryUploadInfo: {
+            activityLogKey: 'C123_thread456',
+            channelId: 'C123',
+            statusMsgTs: '1234567890.123456',
+          },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        const retryButton = (actionsBlock as any)?.elements?.find(
+          (e: any) => e.action_id?.startsWith('retry_upload_')
+        );
+        expect(retryButton).toBeUndefined();
+      });
+
+      it('should show both Fork and Generate Output buttons together', () => {
+        const blocks = buildCombinedStatusBlocks({
+          ...completeBaseParams,
+          isFinalSegment: true,
+          forkInfo: { threadTs: 'thread-123', conversationKey: 'C123_thread456' },
+          hasFailedUpload: true,
+          retryUploadInfo: {
+            activityLogKey: 'C123_thread456',
+            channelId: 'C123',
+            threadTs: 'thread456',
+            statusMsgTs: '1234567890.123456',
+          },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        const elements = (actionsBlock as any).elements;
+
+        const forkButton = elements.find((e: any) => e.action_id.startsWith('fork_here_'));
+        const retryButton = elements.find((e: any) => e.action_id.startsWith('retry_upload_'));
+
+        expect(forkButton).toBeDefined();
+        expect(retryButton).toBeDefined();
+      });
+
+      // THREAD vs MAIN CHANNEL PARITY TESTS
+      it('should work for main channel (no threadTs)', () => {
+        const blocks = buildCombinedStatusBlocks({
+          ...completeBaseParams,
+          conversationKey: 'C123',  // Main channel - no thread
+          hasFailedUpload: true,
+          retryUploadInfo: {
+            activityLogKey: 'C123_1234567890.000000',  // Main channel uses originalTs
+            channelId: 'C123',
+            // threadTs: undefined - main channel
+            statusMsgTs: '1234567890.123456',
+          },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        const retryButton = (actionsBlock as any).elements.find(
+          (e: any) => e.action_id.startsWith('retry_upload_')
+        );
+        expect(retryButton).toBeDefined();
+        const value = JSON.parse(retryButton.value);
+        expect(value.threadTs).toBeUndefined();
+      });
+
+      it('should work for thread (with threadTs)', () => {
+        const blocks = buildCombinedStatusBlocks({
+          ...completeBaseParams,
+          conversationKey: 'C123_thread789',
+          hasFailedUpload: true,
+          retryUploadInfo: {
+            activityLogKey: 'C123_thread789',
+            channelId: 'C123',
+            threadTs: 'thread789',
+            statusMsgTs: '1234567890.123456',
+          },
+        });
+
+        const actionsBlock = blocks.find(b => b.type === 'actions');
+        const retryButton = (actionsBlock as any).elements.find(
+          (e: any) => e.action_id.startsWith('retry_upload_')
+        );
+        expect(retryButton).toBeDefined();
+        const value = JSON.parse(retryButton.value);
+        expect(value.threadTs).toBe('thread789');
+      });
+    });
   });
 
   describe('buildTopStatusLine', () => {

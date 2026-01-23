@@ -1518,6 +1518,13 @@ export interface CombinedStatusParams extends StatusPanelParams {
   isNewSession?: boolean;  // Show [new] prefix in TOP line
   isFinalSegment?: boolean;  // Show Fork button on completion
   forkInfo?: { threadTs?: string; conversationKey: string };  // For Fork button
+  hasFailedUpload?: boolean;  // Show retry button when upload failed
+  retryUploadInfo?: {
+    activityLogKey: string;   // Key for getActivityLog() - NOT conversationKey
+    channelId: string;
+    threadTs?: string;        // Explicit threadTs for thread/channel parity
+    statusMsgTs: string;
+  };
 }
 
 // SDK mode labels for display (shared by helper functions)
@@ -1681,6 +1688,8 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     isNewSession,
     isFinalSegment,
     forkInfo,
+    hasFailedUpload,
+    retryUploadInfo,
   } = params;
 
   const blocks: Block[] = [];
@@ -1811,6 +1820,20 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
         },
         action_id: `fork_here_${forkInfo.conversationKey}`,
         value: JSON.stringify({ threadTs: forkInfo.threadTs }),
+      });
+    }
+
+    // Generate Output button when upload failed (retry mechanism)
+    if (hasFailedUpload && retryUploadInfo && status === 'complete') {
+      actionElements.push({
+        type: 'button',
+        text: {
+          type: 'plain_text',
+          text: ':page_facing_up: Generate Output',
+          emoji: true,
+        },
+        action_id: `retry_upload_${retryUploadInfo.statusMsgTs}`,
+        value: JSON.stringify(retryUploadInfo),
       });
     }
 

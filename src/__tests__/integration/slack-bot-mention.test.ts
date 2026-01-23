@@ -91,7 +91,7 @@ vi.mock('../../session-reader.js', () => ({
 import { createMockSlackClient } from './slack-bot-setup.js';
 
 // Import mocked modules
-import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog } from '../../session-manager.js';
+import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog, saveActivityLog } from '../../session-manager.js';
 import { isSessionActiveInTerminal } from '../../concurrent-check.js';
 import { startClaudeQuery } from '../../claude-client.js';
 import fs from 'fs';

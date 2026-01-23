@@ -1,4 +1,5 @@
 import { App } from '@slack/bolt';
+import { WebClient } from '@slack/web-api';
 import { Mutex } from 'async-mutex';
 import { startClaudeQuery, ClaudeQuery, PermissionResult } from './claude-client.js';
 import {
@@ -139,6 +140,8 @@ interface ProcessingState {
   // Segment tracking for View Log isolation
   currentSegmentKey: string | null;
   lastPostedActivityIndex: number;
+  // Upload failure tracking for retry button
+  uploadFailed?: boolean;
 }
 
 /**
@@ -171,7 +174,8 @@ const pendingMessages = new Map<string, PendingMessage>();
 const pendingSelections = new Map<string, string[]>();
 
 // Track busy conversations (processing a request)
-const busyConversations = new Set<string>();
+// Exported for testing
+export const busyConversations = new Set<string>();
 
 // Track active queries for abort capability
 interface ActiveQuery {
@@ -2243,6 +2247,8 @@ async function handleMessage(params: {
     // Segment tracking for View Log isolation
     currentSegmentKey: null,
     lastPostedActivityIndex: 0,
+    // Upload failure tracking for retry button
+    uploadFailed: false,
   };
 
   // Helper function to generate a new segment key and register it for lookup
@@ -2572,9 +2578,16 @@ async function handleMessage(params: {
             mappedAssistantUuids.add(mappingInfo.sdkMessageId);
           }
 
+          // Track upload failure for retry button
+          if (uploadResult === null) {
+            processingState.uploadFailed = true;
+            console.log('[Interleaved] Upload failed, will show retry button');
+          }
+
           console.log(`[Interleaved] Posted response segment: ${currentResponse.length} chars${mappingInfo ? ` (mapped: ${mappingInfo.sdkMessageId})` : ''}`);
         } catch (error) {
           console.error('[Interleaved] Error posting response segment:', error);
+          processingState.uploadFailed = true;
         }
 
         // 4. Reset currentResponse for next segment (keep fullResponse for total tracking)
@@ -3075,6 +3088,15 @@ async function handleMessage(params: {
               isNewSession: newSessionId !== null && session.sessionId === null,
               isFinalSegment: isQueryComplete,  // Show Fork button on successful completion
               forkInfo: { threadTs, conversationKey },
+              hasFailedUpload: processingState.uploadFailed,
+              retryUploadInfo: processingState.uploadFailed
+                ? {
+                    activityLogKey,  // Use activityLogKey, NOT conversationKey
+                    channelId,
+                    threadTs,  // Pass explicitly for thread/channel parity
+                    statusMsgTs: statusMsgTs!,
+                  }
+                : undefined,
             });
 
             await withSlackRetry(() =>
@@ -4584,6 +4606,119 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
     } catch (error) {
       console.error('[ForkHere] Error posting error message:', error);
     }
+  }
+});
+
+// Handle "Generate Output" retry button click when upload failed
+app.action(/^retry_upload_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  // Extract info from button value
+  const value = 'value' in action ? action.value : '';
+  let retryInfo: { activityLogKey: string; channelId: string; threadTs?: string; statusMsgTs: string };
+  try {
+    retryInfo = JSON.parse(value || '{}');
+  } catch {
+    console.error('[RetryUpload] Invalid button value');
+    return;
+  }
+
+  const { activityLogKey, channelId, threadTs, statusMsgTs } = retryInfo;
+  const userId = body.user?.id;
+
+  if (!channelId || !userId) return;
+
+  // Check for concurrent query - block if conversation is busy
+  const conversationKey = threadTs ? `${channelId}_${threadTs}` : channelId;
+  if (busyConversations.has(conversationKey)) {
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      text: ':hourglass: A query is currently in progress. Please wait for it to complete before retrying.',
+    });
+    return;
+  }
+
+  // Load response content from activity log file (getActivityLog reads from sessions.json)
+  const activityLog = await getActivityLog(activityLogKey);
+
+  // Find the LAST generating entry with content (handles multiple segments)
+  const generatingEntries = activityLog?.filter(
+    e => e.type === 'generating' && e.generatingContent && !e.generatingInProgress
+  ) || [];
+  const generatingEntry = generatingEntries[generatingEntries.length - 1];
+
+  if (!generatingEntry?.generatingContent) {
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      text: ':warning: Response content is no longer available. The activity log may have been cleared.',
+    });
+    return;
+  }
+
+  // Reconstruct upload data from activity log
+  const markdown = generatingEntry.generatingContent;
+  const liveConfig = getLiveSessionConfig(channelId, threadTs);
+  const strippedResponse = stripMarkdownCodeFence(markdown, { stripEmptyTag: liveConfig.stripEmptyTag });
+  const prefixedResponse = ':speech_balloon: *Response*\n' + markdownToSlack(strippedResponse);
+
+  console.log(`[RetryUpload] Retrying upload for ${activityLogKey}: ${markdown.length} chars`);
+
+  // Retry the upload
+  const uploadResult = await uploadMarkdownAndPngWithResponse(
+    client as WebClient,
+    channelId,
+    strippedResponse,
+    prefixedResponse,
+    threadTs,          // Use explicit threadTs (undefined for main channel)
+    userId,
+    liveConfig.threadCharLimit,
+    liveConfig.stripEmptyTag
+  );
+
+  if (uploadResult?.ts || uploadResult?.uploadSucceeded) {
+    console.log('[RetryUpload] Upload succeeded');
+
+    // Update activity message to remove retry button
+    try {
+      const currentMessage = await client.conversations.history({
+        channel: channelId,
+        latest: statusMsgTs,
+        inclusive: true,
+        limit: 1,
+      });
+
+      const existingBlocks = (currentMessage as any).messages?.[0]?.blocks || [];
+      const updatedBlocks = existingBlocks.map((block: any) => {
+        if (block.type === 'actions' && block.elements) {
+          return {
+            ...block,
+            elements: block.elements.filter((el: any) =>
+              !el.action_id?.startsWith('retry_upload_')
+            ),
+          };
+        }
+        return block;
+      });
+
+      await withSlackRetry(() =>
+        client.chat.update({
+          channel: channelId,
+          ts: statusMsgTs,
+          blocks: updatedBlocks,
+          text: 'Complete',
+        })
+      );
+    } catch (error) {
+      console.error('[RetryUpload] Error removing button:', error);
+    }
+  } else {
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      text: ':x: File upload failed again. Please try again later.',
+    });
   }
 });
 
