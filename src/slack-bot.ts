@@ -151,6 +151,11 @@ interface ProcessingState {
   charLimit: number;                       // Character limit for thread messages
   // Thinking update race condition protection
   pendingThinkingUpdate: Promise<void> | null;  // Track in-flight thinking update
+  // Auto-compact tracking (for spinner + completion)
+  autoCompactMsgTs: string | null;        // Message ts to update with spinner
+  autoCompactStartTime: number | null;    // When compaction started
+  autoCompactPreTokens: number | null;    // Tokens before compaction
+  autoCompactComplete: boolean;           // Race condition flag for completion
 }
 
 /**
@@ -590,7 +595,43 @@ async function runCompactSession(
   originalTs: string | undefined
 ): Promise<void> {
   const startTime = Date.now();
-  let spinnerIndex = 0;
+  const conversationKey = `compact_${channelId}`;
+
+  // Initialize ProcessingState for abort capability (all required fields)
+  const processingState: ProcessingState = {
+    status: 'thinking',
+    toolsCompleted: 0,
+    thinkingBlockCount: 0,
+    startTime,
+    lastUpdateTime: 0,
+    updateRateSeconds: session.updateRateSeconds ?? UPDATE_RATE_DEFAULT,
+    activityLog: [{ timestamp: startTime, type: 'starting' }],
+    currentThinkingIndex: null,
+    currentThinkingContent: '',
+    currentToolUseIndex: null,
+    spinnerIndex: 0,
+    rateLimitHits: 0,
+    rateLimitNotified: false,
+    autoCompactNotified: false,
+    exitPlanModeIndex: null,
+    exitPlanModeInputJson: '',
+    exitPlanModeInput: null,
+    fileToolInputs: new Map(),
+    planFilePath: null,
+    uploadFailed: false,
+    activityThreadMsgTs: null,
+    activityBatch: [],
+    activityBatchStartIndex: 0,
+    lastActivityPostTime: 0,
+    threadParentTs: null,
+    charLimit: MESSAGE_SIZE_DEFAULT,
+    pendingThinkingUpdate: null,
+    // Tracking for :gear: message during compaction
+    autoCompactMsgTs: null,
+    autoCompactStartTime: null,
+    autoCompactPreTokens: null,
+    autoCompactComplete: false,
+  };
 
   // Remove eyes reaction first
   if (originalTs) {
@@ -616,7 +657,7 @@ async function runCompactSession(
         model: session.model,
         toolsCompleted: 0,
         elapsedMs: 0,
-        conversationKey: `compact_${channelId}`,
+        conversationKey,
         spinner: SPINNER_FRAMES[0],
         customStatus: 'Compacting session...',
       }),
@@ -635,6 +676,15 @@ async function runCompactSession(
     model: session.model,
   });
 
+  // Track busy state and register for abort capability
+  busyConversations.add(conversationKey);
+  activeQueries.set(conversationKey, {
+    query: claudeQuery,
+    statusMsgTs,
+    mode: session.mode,
+    processingState,
+  });
+
   // Track compaction state
   let compactBoundaryFound = false;
   let preTokens: number | undefined;
@@ -642,10 +692,14 @@ async function runCompactSession(
   let modelName: string | undefined;
   let errorOccurred = false;
   let errorMessage = '';
+  // Track :gear: message for spinner updates
+  let compactMsgTs: string | null = null;
+  let compactStartTime: number | null = null;
+  let compactComplete = false;
 
   // Spinner update timer
   const spinnerTimer = setInterval(async () => {
-    spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
+    processingState.spinnerIndex = (processingState.spinnerIndex + 1) % SPINNER_FRAMES.length;
     const elapsed = Date.now() - startTime;
 
     try {
@@ -659,8 +713,8 @@ async function runCompactSession(
             model: modelName || session.model,
             toolsCompleted: 0,
             elapsedMs: elapsed,
-            conversationKey: `compact_${channelId}`,
-            spinner: SPINNER_FRAMES[spinnerIndex],
+            conversationKey,
+            spinner: SPINNER_FRAMES[processingState.spinnerIndex],
             customStatus: compactBoundaryFound ? 'Finalizing...' : 'Compacting session...',
           }),
           text: 'Compacting session...',
@@ -669,11 +723,30 @@ async function runCompactSession(
     } catch {
       // Ignore update errors
     }
+
+    // Update :gear: message if posted (check compactComplete to prevent race condition)
+    if (compactMsgTs && compactStartTime && !compactComplete) {
+      const compactElapsed = ((Date.now() - compactStartTime) / 1000).toFixed(1);
+      const tokenInfo = preTokens ? ` (was ${preTokens.toLocaleString()} tokens)` : '';
+      try {
+        await client.chat.update({
+          channel: channelId,
+          ts: compactMsgTs,
+          text: `:gear: ${SPINNER_FRAMES[processingState.spinnerIndex]} Compacting context${tokenInfo}... (${compactElapsed}s)`,
+        });
+      } catch { /* ignore */ }
+    }
   }, STATUS_UPDATE_INTERVAL);
 
   try {
     // Process SDK messages
     for await (const msg of claudeQuery) {
+      // Check for abort
+      if (isAborted(conversationKey)) {
+        console.log(`[Compact] Aborted by user`);
+        break;
+      }
+
       // Capture session ID and model from init message
       if (msg.type === 'system' && (msg as any).subtype === 'init') {
         newSessionId = (msg as any).session_id;
@@ -689,6 +762,20 @@ async function runCompactSession(
           preTokens = metadata.pre_tokens;
           console.log(`[Compact] Boundary found - pre_tokens: ${preTokens}`);
         }
+
+        // Post :gear: message with spinner
+        const tokenInfo = preTokens ? ` (was ${preTokens.toLocaleString()} tokens)` : '';
+        const compactMsg = await withSlackRetry(
+          async () =>
+            client.chat.postMessage({
+              channel: channelId,
+              thread_ts: threadTs,
+              text: `:gear: ${SPINNER_FRAMES[0]} Compacting context${tokenInfo}... (0.0s)`,
+            }),
+          { onRateLimit: () => {} }
+        );
+        compactMsgTs = (compactMsg as { ts?: string })?.ts ?? null;
+        compactStartTime = Date.now();
       }
 
       // Check for compacting status
@@ -702,12 +789,53 @@ async function runCompactSession(
     console.error(`[Compact] Error: ${errorMessage}`);
   } finally {
     clearInterval(spinnerTimer);
+    activeQueries.delete(conversationKey);
+    clearAborted(conversationKey);
+    busyConversations.delete(conversationKey);
+    cleanupMutex(conversationKey);
   }
 
   const elapsed = Date.now() - startTime;
+  const wasAborted = isAborted(conversationKey);
+
+  // Update :gear: message with completion (if posted and not aborted)
+  if (compactMsgTs && compactStartTime && !wasAborted && !errorOccurred) {
+    // Set flag before async update to prevent race with timer
+    compactComplete = true;
+
+    const compactElapsed = ((Date.now() - compactStartTime) / 1000).toFixed(1);
+    const tokenInfo = preTokens ? `Was: ${preTokens.toLocaleString()} tokens` : '';
+    await withSlackRetry(
+      async () =>
+        client.chat.update({
+          channel: channelId,
+          ts: compactMsgTs!,
+          text: `:checkered_flag: Compacted context | ${tokenInfo} | ${compactElapsed}s`,
+        }),
+      { onRateLimit: () => {} }
+    );
+  }
 
   // Update final status
-  if (errorOccurred) {
+  if (wasAborted) {
+    // Aborted state
+    await withSlackRetry(() =>
+      client.chat.update({
+        channel: channelId,
+        ts: statusMsgTs,
+        blocks: buildStatusPanelBlocks({
+          status: 'aborted',
+          mode: session.mode,
+          model: modelName || session.model,
+          toolsCompleted: 0,
+          elapsedMs: elapsed,
+          conversationKey,
+          customStatus: 'Compaction aborted',
+        }),
+        text: 'Compaction aborted',
+      })
+    );
+  } else if (errorOccurred) {
     // Error state
     await withSlackRetry(() =>
       client.chat.update({
@@ -719,7 +847,7 @@ async function runCompactSession(
           model: modelName || session.model,
           toolsCompleted: 0,
           elapsedMs: elapsed,
-          conversationKey: `compact_${channelId}`,
+          conversationKey,
           customStatus: `Compaction failed: ${errorMessage}`,
         }),
         text: `Compaction failed: ${errorMessage}`,
@@ -747,7 +875,7 @@ async function runCompactSession(
           model: modelName || session.model,
           toolsCompleted: 0,
           elapsedMs: elapsed,
-          conversationKey: `compact_${channelId}`,
+          conversationKey,
           customStatus: `Compaction complete | ${tokenInfo}`,
         }),
         text: `Compaction complete | ${tokenInfo}`,
@@ -772,7 +900,7 @@ async function runCompactSession(
           model: modelName || session.model,
           toolsCompleted: 0,
           elapsedMs: elapsed,
-          conversationKey: `compact_${channelId}`,
+          conversationKey,
           customStatus: 'Compaction processed',
         }),
         text: 'Compaction processed',
@@ -2736,6 +2864,11 @@ async function handleMessage(params: {
     charLimit: session.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
     // Thinking update race condition protection
     pendingThinkingUpdate: null,
+    // Auto-compact tracking (for spinner + completion)
+    autoCompactMsgTs: null,
+    autoCompactStartTime: null,
+    autoCompactPreTokens: null,
+    autoCompactComplete: false,
   };
 
   // Post single combined message (activity log + status panel)
@@ -3484,6 +3617,24 @@ async function handleMessage(params: {
         );
         // Update status message (spinner)
         updateStatusMessages();
+
+        // Update auto-compact message if active (check autoCompactComplete to prevent race)
+        if (processingState.autoCompactMsgTs &&
+            processingState.autoCompactStartTime &&
+            !processingState.autoCompactComplete) {
+          const elapsed = ((Date.now() - processingState.autoCompactStartTime) / 1000).toFixed(1);
+          const tokenInfo = processingState.autoCompactPreTokens
+            ? ` (was ${processingState.autoCompactPreTokens.toLocaleString()} tokens)`
+            : '';
+          try {
+            await client.chat.update({
+              channel: channelId,
+              ts: processingState.autoCompactMsgTs,
+              text: `:gear: ${SPINNER_FRAMES[processingState.spinnerIndex]} Auto-compacting context${tokenInfo}... (${elapsed}s)`,
+            });
+          } catch { /* ignore rate limits */ }
+        }
+
         scheduleUpdate();  // Reschedule with potentially new rate
       }, intervalMs);
     };
@@ -3546,18 +3697,22 @@ async function handleMessage(params: {
         if (trigger === 'auto' && !processingState.autoCompactNotified) {
           processingState.autoCompactNotified = true;
           const preTokens = metadata?.pre_tokens;
+          processingState.autoCompactPreTokens = preTokens ?? null;
+          processingState.autoCompactStartTime = Date.now();
           const tokenInfo = preTokens ? ` (was ${preTokens.toLocaleString()} tokens)` : '';
 
-          await withSlackRetry(
+          // Post initial message with spinner (will be updated by timer)
+          const compactMsg = await withSlackRetry(
             async () =>
               client.chat.postMessage({
                 channel: channelId,
                 thread_ts: threadTs,
-                text: `:gear: Auto-compacting context${tokenInfo}...`,
+                text: `:gear: ${SPINNER_FRAMES[0]} Auto-compacting context${tokenInfo}... (0.0s)`,
               }),
             { onRateLimit: handleRateLimit }
           );
 
+          processingState.autoCompactMsgTs = (compactMsg as { ts?: string })?.ts ?? null;
           console.log(`[AutoCompact] Triggered - pre_tokens: ${preTokens}`);
         }
       }
@@ -3745,6 +3900,28 @@ async function handleMessage(params: {
           if (modelData?.contextWindow) {
             processingState.contextWindow = modelData.contextWindow;
           }
+        }
+
+        // Detect auto-compact completion (only on result message)
+        if (processingState.autoCompactMsgTs && !processingState.autoCompactComplete) {
+          // Set flag BEFORE async update to prevent race with timer
+          processingState.autoCompactComplete = true;
+
+          const elapsed = ((Date.now() - (processingState.autoCompactStartTime ?? Date.now())) / 1000).toFixed(1);
+          const preTokens = processingState.autoCompactPreTokens;
+
+          // Update message with completion
+          await withSlackRetry(
+            async () =>
+              client.chat.update({
+                channel: channelId,
+                ts: processingState.autoCompactMsgTs!,
+                text: `:checkered_flag: Auto-compacted context | Was: ${preTokens?.toLocaleString() ?? '?'} tokens | ${elapsed}s`,
+              }),
+            { onRateLimit: handleRateLimit }
+          );
+
+          processingState.autoCompactMsgTs = null;
         }
       }
     }
