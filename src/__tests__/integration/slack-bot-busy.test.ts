@@ -141,13 +141,13 @@ describe('busy state handling', () => {
     );
     expect(busyMessages).toHaveLength(0);
 
-    // Should see status response (header + status blocks)
+    // Should see status response blocks (no separate mode header)
     const statusCalls = mockClient.chat.postMessage.mock.calls.filter(
       (call: any[]) => {
         const blocks = call[0].blocks;
-        // Look for context block with mode (header) or status-related blocks
+        // Look for status blocks (has 'Session Status' header)
         return blocks?.some((b: any) =>
-          b.type === 'context' && b.elements?.some((e: any) => e.text === '_Plan_')
+          b.type === 'header' && b.text?.text === 'Session Status'
         );
       }
     );

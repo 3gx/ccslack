@@ -2465,22 +2465,8 @@ async function handleMessage(params: {
       updateWatchRate(channelId, threadTs, commandResult.sessionUpdate.updateRateSeconds);
     }
 
-    // Post header showing mode (so user always sees current mode)
-    // Skip for /watch and /ff - they have their own anchor messages
-    const skipHeader = commandResult.startTerminalWatch || commandResult.fastForward;
-    if (!skipHeader) {
-      await withSlackRetry(() =>
-        client.chat.postMessage({
-          channel: channelId,
-          thread_ts: threadTs,
-          blocks: buildHeaderBlocks({
-            status: 'starting',
-            mode: displayMode,
-          }),
-          text: displayMode,
-        })
-      );
-    }
+    // NOTE: No mode header for commands - header is only posted for Claude queries
+    // Commands handle their own output (response text, blocks, or special handlers)
 
     // Post command response
     if (commandResult.blocks) {

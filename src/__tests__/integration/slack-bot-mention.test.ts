@@ -166,7 +166,7 @@ describe('slack-bot mention handlers', () => {
       expect(addCall).toBeLessThan(removeCall);
     });
 
-    it('should post header with mode for commands', async () => {
+    it('should NOT post mode header for commands', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -177,11 +177,11 @@ describe('slack-bot mention handlers', () => {
         mode: 'plan',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-            pathConfigured: true,
-      configuredPath: '/test/dir',
-      configuredBy: 'U123',
-      configuredAt: Date.now(),
-          });
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
 
       await handler({
         event: {
@@ -193,48 +193,23 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should post header with mode before command response
+      // Commands should NOT have a separate mode header - only the command response
       const postCalls = mockClient.chat.postMessage.mock.calls;
-      expect(postCalls.length).toBeGreaterThanOrEqual(2);
 
-      // First post should be header with mode
-      const headerCall = postCalls[0][0];
-      expect(headerCall.channel).toBe('C123');
-      expect(headerCall.blocks).toBeDefined();
-      expect(headerCall.blocks[0].type).toBe('context');
-      expect(headerCall.blocks[0].elements[0].text).toBe('_Plan_');
-    });
+      // Should only post command response blocks (no separate _Plan_ header)
+      // Find the status response (has 'Session Status' header)
+      const statusCall = postCalls.find((call: any) =>
+        call[0].blocks?.some((b: any) => b.text?.text === 'Session Status')
+      );
+      expect(statusCall).toBeDefined();
 
-    it('should show current mode in header for different modes', async () => {
-      const handler = registeredHandlers['event_app_mention'];
-      const mockClient = createMockSlackClient();
-
-      // Mock getSession to return a session with bypassPermissions mode
-      vi.mocked(getSession).mockReturnValue({
-        sessionId: 'test-session',
-        workingDir: '/test',
-        mode: 'bypassPermissions',
-        createdAt: Date.now(),
-        lastActiveAt: Date.now(),
-            pathConfigured: true,
-      configuredPath: '/test/dir',
-      configuredBy: 'U123',
-      configuredAt: Date.now(),
-          });
-
-      await handler({
-        event: {
-          user: 'U123',
-          text: '<@BOT123> /status',
-          channel: 'C123',
-          ts: 'msg123',
-        },
-        client: mockClient,
-      });
-
-      // First post should be header with current mode (bypass)
-      const headerCall = mockClient.chat.postMessage.mock.calls[0][0];
-      expect(headerCall.blocks[0].elements[0].text).toBe('_Bypass_');
+      // Should NOT have a separate mode-only header message
+      const modeHeaderCall = postCalls.find((call: any) =>
+        call[0].blocks?.length === 1 &&
+        call[0].blocks[0].type === 'context' &&
+        call[0].blocks[0].elements?.[0]?.text === '_Plan_'
+      );
+      expect(modeHeaderCall).toBeUndefined();
     });
 
     it('should add eyes reaction for Claude messages and remove when done', async () => {
