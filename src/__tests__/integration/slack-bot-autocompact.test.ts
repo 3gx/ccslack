@@ -225,7 +225,7 @@ describe('auto-compact notification', () => {
     expect(autoCompactCalls.length).toBe(1);
   });
 
-  it('should post auto-compact message with spinner character', async () => {
+  it('should post auto-compact message with token info (no spinner)', async () => {
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
 
@@ -253,15 +253,17 @@ describe('auto-compact notification', () => {
       client: mockClient,
     });
 
-    // Should post auto-compact message with spinner and elapsed time format
+    // Should post auto-compact message with gear emoji and token info (no spinner)
     const autoCompactCalls = mockClient.chat.postMessage.mock.calls.filter(
       (call: any[]) => call[0]?.text?.includes('Auto-compacting context')
     );
     expect(autoCompactCalls.length).toBe(1);
-    // Verify spinner character is present
-    expect(autoCompactCalls[0][0].text).toMatch(/◐|◓|◑|◒/);
-    // Verify elapsed time format
-    expect(autoCompactCalls[0][0].text).toContain('(0.0s)');
+    // Verify gear emoji is present
+    expect(autoCompactCalls[0][0].text).toContain(':gear:');
+    // Verify token info is present
+    expect(autoCompactCalls[0][0].text).toContain('150,000 tokens');
+    // Verify no spinner character (spinner was removed for simplicity)
+    expect(autoCompactCalls[0][0].text).not.toMatch(/◐|◓|◑|◒/);
   });
 
   it('should show completion message with checkered_flag after auto-compact', async () => {
@@ -411,5 +413,172 @@ describe('auto-compact notification', () => {
     );
     // At least 2 calls: first failed (rate limited), second succeeded (retry)
     expect(autoCompactCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('should send checkered_flag update after timer is stopped (race-free)', async () => {
+    // This test verifies the robust fix:
+    // The checkered_flag update is sent AFTER the timer is cleared,
+    // so there's no possibility of the timer overwriting it
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'existing-session',
+      workingDir: '/test/dir',
+      mode: 'default',
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    const autoCompactMsgTs = 'autocompact-race-test';
+    mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+      if (params.text?.includes('Auto-compacting context')) {
+        return { ts: autoCompactMsgTs, channel: 'C123' };
+      }
+      return { ts: 'msg123', channel: 'C123' };
+    });
+
+    // Track the order of updates to detect race condition
+    const updateOrder: string[] = [];
+    mockClient.chat.update.mockImplementation(async (params: any) => {
+      if (params.ts === autoCompactMsgTs) {
+        if (params.text?.includes(':checkered_flag:')) {
+          updateOrder.push('checkered_flag');
+        } else if (params.text?.includes(':gear:')) {
+          updateOrder.push('gear_spinner');
+        }
+      }
+      return { ok: true };
+    });
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 100000 } };
+        yield { type: 'result', result: 'Response after compaction' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+      client: mockClient,
+    });
+
+    // The checkered_flag should be the LAST update to the auto-compact message
+    // With the robust fix, no timer updates can happen after checkered_flag
+    const lastAutoCompactUpdate = updateOrder[updateOrder.length - 1];
+    expect(lastAutoCompactUpdate).toBe('checkered_flag');
+  });
+
+  it('should update checkered_flag with correct ts even when processingState is cleared', async () => {
+    // This test ensures the checkered_flag update uses the captured ts value
+    // (autoCompactFinalTs) rather than processingState.autoCompactMsgTs
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'existing-session',
+      workingDir: '/test/dir',
+      mode: 'default',
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    const autoCompactMsgTs = 'autocompact-captured-ts';
+    mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+      if (params.text?.includes('Auto-compacting context')) {
+        return { ts: autoCompactMsgTs, channel: 'C123' };
+      }
+      return { ts: 'msg123', channel: 'C123' };
+    });
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 50000 } };
+        yield { type: 'result', result: 'Done' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+      client: mockClient,
+    });
+
+    // Verify the checkered_flag update used the correct ts
+    const checkeredFlagCalls = mockClient.chat.update.mock.calls.filter(
+      (call: any[]) => call[0]?.ts === autoCompactMsgTs && call[0]?.text?.includes(':checkered_flag:')
+    );
+    expect(checkeredFlagCalls.length).toBe(1);
+    expect(checkeredFlagCalls[0][0].text).toContain('Auto-compacted context');
+  });
+
+  it('should guarantee checkered_flag is final state even with delayed messages', async () => {
+    // Simulate a more realistic scenario with delays between messages
+    // The checkered_flag must be the final state regardless of timing
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'existing-session',
+      workingDir: '/test/dir',
+      mode: 'default',
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+      updateRateSeconds: 1,  // Fast timer for testing
+    });
+
+    const autoCompactMsgTs = 'autocompact-delayed';
+    let updateCount = 0;
+    mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+      if (params.text?.includes('Auto-compacting context')) {
+        return { ts: autoCompactMsgTs, channel: 'C123' };
+      }
+      return { ts: 'msg123', channel: 'C123' };
+    });
+
+    // Track all updates with their content
+    const allUpdates: { ts: string; text: string }[] = [];
+    mockClient.chat.update.mockImplementation(async (params: any) => {
+      updateCount++;
+      if (params.ts === autoCompactMsgTs) {
+        allUpdates.push({ ts: params.ts, text: params.text });
+      }
+      return { ok: true };
+    });
+
+    const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 200000 } };
+        // Simulate SDK processing time (timer might fire during this)
+        await wait(50);
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } } };
+        await wait(50);
+        yield { type: 'result', result: 'Done after delay' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+      client: mockClient,
+    });
+
+    // The LAST update to the auto-compact message must be checkered_flag
+    const lastUpdate = allUpdates[allUpdates.length - 1];
+    expect(lastUpdate).toBeDefined();
+    expect(lastUpdate.text).toContain(':checkered_flag:');
+    expect(lastUpdate.text).toContain('200,000 tokens');
   });
 });

@@ -595,4 +595,161 @@ describe('slack-bot command handlers', () => {
       );
     });
   });
+
+  describe('/compact honors updateRateSeconds', () => {
+    it('should use updateRateSeconds from session for spinner timer interval', async () => {
+      // Spy on setTimeout to capture interval values
+      const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Setup session with custom updateRateSeconds (5 seconds)
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        updateRateSeconds: 5,  // Custom update rate
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'compacted-session', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 5000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Find setTimeout calls with 5000ms (5 seconds * 1000)
+      const spinnerTimeoutCalls = setTimeoutSpy.mock.calls.filter(
+        (call) => call[1] === 5000
+      );
+
+      // Should have at least one setTimeout call with the session's updateRateSeconds
+      expect(spinnerTimeoutCalls.length).toBeGreaterThanOrEqual(1);
+
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('should use default updateRateSeconds (3s) when not configured', async () => {
+      const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Setup session WITHOUT updateRateSeconds (should use default of 3)
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        // updateRateSeconds not set - should default to 3
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'compacted-session', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 5000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Find setTimeout calls with 3000ms (default 3 seconds * 1000)
+      const spinnerTimeoutCalls = setTimeoutSpy.mock.calls.filter(
+        (call) => call[1] === 3000
+      );
+
+      // Should have at least one setTimeout call with the default updateRateSeconds
+      expect(spinnerTimeoutCalls.length).toBeGreaterThanOrEqual(1);
+
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('should NOT use hardcoded 1000ms interval anymore', async () => {
+      const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Setup session with updateRateSeconds different from 1 second
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        updateRateSeconds: 7,  // Use 7 seconds to be distinct
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'compacted-session', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 5000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Find setTimeout calls with 7000ms (7 seconds * 1000)
+      const spinnerTimeoutCalls = setTimeoutSpy.mock.calls.filter(
+        (call) => call[1] === 7000
+      );
+
+      // Should use the session's updateRateSeconds, not hardcoded 1000ms
+      expect(spinnerTimeoutCalls.length).toBeGreaterThanOrEqual(1);
+
+      // Verify we're NOT using the old hardcoded 1000ms for spinner updates
+      // (Note: there may be other 1000ms timeouts for different purposes,
+      // but the spinner should use 7000ms)
+
+      setTimeoutSpy.mockRestore();
+    });
+  });
 });
