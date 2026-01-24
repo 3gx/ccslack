@@ -2990,75 +2990,74 @@ async function handleMessage(params: {
       }
 
       // Post the current segment (activity + text) if there's response text
-      // skipPosting: capture content for activity log, but don't post intermediate text as separate message
-      if (!skipPosting && currentResponse.trim() && !isAborted(conversationKey)) {
-        // Activity stays in the status message (updated in-place via chat.update)
-        // Only post response text as separate message
+      // skipPosting: skip main channel post, but ALWAYS post to activity thread
+      if (currentResponse.trim() && !isAborted(conversationKey)) {
+        const liveConfig = getLiveSessionConfig(channelId, threadTs);
+        const strippedResponse = stripMarkdownCodeFence(currentResponse, {
+          stripEmptyTag: liveConfig.stripEmptyTag,
+        });
 
-        // Post response text
-        try {
-          const liveConfig = getLiveSessionConfig(channelId, threadTs);
-          const strippedResponse = stripMarkdownCodeFence(currentResponse, {
-            stripEmptyTag: liveConfig.stripEmptyTag,
-          });
-          const slackResponse = markdownToSlack(strippedResponse);
-          // Add prefix for bot response
-          const prefixedResponse = ':speech_balloon: *Response*\n' + slackResponse;
+        // 1. Main channel post - ONLY when NOT skipPosting
+        if (!skipPosting) {
+          try {
+            const slackResponse = markdownToSlack(strippedResponse);
+            // Add prefix for bot response
+            const prefixedResponse = ':speech_balloon: *Response*\n' + slackResponse;
 
-          // Pass mapping info for immediate save (point-in-time forking)
-          // currentAssistantUuid is set when assistant message arrives
-          // newSessionId is set when init message arrives
-          const mappingInfo = (currentAssistantUuid && newSessionId)
-            ? { sdkMessageId: currentAssistantUuid, sessionId: newSessionId }
-            : undefined;
+            // Pass mapping info for immediate save (point-in-time forking)
+            // currentAssistantUuid is set when assistant message arrives
+            // newSessionId is set when init message arrives
+            const mappingInfo = (currentAssistantUuid && newSessionId)
+              ? { sdkMessageId: currentAssistantUuid, sessionId: newSessionId }
+              : undefined;
 
-          const uploadResult = await uploadMarkdownAndPngWithResponse(
-            client,
-            channelId,
-            strippedResponse,
-            prefixedResponse,
-            threadTs,
-            userId,
-            liveConfig.threadCharLimit,
-            liveConfig.stripEmptyTag,
-            mappingInfo  // immediate mapping save
-            // Note: Fork button now on activity message, not response
-          );
-
-          // Track successfully mapped UUIDs so we don't create placeholders for them
-          if (uploadResult?.ts && mappingInfo) {
-            mappedAssistantUuids.add(mappingInfo.sdkMessageId);
-          }
-
-          // Track upload failure for retry button
-          if (uploadResult === null) {
-            processingState.uploadFailed = true;
-            console.log('[Interleaved] Upload failed, will show retry button');
-          }
-
-          console.log(`[Interleaved] Posted response segment: ${currentResponse.length} chars${mappingInfo ? ` (mapped: ${mappingInfo.sdkMessageId})` : ''}`);
-
-          // Also post response summary to thread (under user's input message)
-          if (processingState.threadParentTs && entry) {
-            const responseDurationMs = entry.durationMs;
-            await postResponseToThread(
+            const uploadResult = await uploadMarkdownAndPngWithResponse(
               client,
               channelId,
-              processingState.threadParentTs,
               strippedResponse,
-              responseDurationMs,
+              prefixedResponse,
+              threadTs,
+              userId,
               liveConfig.threadCharLimit,
-              userId
-            ).catch(err => {
-              console.error('[Activity Thread] Failed to post response to thread:', err);
-            });
+              liveConfig.stripEmptyTag,
+              mappingInfo  // immediate mapping save
+              // Note: Fork button now on activity message, not response
+            );
+
+            // Track successfully mapped UUIDs so we don't create placeholders for them
+            if (uploadResult?.ts && mappingInfo) {
+              mappedAssistantUuids.add(mappingInfo.sdkMessageId);
+            }
+
+            // Track upload failure for retry button
+            if (uploadResult === null) {
+              processingState.uploadFailed = true;
+              console.log('[Interleaved] Upload failed, will show retry button');
+            }
+
+            console.log(`[Interleaved] Posted response segment: ${currentResponse.length} chars${mappingInfo ? ` (mapped: ${mappingInfo.sdkMessageId})` : ''}`);
+          } catch (error) {
+            console.error('[Interleaved] Error posting response segment:', error);
+            processingState.uploadFailed = true;
           }
-        } catch (error) {
-          console.error('[Interleaved] Error posting response segment:', error);
-          processingState.uploadFailed = true;
         }
 
-        // 4. Reset currentResponse for next segment (keep fullResponse for total tracking)
+        // 2. Activity thread post - ALWAYS when there's content (even with skipPosting)
+        if (processingState.threadParentTs && entry) {
+          await postResponseToThread(
+            client,
+            channelId,
+            processingState.threadParentTs,
+            strippedResponse,
+            entry.durationMs,
+            liveConfig.threadCharLimit,
+            userId
+          ).catch(err => {
+            console.error('[Activity Thread] Failed to post response to thread:', err);
+          });
+        }
+
+        // Reset currentResponse for next segment (keep fullResponse for total tracking)
         currentResponse = '';
 
         // Status message stays at TOP - updated in place via chat.update

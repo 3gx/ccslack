@@ -956,17 +956,86 @@ describe('slack-bot mention handlers', () => {
 
       const postCalls = mockClient.chat.postMessage.mock.calls;
 
-      // Should NOT find a message with intermediate "I'll explore..." text
-      const intermediateMsg = postCalls.find((call: any) =>
-        call[0].text?.includes("I'll explore the codebase")
+      // Should NOT find a main channel message with intermediate "I'll explore..." text
+      // (activity thread posts with :pencil: prefix are OK)
+      const intermediateMainChannelMsg = postCalls.find((call: any) =>
+        call[0].text?.includes("I'll explore the codebase") &&
+        call[0].text?.includes(':speech_balloon:')
       );
-      expect(intermediateMsg).toBeUndefined();
+      expect(intermediateMainChannelMsg).toBeUndefined();
 
       // Should find final response
       const finalMsg = postCalls.find((call: any) =>
         call[0].text?.includes('Analysis complete')
       );
       expect(finalMsg).toBeDefined();
+    });
+
+    it('should post intermediate text to activity thread when tool is used', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Simulate: text streaming → tool use → final text → result
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session-123', model: 'claude-sonnet' },
+        // Text before tool - should be posted to activity thread
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: "I'll check the logs for errors..." }}},
+        // Tool starts - triggers finalizeGeneratingEntry with skipPosting=true
+        { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Bash' }}},
+        { type: 'stream_event', event: { type: 'content_block_stop' }},
+        // Final text after tool
+        { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Found the error in the logs.' }}},
+        { type: 'result', result: 'Found the error in the logs.' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> check logs',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+
+      // Verify intermediate text IS posted to activity thread (with :pencil: prefix)
+      const intermediateThreadPost = postCalls.find((call: any) =>
+        call[0].text?.includes("I'll check the logs") &&
+        call[0].text?.includes(':pencil:')
+      );
+      expect(intermediateThreadPost).toBeDefined();
+
+      // Verify it has thread_ts (posted as thread reply)
+      expect(intermediateThreadPost[0].thread_ts).toBeDefined();
+
+      // Verify intermediate text is NOT in main channel (no :speech_balloon:)
+      const intermediateMainPost = postCalls.find((call: any) =>
+        call[0].text?.includes("I'll check the logs") &&
+        call[0].text?.includes(':speech_balloon:')
+      );
+      expect(intermediateMainPost).toBeUndefined();
     });
 
     it('should only post final response after multiple tools', async () => {
@@ -1024,16 +1093,18 @@ describe('slack-bot mention handlers', () => {
 
       const postCalls = mockClient.chat.postMessage.mock.calls;
 
-      // Should NOT find intermediate messages
-      const searchMsg = postCalls.find((call: any) =>
-        call[0].text?.includes('Let me search')
+      // Should NOT find intermediate messages in main channel (activity thread posts with :pencil: are OK)
+      const searchMainChannelMsg = postCalls.find((call: any) =>
+        call[0].text?.includes('Let me search') &&
+        call[0].text?.includes(':speech_balloon:')
       );
-      expect(searchMsg).toBeUndefined();
+      expect(searchMainChannelMsg).toBeUndefined();
 
-      const readingMsg = postCalls.find((call: any) =>
-        call[0].text?.includes('Now reading the file')
+      const readingMainChannelMsg = postCalls.find((call: any) =>
+        call[0].text?.includes('Now reading the file') &&
+        call[0].text?.includes(':speech_balloon:')
       );
-      expect(readingMsg).toBeUndefined();
+      expect(readingMainChannelMsg).toBeUndefined();
 
       // Should find only the final response
       const finalMsg = postCalls.find((call: any) =>
@@ -1041,7 +1112,7 @@ describe('slack-bot mention handlers', () => {
       );
       expect(finalMsg).toBeDefined();
 
-      // Count response messages (excluding status message)
+      // Count main channel response messages (excluding activity thread posts)
       const responseMessages = postCalls.filter((call: any) =>
         call[0].text?.includes(':speech_balloon: *Response*')
       );
@@ -1149,11 +1220,13 @@ describe('slack-bot mention handlers', () => {
 
       const postCalls = mockClient.chat.postMessage.mock.calls;
 
-      // Key verification: Intermediate text is NOT posted as separate message
-      const intermediatePosted = postCalls.find((call: any) =>
-        call[0].text?.includes('Let me investigate')
+      // Key verification: Intermediate text is NOT posted to main channel
+      // (activity thread posts with :pencil: prefix are expected and OK)
+      const intermediateMainChannelPost = postCalls.find((call: any) =>
+        call[0].text?.includes('Let me investigate') &&
+        call[0].text?.includes(':speech_balloon:')
       );
-      expect(intermediatePosted).toBeUndefined();
+      expect(intermediateMainChannelPost).toBeUndefined();
 
       // Final text IS posted
       const finalPosted = postCalls.find((call: any) =>
