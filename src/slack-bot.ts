@@ -81,6 +81,7 @@ import {
   postThinkingToThread,
   postStartingToThread,
   postErrorToThread,
+  postResponseToThread,
 } from './activity-thread.js';
 import fs from 'fs';
 
@@ -144,6 +145,7 @@ interface ProcessingState {
   activityBatchStartIndex: number;         // First entry index in current batch
   lastActivityPostTime: number;            // For rate limiting thread posts
   threadParentTs: string | null;           // User input message ts (thread parent)
+  charLimit: number;                       // Character limit for thread messages
 }
 
 /**
@@ -2546,6 +2548,7 @@ async function handleMessage(params: {
     activityBatchStartIndex: 0,
     lastActivityPostTime: 0,
     threadParentTs: originalTs || null,  // User input message as thread parent
+    charLimit: session.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
   };
 
   // Post single combined message (activity log + status panel)
@@ -2769,16 +2772,37 @@ async function handleMessage(params: {
       });
       processingState.thinkingBlockCount++;
       processingState.status = 'thinking';
+
+      // Post placeholder thinking message to thread (will be edited in-place)
+      if (processingState.threadParentTs) {
+        try {
+          const result = await client.chat.postMessage({
+            channel: channelId,
+            thread_ts: processingState.threadParentTs,
+            text: ':bulb: *Thinking...*',
+            mrkdwn: true,
+          });
+          if (result.ts) {
+            processingState.activityThreadMsgTs = result.ts as string;
+            console.log(`[Activity Thread] Posted thinking placeholder: ${result.ts}`);
+          }
+        } catch (err) {
+          console.error('[Activity Thread] Failed to post thinking placeholder:', err);
+        }
+      }
+
       console.log(`[Activity] Thinking block started (in-progress), total: ${processingState.activityLog.length} entries`);
     };
 
     // Helper to update the in-progress thinking entry with rolling window (last 500 chars)
     const updateThinkingEntry = (content: string) => {
       // Find the last in-progress thinking entry
+      let elapsedSec = 0;
       for (let i = processingState.activityLog.length - 1; i >= 0; i--) {
         const entry = processingState.activityLog[i];
         if (entry.type === 'thinking' && entry.thinkingInProgress) {
           const elapsedMs = Date.now() - processingState.startTime;
+          elapsedSec = Math.floor(elapsedMs / 1000);
           // Rolling window: show last 500 chars (what Claude is thinking NOW)
           const rollingWindow = content.length > THINKING_TRUNCATE_LENGTH
             ? '...' + content.substring(content.length - THINKING_TRUNCATE_LENGTH)
@@ -2789,16 +2813,31 @@ async function handleMessage(params: {
           break;
         }
       }
+
+      // Edit thread message in-place (fire-and-forget to avoid blocking)
+      if (processingState.activityThreadMsgTs) {
+        const preview = content.length > 300
+          ? content.substring(0, 300) + '...'
+          : content;
+        client.chat.update({
+          channel: channelId,
+          ts: processingState.activityThreadMsgTs,
+          text: `:bulb: *Thinking...* [${elapsedSec}s] _${content.length} chars_\n> ${preview}`,
+        }).catch((err: unknown) => {
+          console.error('[Activity Thread] Failed to update thinking in-place:', err);
+        });
+      }
     };
 
     // Helper to finalize the in-progress thinking entry and post to thread
     const finalizeThinkingEntry = async (content: string) => {
       // Find the last in-progress thinking entry and finalize it
       let finalEntry: ActivityEntry | null = null;
+      let elapsedMs = 0;
       for (let i = processingState.activityLog.length - 1; i >= 0; i--) {
         const entry = processingState.activityLog[i];
         if (entry.type === 'thinking' && entry.thinkingInProgress) {
-          const elapsedMs = Date.now() - processingState.startTime;
+          elapsedMs = Date.now() - processingState.startTime;
           // For final state, store full content and last 500 chars for summary (shows conclusion)
           const truncated = content.length > THINKING_TRUNCATE_LENGTH
             ? '...' + content.substring(content.length - THINKING_TRUNCATE_LENGTH)
@@ -2813,17 +2852,52 @@ async function handleMessage(params: {
         }
       }
 
-      // Post thinking to thread (with .md attachment if content exceeds limit)
+      // Update or post thinking to thread
       if (finalEntry && processingState.threadParentTs) {
         const liveConfig = getLiveSessionConfig(channelId, threadTs);
-        await postThinkingToThread(
-          client,
-          channelId,
-          processingState.threadParentTs,
-          finalEntry,
-          liveConfig.threadCharLimit,
-          userId
-        );
+        const charLimit = liveConfig.threadCharLimit;
+        const elapsedSec = Math.floor(elapsedMs / 1000);
+
+        // If content exceeds limit, need to post new message with .md attachment
+        // (can't attach files to existing messages via update)
+        if (content.length > charLimit) {
+          // Post new message with .md attachment
+          await postThinkingToThread(
+            client,
+            channelId,
+            processingState.threadParentTs,
+            finalEntry,
+            charLimit,
+            userId
+          );
+        } else if (processingState.activityThreadMsgTs) {
+          // Update existing message with final content (short content, no attachment needed)
+          const preview = content.length > 300
+            ? content.substring(0, 300) + '...'
+            : content;
+          try {
+            await client.chat.update({
+              channel: channelId,
+              ts: processingState.activityThreadMsgTs,
+              text: `:bulb: *Thinking* [${elapsedSec}s] _${content.length} chars_\n> ${preview}`,
+            });
+          } catch (err) {
+            console.error('[Activity Thread] Failed to finalize thinking in-place:', err);
+          }
+        } else {
+          // No existing message, post new one
+          await postThinkingToThread(
+            client,
+            channelId,
+            processingState.threadParentTs,
+            finalEntry,
+            charLimit,
+            userId
+          );
+        }
+
+        // Clear the thread message ts for next thinking block
+        processingState.activityThreadMsgTs = null;
       }
     };
 
@@ -2903,6 +2977,22 @@ async function handleMessage(params: {
           }
 
           console.log(`[Interleaved] Posted response segment: ${currentResponse.length} chars${mappingInfo ? ` (mapped: ${mappingInfo.sdkMessageId})` : ''}`);
+
+          // Also post response summary to thread (under user's input message)
+          if (processingState.threadParentTs && entry) {
+            const responseDurationMs = entry.durationMs;
+            await postResponseToThread(
+              client,
+              channelId,
+              processingState.threadParentTs,
+              strippedResponse,
+              responseDurationMs,
+              liveConfig.threadCharLimit,
+              userId
+            ).catch(err => {
+              console.error('[Activity Thread] Failed to post response to thread:', err);
+            });
+          }
         } catch (error) {
           console.error('[Interleaved] Error posting response segment:', error);
           processingState.uploadFailed = true;
@@ -3642,6 +3732,17 @@ async function handleMessage(params: {
       await mutex.runExclusive(async () => {
         if (isAborted(conversationKey)) return;
 
+        // Flush any pending activity batch before posting error
+        if (processingState.activityBatch.length > 0 && processingState.threadParentTs) {
+          await flushActivityBatch(
+            processingState,
+            client,
+            channelId,
+            processingState.charLimit,
+            'complete'
+          );
+        }
+
         // Add error to activity log
         processingState.activityLog.push({
           timestamp: Date.now(),
@@ -3914,6 +4015,18 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
       const mutex = getUpdateMutex(conversationKey);
       await mutex.runExclusive(async () => {
         const elapsedMs = Date.now() - active.processingState.startTime;
+
+        // Flush any pending activity batch before showing aborted state
+        if (active.processingState.activityBatch.length > 0 && active.processingState.threadParentTs) {
+          const charLimit = active.processingState.charLimit || 500;
+          await flushActivityBatch(
+            active.processingState,
+            client,
+            channelId,
+            charLimit,
+            'complete'
+          );
+        }
 
         // Update combined message to aborted state
         try {

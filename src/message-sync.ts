@@ -201,6 +201,46 @@ export async function syncMessagesFromOffset(
   const turns = groupMessagesByTurn(messages);
   console.log(`[MessageSync] Grouped ${messages.length} messages into ${turns.length} turns`);
 
+  // 2b. Mid-stream detection: messages exist but no turns created
+  // This happens when /watch starts after user already typed and Claude is processing
+  if (messages.length > 0 && turns.length === 0 && fullActivityLog.length > 0) {
+    console.log(`[MessageSync] Mid-stream detected: ${messages.length} messages, 0 turns, ${fullActivityLog.length} activity entries`);
+
+    // Post a fallback activity message as thread parent
+    const fallbackMsgResult = await withSlackRetry(async () =>
+      state.client.chat.postMessage({
+        channel: state.channelId,
+        thread_ts: state.threadTs,
+        text: ':zap: *Activity* (in-progress turn)',
+      })
+    );
+    const fallbackTs = (fallbackMsgResult as { ts?: string }).ts;
+
+    if (fallbackTs) {
+      // Post orphan activity as thread replies under the fallback message
+      const formattedActivity = formatThreadActivityBatch(fullActivityLog);
+      if (formattedActivity) {
+        await postActivityToThread(
+          state.client,
+          state.channelId,
+          fallbackTs,
+          formattedActivity,
+          { charLimit }
+        );
+      }
+      console.log(`[MessageSync] Posted mid-stream fallback with ${fullActivityLog.length} activity entries`);
+    }
+
+    // Return early - no turns to process, but we handled the orphan activity
+    return {
+      newOffset,
+      syncedCount: 0,
+      totalToSync: 0,
+      wasAborted: false,
+      allSucceeded: true,
+    };
+  }
+
   // 3. Get deduplication state
   const alreadyPosted = getMessageMapUuids(state.channelId);
   const messageMap = getMessageMap(state.channelId);
