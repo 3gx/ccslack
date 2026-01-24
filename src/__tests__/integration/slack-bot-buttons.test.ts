@@ -35,13 +35,6 @@ vi.mock('../../session-manager.js', () => ({
   saveMessageMapping: vi.fn(),
   findForkPointMessageId: vi.fn().mockReturnValue(null),
   deleteSession: vi.fn(),
-  saveActivityLog: vi.fn().mockResolvedValue(undefined),
-  getActivityLog: vi.fn().mockResolvedValue(null),
-  getSegmentActivityLog: vi.fn().mockReturnValue(null),
-  saveSegmentActivityLog: vi.fn(),
-  updateSegmentActivityLog: vi.fn(),
-  generateSegmentKey: vi.fn((channelId, messageTs) => `${channelId}_${messageTs}_seg_mock-uuid`),
-  clearSegmentActivityLogs: vi.fn(),
 }));
 
 vi.mock('../../concurrent-check.js', () => ({
@@ -80,7 +73,7 @@ vi.mock('../../streaming.js', () => ({
 import { createMockSlackClient } from './slack-bot-setup.js';
 
 // Import mocked modules
-import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId, getActivityLog } from '../../session-manager.js';
+import { getSession, saveSession, getThreadSession, saveThreadSession, getOrCreateThreadSession, saveMessageMapping, findForkPointMessageId } from '../../session-manager.js';
 import { isSessionActiveInTerminal } from '../../concurrent-check.js';
 import { startClaudeQuery } from '../../claude-client.js';
 import { uploadMarkdownAndPngWithResponse } from '../../streaming.js';
@@ -808,231 +801,16 @@ describe('slack-bot button handlers', () => {
   });
 
   describe('retry_upload button handler', () => {
-    beforeEach(() => {
-      // Mock getActivityLog to return activity with generatingContent
-      vi.mocked(getActivityLog).mockResolvedValue([
-        { timestamp: Date.now(), type: 'starting' },
-        {
-          timestamp: Date.now(),
-          type: 'generating',
-          generatingContent: '# Test Response\n\nThis is the full response content.',
-          generatingChars: 50,
-          generatingInProgress: false,
-        },
-      ]);
-      // Ensure no busy conversations
-      busyConversations.clear();
-    });
-
-    it('should load content from activity log and retry upload (THREAD)', async () => {
+    it('should show ephemeral error that activity logs are not persisted', async () => {
       const handler = registeredHandlers['action_^retry_upload_(.+)$'];
       expect(handler).toBeDefined();
 
       const mockClient = createMockSlackClient();
-      vi.mocked(uploadMarkdownAndPngWithResponse).mockResolvedValue({
-        ts: 'new-upload-ts',
-        uploadSucceeded: true,
-      });
-      mockClient.conversations.history = vi.fn().mockResolvedValue({
-        messages: [{ blocks: [{ type: 'actions', elements: [
-          { action_id: 'view_segment_log_key' },
-          { action_id: 'retry_upload_status-ts-123' },
-        ] }] }],
-      });
-
       const ack = vi.fn();
+
       await handler({
         action: {
           action_id: 'retry_upload_status-ts-123',
-          value: JSON.stringify({
-            activityLogKey: 'C123_thread-456',
-            channelId: 'C123',
-            threadTs: 'thread-456',
-            statusMsgTs: 'status-ts-123',
-          }),
-        },
-        ack,
-        body: { channel: { id: 'C123' }, user: { id: 'U789' } },
-        client: mockClient,
-      });
-
-      expect(ack).toHaveBeenCalled();
-      expect(getActivityLog).toHaveBeenCalledWith('C123_thread-456');
-      expect(uploadMarkdownAndPngWithResponse).toHaveBeenCalled();
-      // Verify threadTs passed to upload
-      expect(uploadMarkdownAndPngWithResponse).toHaveBeenCalledWith(
-        expect.anything(),
-        'C123',
-        expect.any(String),
-        expect.any(String),
-        'thread-456',
-        'U789',
-        expect.anything(),
-        expect.anything()
-      );
-      // Verify button removed after success
-      expect(mockClient.chat.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel: 'C123',
-          ts: 'status-ts-123',
-        })
-      );
-    });
-
-    it('should load content from activity log and retry upload (MAIN CHANNEL)', async () => {
-      const handler = registeredHandlers['action_^retry_upload_(.+)$'];
-      const mockClient = createMockSlackClient();
-      vi.mocked(uploadMarkdownAndPngWithResponse).mockResolvedValue({
-        ts: 'new-upload-ts',
-        uploadSucceeded: true,
-      });
-      mockClient.conversations.history = vi.fn().mockResolvedValue({
-        messages: [{ blocks: [{ type: 'actions', elements: [] }] }],
-      });
-
-      const ack = vi.fn();
-      await handler({
-        action: {
-          action_id: 'retry_upload_status-ts-main',
-          value: JSON.stringify({
-            activityLogKey: 'C123_1234567890.000000',  // Main channel key format
-            channelId: 'C123',
-            // threadTs: undefined - main channel
-            statusMsgTs: 'status-ts-main',
-          }),
-        },
-        ack,
-        body: { channel: { id: 'C123' }, user: { id: 'U789' } },
-        client: mockClient,
-      });
-
-      expect(ack).toHaveBeenCalled();
-      expect(getActivityLog).toHaveBeenCalledWith('C123_1234567890.000000');
-      // Verify NO threadTs passed to upload (main channel)
-      expect(uploadMarkdownAndPngWithResponse).toHaveBeenCalledWith(
-        expect.anything(),
-        'C123',
-        expect.any(String),
-        expect.any(String),
-        undefined,  // threadTs should be undefined for main channel
-        'U789',
-        expect.anything(),
-        expect.anything()
-      );
-    });
-
-    it('should block retry when conversation is busy (concurrent query)', async () => {
-      const handler = registeredHandlers['action_^retry_upload_(.+)$'];
-      const mockClient = createMockSlackClient();
-      const ack = vi.fn();
-
-      // Mark conversation as busy
-      busyConversations.add('C123_thread-456');
-
-      await handler({
-        action: {
-          action_id: 'retry_upload_status-ts-busy',
-          value: JSON.stringify({
-            activityLogKey: 'C123_thread-456',
-            channelId: 'C123',
-            threadTs: 'thread-456',
-            statusMsgTs: 'status-ts-busy',
-          }),
-        },
-        ack,
-        body: { channel: { id: 'C123' }, user: { id: 'U789' } },
-        client: mockClient,
-      });
-
-      expect(ack).toHaveBeenCalled();
-      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: expect.stringContaining('query is currently in progress'),
-        })
-      );
-      // Should NOT attempt upload
-      expect(uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
-
-      busyConversations.clear();
-    });
-
-    it('should find LAST generating entry when multiple segments exist', async () => {
-      const handler = registeredHandlers['action_^retry_upload_(.+)$'];
-      const mockClient = createMockSlackClient();
-      vi.mocked(uploadMarkdownAndPngWithResponse).mockResolvedValue({
-        ts: 'ts',
-        uploadSucceeded: true,
-      });
-      mockClient.conversations.history = vi.fn().mockResolvedValue({
-        messages: [{ blocks: [] }],
-      });
-
-      // Mock multiple generating entries (interleaved response)
-      vi.mocked(getActivityLog).mockResolvedValue([
-        { timestamp: 1000, type: 'starting' },
-        {
-          timestamp: 2000,
-          type: 'generating',
-          generatingContent: 'First segment - should be ignored',
-          generatingInProgress: false,
-        },
-        { timestamp: 3000, type: 'tool_start', tool: 'Read' },
-        { timestamp: 4000, type: 'tool_complete', tool: 'Read' },
-        {
-          timestamp: 5000,
-          type: 'generating',
-          generatingContent: 'FINAL segment - should be used',
-          generatingInProgress: false,
-        },
-      ]);
-
-      const ack = vi.fn();
-      await handler({
-        action: {
-          action_id: 'retry_upload_ts',
-          value: JSON.stringify({
-            activityLogKey: 'C123_thread',
-            channelId: 'C123',
-            threadTs: 'thread',
-            statusMsgTs: 'ts',
-          }),
-        },
-        ack,
-        body: { channel: { id: 'C123' }, user: { id: 'U789' } },
-        client: mockClient,
-      });
-
-      // Verify the LAST generating entry content was used
-      expect(uploadMarkdownAndPngWithResponse).toHaveBeenCalledWith(
-        expect.anything(),
-        'C123',
-        'FINAL segment - should be used',  // Should use LAST entry
-        expect.stringContaining('FINAL segment'),
-        'thread',
-        'U789',
-        expect.anything(),
-        expect.anything()
-      );
-    });
-
-    it('should show ephemeral error when activity log has no generatingContent', async () => {
-      const handler = registeredHandlers['action_^retry_upload_(.+)$'];
-      const mockClient = createMockSlackClient();
-      const ack = vi.fn();
-
-      // Mock empty activity log (no generatingContent)
-      vi.mocked(getActivityLog).mockResolvedValue([
-        { timestamp: Date.now(), type: 'starting' },
-      ]);
-
-      await handler({
-        action: {
-          action_id: 'retry_upload_expired-ts',
-          value: JSON.stringify({
-            activityLogKey: 'C123_cleared',
-            channelId: 'C123',
-            statusMsgTs: 'expired-ts',
-          }),
         },
         ack,
         body: { channel: { id: 'C123' }, user: { id: 'U789' } },
@@ -1047,35 +825,8 @@ describe('slack-bot button handlers', () => {
           text: expect.stringContaining('no longer available'),
         })
       );
-    });
-
-    it('should show ephemeral error when retry upload fails again', async () => {
-      const handler = registeredHandlers['action_^retry_upload_(.+)$'];
-      const mockClient = createMockSlackClient();
-      vi.mocked(uploadMarkdownAndPngWithResponse).mockResolvedValue(null);
-
-      const ack = vi.fn();
-      await handler({
-        action: {
-          action_id: 'retry_upload_status-ts-fail',
-          value: JSON.stringify({
-            activityLogKey: 'C123_thread',
-            channelId: 'C123',
-            threadTs: 'thread',
-            statusMsgTs: 'status-ts-fail',
-          }),
-        },
-        ack,
-        body: { channel: { id: 'C123' }, user: { id: 'U789' } },
-        client: mockClient,
-      });
-
-      expect(ack).toHaveBeenCalled();
-      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: expect.stringContaining('failed again'),
-        })
-      );
+      // Should NOT attempt upload since activity logs are not persisted
+      expect(uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
     });
   });
 });

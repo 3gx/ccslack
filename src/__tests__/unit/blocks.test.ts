@@ -22,7 +22,6 @@ import {
   buildActivityLogText,
   buildCombinedStatusBlocks,
   buildLiveActivityBlocks,
-  buildActivityLogModalView,
   getToolEmoji,
   formatToolName,
   ActivityEntry,
@@ -32,6 +31,11 @@ import {
   buildTopStatusLine,
   buildBottomStatsLine,
   buildForkToChannelModalView,
+  formatThreadActivityBatch,
+  formatThreadThinkingMessage,
+  formatThreadResponseMessage,
+  formatThreadStartingMessage,
+  formatThreadErrorMessage,
 } from '../../blocks.js';
 import type { ModelInfo } from '../../model-cache.js';
 import type { LastUsage } from '../../session-manager.js';
@@ -2292,138 +2296,7 @@ describe('blocks', () => {
     });
   });
 
-  describe('buildActivityLogModalView', () => {
-    it('should show full response content in code block for completed generating', () => {
-      const responseContent = 'This is the full response from Claude with all the details.';
-      const entries: ActivityEntry[] = [
-        {
-          timestamp: Date.now(),
-          type: 'generating',
-          generatingChunks: 15,
-          generatingChars: responseContent.length,
-          generatingInProgress: false,
-          generatingContent: responseContent,
-          generatingTruncated: responseContent,
-          durationMs: 2000,
-        },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, 'test_key');
-      const blocks = view.blocks;
-
-      // Find the section with response content
-      const responseBlock = blocks.find((b: any) =>
-        b.type === 'section' && b.text?.text?.includes(':pencil:') && b.text?.text?.includes('```')
-      );
-
-      expect(responseBlock).toBeDefined();
-      expect(responseBlock.text.text).toContain(':pencil: *Response*');
-      expect(responseBlock.text.text).toContain(`[${responseContent.length} chars]`);
-      expect(responseBlock.text.text).toContain('[2.0s]');
-      expect(responseBlock.text.text).toContain(`\`\`\`${responseContent}\`\`\``);
-    });
-
-    it('should show in progress status for generating entries', () => {
-      const entries: ActivityEntry[] = [
-        {
-          timestamp: Date.now(),
-          type: 'generating',
-          generatingChunks: 5,
-          generatingChars: 100,
-          generatingInProgress: true,
-          generatingContent: 'Streaming content...',
-          generatingTruncated: 'Streaming content...',
-          durationMs: 500,
-        },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, 'test_key');
-      const blocks = view.blocks;
-
-      const responseBlock = blocks.find((b: any) =>
-        b.type === 'section' && b.text?.text?.includes(':pencil:')
-      );
-
-      expect(responseBlock).toBeDefined();
-      expect(responseBlock.text.text).toContain('(in progress)');
-    });
-
-    it('should truncate response content at 2800 chars in modal', () => {
-      const longContent = 'B'.repeat(3000);
-      const entries: ActivityEntry[] = [
-        {
-          timestamp: Date.now(),
-          type: 'generating',
-          generatingChunks: 50,
-          generatingChars: 3000,
-          generatingInProgress: false,
-          generatingContent: longContent,
-          generatingTruncated: longContent.substring(0, 500) + '...',
-        },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, 'test_key');
-      const blocks = view.blocks;
-
-      const responseBlock = blocks.find((b: any) =>
-        b.type === 'section' && b.text?.text?.includes(':pencil:')
-      );
-
-      expect(responseBlock).toBeDefined();
-      // Modal should truncate to 2800 chars
-      expect(responseBlock.text.text).toContain('B'.repeat(2800) + '...');
-      expect(responseBlock.text.text).not.toContain('B'.repeat(2801));
-      // Should show full char count in header
-      expect(responseBlock.text.text).toContain('[3000 chars]');
-    });
-
-    it('should fall back to stats when no response content available', () => {
-      const entries: ActivityEntry[] = [
-        {
-          timestamp: Date.now(),
-          type: 'generating',
-          generatingChunks: 25,
-          generatingChars: 1500,
-          generatingInProgress: false,
-          durationMs: 3000,
-        },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, 'test_key');
-      const blocks = view.blocks;
-
-      const responseBlock = blocks.find((b: any) =>
-        b.type === 'section' && b.text?.text?.includes(':pencil:')
-      );
-
-      expect(responseBlock).toBeDefined();
-      // Should show stats without code block
-      expect(responseBlock.text.text).toContain(':pencil: *Response*');
-      expect(responseBlock.text.text).toContain('[3.0s]');
-      expect(responseBlock.text.text).toContain('1,500 chars');
-      expect(responseBlock.text.text).not.toContain('```');
-    });
-  });
-
   describe('buildLiveActivityBlocks', () => {
-    const segmentKey = 'C123_thread456_seg_abc-123-def';
-
-    it('should include View Log button with segment key', () => {
-      const entries: ActivityEntry[] = [{
-        timestamp: Date.now(),
-        type: 'thinking',
-        thinkingContent: 'test thinking',
-      }];
-      const blocks = buildLiveActivityBlocks(entries, segmentKey);
-
-      expect(blocks[1].type).toBe('actions');
-      const buttons = (blocks[1] as any).elements;
-      const viewLogButton = buttons.find((b: any) => b.text.text === 'View Log');
-      expect(viewLogButton).toBeDefined();
-      expect(viewLogButton.action_id).toBe(`view_segment_log_${segmentKey}`);
-      expect(viewLogButton.value).toBe(segmentKey);
-    });
-
     it('should show activity text in section', () => {
       const entries: ActivityEntry[] = [{
         timestamp: Date.now(),
@@ -2431,213 +2304,11 @@ describe('blocks', () => {
         tool: 'Read',
         durationMs: 1500,
       }];
-      const blocks = buildLiveActivityBlocks(entries, segmentKey);
+      const blocks = buildLiveActivityBlocks(entries);
 
       expect(blocks[0].type).toBe('section');
       const sectionText = (blocks[0] as any).text.text;
       expect(sectionText).toContain('Read');
-    });
-  });
-
-  describe('buildActivityLogModalView', () => {
-    const segmentKey = 'C123_thread456_seg_abc-123-def';
-
-    const createEntries = (count: number): ActivityEntry[] => {
-      const entries: ActivityEntry[] = [];
-      for (let i = 0; i < count; i++) {
-        entries.push({
-          timestamp: Date.now() + i * 1000,
-          type: i % 2 === 0 ? 'tool_start' : 'tool_complete',
-          tool: `Tool${i}`,
-          durationMs: i % 2 === 1 ? 500 : undefined,
-        });
-      }
-      return entries;
-    };
-
-    it('should show page info in header', () => {
-      const entries = createEntries(30);
-      const view = buildActivityLogModalView(entries, 1, 2, segmentKey);
-
-      const contextBlock = view.blocks.find((b: any) => b.type === 'context');
-      expect(contextBlock.elements[0].text).toContain('Page 1 of 2');
-      expect(contextBlock.elements[0].text).toContain('30 total entries');
-    });
-
-    it('should show only entries for current page', () => {
-      const entries = createEntries(30); // 2 pages with MODAL_PAGE_SIZE = 15
-      const view = buildActivityLogModalView(entries, 1, 2, segmentKey);
-
-      // Count section blocks (entries)
-      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
-      expect(sectionBlocks.length).toBe(15);
-    });
-
-    it('should show Next button on first page when multiple pages', () => {
-      const entries = createEntries(30);
-      const view = buildActivityLogModalView(entries, 1, 2, segmentKey);
-
-      const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
-      expect(actionsBlock).toBeDefined();
-      const nextButton = actionsBlock.elements.find((b: any) => b.text.text.includes('Next'));
-      expect(nextButton).toBeDefined();
-      expect(nextButton.action_id).toBe('activity_log_page_2');
-    });
-
-    it('should show Prev button on second page', () => {
-      const entries = createEntries(30);
-      const view = buildActivityLogModalView(entries, 2, 2, segmentKey);
-
-      const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
-      const prevButton = actionsBlock.elements.find((b: any) => b.text.text.includes('Prev'));
-      expect(prevButton).toBeDefined();
-      expect(prevButton.action_id).toBe('activity_log_page_1');
-    });
-
-    it('should show both Prev and Next on middle page', () => {
-      const entries = createEntries(45); // 3 pages
-      const view = buildActivityLogModalView(entries, 2, 3, segmentKey);
-
-      const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
-      expect(actionsBlock.elements).toHaveLength(2);
-    });
-
-    it('should not show pagination buttons for single page', () => {
-      const entries = createEntries(10); // 1 page
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-
-      const actionsBlock = view.blocks.find((b: any) => b.type === 'actions');
-      expect(actionsBlock).toBeUndefined();
-    });
-
-    it('should include segmentKey in private_metadata', () => {
-      const entries = createEntries(5);
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-
-      const metadata = JSON.parse(view.private_metadata);
-      expect(metadata.segmentKey).toBe(segmentKey);
-      expect(metadata.currentPage).toBe(1);
-    });
-
-    it('should format thinking entries with full content', () => {
-      const entries: ActivityEntry[] = [
-        {
-          timestamp: Date.now(),
-          type: 'thinking',
-          thinkingContent: 'Full thinking content here',
-          thinkingTruncated: 'Full...',
-        },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-      const sectionBlock = view.blocks.find((b: any) =>
-        b.type === 'section' && b.text?.text?.includes('Thinking')
-      );
-
-      expect(sectionBlock.text.text).toContain('Full thinking content here');
-      expect(sectionBlock.text.text).toContain(':brain:');
-    });
-
-    it('should truncate very long thinking content to avoid Slack limits', () => {
-      const longContent = 'A'.repeat(3000);
-      const entries: ActivityEntry[] = [
-        {
-          timestamp: Date.now(),
-          type: 'thinking',
-          thinkingContent: longContent,
-        },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-      const sectionBlock = view.blocks.find((b: any) =>
-        b.type === 'section' && b.text?.text?.includes('Thinking')
-      );
-
-      // Should be truncated to ~2800 chars
-      expect(sectionBlock.text.text.length).toBeLessThan(3000);
-      expect(sectionBlock.text.text).toContain('...');
-    });
-
-    it('should format tool entries with timestamps', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
-        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 1200 },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
-
-      expect(sectionBlocks[0].text.text).toContain('Read');
-      expect(sectionBlocks[0].text.text).toContain('started');
-      expect(sectionBlocks[1].text.text).toContain('complete');
-      expect(sectionBlocks[1].text.text).toContain('1.2s');
-    });
-
-    it('should show duration on tool_complete entries in modal', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'tool_start', tool: 'Edit', durationMs: 500 },
-        { timestamp: Date.now(), type: 'tool_complete', tool: 'Edit', durationMs: 2500 },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
-
-      // tool_complete should show the duration it took
-      expect(sectionBlocks[1].text.text).toContain('Edit');
-      expect(sectionBlocks[1].text.text).toContain('complete');
-      expect(sectionBlocks[1].text.text).toContain('2.5s');
-    });
-
-    it('should handle tool_complete without duration gracefully', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'tool_complete', tool: 'Bash' },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
-
-      // Should not crash, just show complete without duration
-      expect(sectionBlocks[0].text.text).toContain('Bash');
-      expect(sectionBlocks[0].text.text).toContain('complete');
-    });
-
-    it('should format error entries', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'error', message: 'Something failed' },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-      const sectionBlock = view.blocks.find((b: any) =>
-        b.type === 'section' && b.text?.text?.includes('Error')
-      );
-
-      expect(sectionBlock.text.text).toContain(':x:');
-      expect(sectionBlock.text.text).toContain('Something failed');
-    });
-
-    it('should format starting entry in modal', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting' },
-        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
-      ];
-
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-      const sectionBlocks = view.blocks.filter((b: any) => b.type === 'section');
-
-      // Starting entry should be first
-      expect(sectionBlocks[0].text.text).toContain(':brain:');
-      expect(sectionBlocks[0].text.text).toContain('Started processing');
-      // Tool entry should be second
-      expect(sectionBlocks[1].text.text).toContain('Read');
-    });
-
-    it('should have modal type and title', () => {
-      const entries = createEntries(5);
-      const view = buildActivityLogModalView(entries, 1, 1, segmentKey);
-
-      expect(view.type).toBe('modal');
-      expect(view.title.type).toBe('plain_text');
-      expect(view.title.text).toBe('Activity Log');
     });
   });
 
@@ -2973,11 +2644,10 @@ describe('blocks', () => {
         // Third should be spinner + elapsed (ABOVE buttons)
         expect(blocks[2].type).toBe('context');
         expect((blocks[2] as any).elements[0].text).toContain('◐');
-        // Fourth should be View Log + Abort buttons
+        // Fourth should be Abort button only (no View Log)
         expect(blocks[3].type).toBe('actions');
-        expect((blocks[3] as any).elements.length).toBe(2);
-        expect((blocks[3] as any).elements[0].text.text).toBe('View Log');
-        expect((blocks[3] as any).elements[1].text.text).toBe('Abort');
+        expect((blocks[3] as any).elements.length).toBe(1);
+        expect((blocks[3] as any).elements[0].text.text).toBe('Abort');
       });
 
       it('should show n/a for model and sessionId when not yet available', () => {
@@ -3076,8 +2746,8 @@ describe('blocks', () => {
           elapsedMs: 5000,
         });
 
-        // Should have 3 blocks: TOP line, activity, BOTTOM stats, buttons (no Complete header!)
-        expect(blocks.length).toBe(4);
+        // Should have 3 blocks: TOP line, activity, BOTTOM stats (no buttons without Fork)
+        expect(blocks.length).toBe(3);
         // First is TOP line
         expect(blocks[0].type).toBe('context');
         expect((blocks[0] as any).elements[0].text).toContain('claude-sonnet-4');
@@ -3094,10 +2764,7 @@ describe('blocks', () => {
         expect(bottomLine).toContain('1.5k/800');
         expect(bottomLine).toContain('$0.05');
         expect(bottomLine).toContain('5.0s');
-        // Fourth is actions (View Log only, no Abort)
-        expect(blocks[3].type).toBe('actions');
-        expect((blocks[3] as any).elements.length).toBe(1);
-        expect((blocks[3] as any).elements[0].text.text).toBe('View Log');
+        // No actions block when not final segment and no Fork
       });
 
       it('should show Fork button on final segment', () => {
@@ -3135,11 +2802,9 @@ describe('blocks', () => {
           forkInfo: { threadTs: 'thread-123', conversationKey: 'C123_thread456' },
         });
 
+        // No actions block when not final segment (no Fork, no View Log)
         const actionsBlock = blocks.find(b => b.type === 'actions');
-        const forkButton = (actionsBlock as any).elements.find(
-          (e: any) => e.action_id.startsWith('fork_here_')
-        );
-        expect(forkButton).toBeUndefined();
+        expect(actionsBlock).toBeUndefined();
       });
 
       it('should include rate limits in BOTTOM stats line at completion', () => {
@@ -3174,8 +2839,8 @@ describe('blocks', () => {
           inProgress: false,
         });
 
-        // Actions block should be last (no spinner after it)
-        expect(blocks[blocks.length - 1].type).toBe('actions');
+        // Last block should be context (BOTTOM stats line), no spinner
+        expect(blocks[blocks.length - 1].type).toBe('context');
       });
     });
 
@@ -3205,7 +2870,7 @@ describe('blocks', () => {
         expect((bottomLine as any).elements[0].text).toContain('20% ctx');
       });
 
-      it('should show View Log but NOT Abort or Fork after abort', () => {
+      it('should NOT show Abort or Fork after abort (no buttons)', () => {
         const entries: ActivityEntry[] = [
           { timestamp: Date.now(), type: 'starting' },
         ];
@@ -3218,11 +2883,9 @@ describe('blocks', () => {
           forkInfo: { threadTs: 'thread-123', conversationKey: 'C123_thread456' },
         });
 
+        // No actions block after abort (no View Log, no Abort, no Fork)
         const actionsBlock = blocks.find(b => b.type === 'actions');
-        expect(actionsBlock).toBeDefined();
-        // Only View Log button (no Abort, no Fork for aborted)
-        expect((actionsBlock as any).elements.length).toBe(1);
-        expect((actionsBlock as any).elements[0].text.text).toBe('View Log');
+        expect(actionsBlock).toBeUndefined();
       });
     });
 
@@ -3645,6 +3308,205 @@ describe('blocks', () => {
 
       expect(view.type).toBe('modal');
       expect(view.title.text).toBe('Fork to New Channel');
+    });
+  });
+
+  // ============================================================================
+  // Thread Activity Formatting Tests
+  // ============================================================================
+
+  describe('formatThreadActivityBatch', () => {
+    it('should format completed tools with checkmark and duration', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'tool_complete', tool: 'Read', durationMs: 500 },
+        { timestamp: 2000, type: 'tool_complete', tool: 'Edit', durationMs: 1200 },
+      ];
+
+      const result = formatThreadActivityBatch(entries);
+
+      expect(result).toContain(':white_check_mark: *Read* [0.5s]');
+      expect(result).toContain(':white_check_mark: *Edit* [1.2s]');
+    });
+
+    it('should show in-progress tools with emoji', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'tool_start', tool: 'Bash' },
+      ];
+
+      const result = formatThreadActivityBatch(entries);
+
+      expect(result).toContain('*Bash* [in progress]');
+    });
+
+    it('should hide tool_start when tool_complete exists for same tool', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'tool_start', tool: 'Read' },
+        { timestamp: 2000, type: 'tool_complete', tool: 'Read', durationMs: 500 },
+      ];
+
+      const result = formatThreadActivityBatch(entries);
+
+      // Should only show completed version
+      expect(result).toContain(':white_check_mark: *Read* [0.5s]');
+      // Should NOT show the in-progress version
+      const lines = result.split('\n');
+      expect(lines.length).toBe(1);
+    });
+
+    it('should format starting entry', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'starting' },
+      ];
+
+      const result = formatThreadActivityBatch(entries);
+
+      expect(result).toContain(':brain: *Analyzing request...*');
+    });
+
+    it('should format error entry', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'error', message: 'Connection timeout' },
+      ];
+
+      const result = formatThreadActivityBatch(entries);
+
+      expect(result).toContain(':x: *Error:* Connection timeout');
+    });
+
+    it('should return empty string for empty entries', () => {
+      const result = formatThreadActivityBatch([]);
+      expect(result).toBe('');
+    });
+
+    it('should strip MCP prefixes from tool names', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'tool_complete', tool: 'mcp__my-server__custom_tool', durationMs: 300 },
+      ];
+
+      const result = formatThreadActivityBatch(entries);
+
+      expect(result).toContain('*custom_tool*');
+      expect(result).not.toContain('mcp__');
+    });
+  });
+
+  describe('formatThreadThinkingMessage', () => {
+    it('should format in-progress thinking', () => {
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'I am analyzing the code...',
+        thinkingInProgress: true,
+        durationMs: 2000,
+      };
+
+      const result = formatThreadThinkingMessage(entry, false);
+
+      expect(result).toContain(':brain: *Thinking...*');
+      expect(result).toContain('[2.0s]');
+      expect(result).toContain('_26 chars_');
+      expect(result).toContain('> I am analyzing the code...');
+    });
+
+    it('should format completed thinking', () => {
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'Analysis complete.',
+        thinkingInProgress: false,
+        durationMs: 5000,
+      };
+
+      const result = formatThreadThinkingMessage(entry, false);
+
+      expect(result).toContain(':bulb: *Thinking*');
+      expect(result).toContain('[5.0s]');
+    });
+
+    it('should show truncation notice when truncated', () => {
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'Very long content...',
+        thinkingInProgress: false,
+      };
+
+      const result = formatThreadThinkingMessage(entry, true);
+
+      expect(result).toContain('_...truncated. Full content attached._');
+    });
+
+    it('should not show truncation notice for in-progress thinking', () => {
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'Very long content...',
+        thinkingInProgress: true,
+      };
+
+      const result = formatThreadThinkingMessage(entry, true);
+
+      expect(result).not.toContain('truncated');
+    });
+
+    it('should truncate preview to 300 chars', () => {
+      const longContent = 'A'.repeat(400);
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: longContent,
+      };
+
+      const result = formatThreadThinkingMessage(entry, false);
+
+      // Should truncate with ...
+      expect(result).toContain('A'.repeat(300) + '...');
+    });
+  });
+
+  describe('formatThreadResponseMessage', () => {
+    it('should format response with stats', () => {
+      const result = formatThreadResponseMessage(1500, 3000, 'Here is my response...', false);
+
+      expect(result).toContain(':pencil: *Response*');
+      expect(result).toContain('[3.0s]');
+      expect(result).toContain('_1,500 chars_');
+      expect(result).toContain('> Here is my response...');
+    });
+
+    it('should show truncation notice when truncated', () => {
+      const result = formatThreadResponseMessage(5000, 2000, 'Preview text', true);
+
+      expect(result).toContain('_...truncated. Full content attached._');
+    });
+
+    it('should handle missing duration', () => {
+      const result = formatThreadResponseMessage(100, undefined, 'Short response', false);
+
+      expect(result).toContain(':pencil: *Response*');
+      expect(result).not.toContain('[');  // No duration bracket
+      expect(result).toContain('_100 chars_');
+    });
+
+    it('should truncate preview to 300 chars', () => {
+      const longPreview = 'B'.repeat(400);
+      const result = formatThreadResponseMessage(400, 1000, longPreview, false);
+
+      expect(result).toContain('B'.repeat(300) + '...');
+    });
+  });
+
+  describe('formatThreadStartingMessage', () => {
+    it('should return starting message', () => {
+      const result = formatThreadStartingMessage();
+      expect(result).toBe(':brain: *Analyzing request...*');
+    });
+  });
+
+  describe('formatThreadErrorMessage', () => {
+    it('should format error message', () => {
+      const result = formatThreadErrorMessage('Connection refused');
+      expect(result).toBe(':x: *Error:* Connection refused');
     });
   });
 

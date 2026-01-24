@@ -1307,7 +1307,6 @@ export interface ActivityEntry {
 const THINKING_TRUNCATE_LENGTH = 500;
 const MAX_LIVE_ENTRIES = 300;
 const ROLLING_WINDOW_SIZE = 20;
-const MODAL_PAGE_SIZE = 15;
 export const ACTIVITY_LOG_MAX_CHARS = 1000; // Reduced from 2000 for cleaner display
 
 /**
@@ -1577,7 +1576,6 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
 export interface CombinedStatusParams extends StatusPanelParams {
   activityLog: ActivityEntry[];
   inProgress: boolean;
-  segmentKey?: string;  // Real segment key for View Log button (required for active queries)
   sessionId?: string;  // Current session ID (n/a initially)
   isNewSession?: boolean;  // Show [new] prefix in TOP line
   isFinalSegment?: boolean;  // Show Fork button on completion
@@ -1725,7 +1723,7 @@ function formatTokenCount(count: number): string {
  * - TOP line: mode | model | [new] session-id (context block)
  * - Activity log section
  * - Rate limit warning (if any, during in-progress) - above buttons
- * - Buttons: [View Log] [Abort] during in-progress, [View Log] [Fork here] on final
+ * - Buttons: [Abort] during in-progress, [Fork here] on final
  * - Spinner BELOW buttons (during in-progress only)
  * - BOTTOM stats line: ONLY at completion with full stats
  */
@@ -1747,7 +1745,6 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     spinner,
     rateLimitHits,
     customStatus,
-    segmentKey,
     sessionId,
     isNewSession,
     isFinalSegment,
@@ -1802,18 +1799,11 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
       }],
     });
 
-    // 5. Actions: [View Log] [Abort]
-    const viewLogKey = segmentKey || conversationKey;
+    // 5. Actions: [Abort]
     blocks.push({
       type: 'actions',
       block_id: `status_panel_${conversationKey}`,
       elements: [
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: 'View Log' },
-          action_id: `view_segment_log_${viewLogKey}`,
-          value: viewLogKey,
-        },
         {
           type: 'button',
           text: { type: 'plain_text', text: 'Abort' },
@@ -1862,16 +1852,8 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
       });
     }
 
-    // 4. Actions: depends on status
-    const viewLogKey = segmentKey || conversationKey;
-    const actionElements: any[] = [
-      {
-        type: 'button',
-        text: { type: 'plain_text', text: 'View Log' },
-        action_id: `view_segment_log_${viewLogKey}`,
-        value: viewLogKey,
-      },
-    ];
+    // 4. Actions: [Fork here] and/or [Generate Output] on completion
+    const actionElements: any[] = [];
 
     // Fork button only on final segment (for BOTH thread AND main channel)
     if (isFinalSegment && forkInfo && status === 'complete') {
@@ -1905,11 +1887,14 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
       });
     }
 
-    blocks.push({
-      type: 'actions',
-      block_id: `status_panel_${conversationKey}`,
-      elements: actionElements,
-    });
+    // Only add actions block if there are buttons to show
+    if (actionElements.length > 0) {
+      blocks.push({
+        type: 'actions',
+        block_id: `status_panel_${conversationKey}`,
+        elements: actionElements,
+      });
+    }
 
     // NO spinner for terminal states
   }
@@ -2070,53 +2055,22 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
  * Build blocks for LIVE activity display (during processing).
  * Shows rolling activity with thinking previews, tool durations, etc.
  * Used by /watch and /ff for in-progress turns AND completed turns.
- * Always includes View Log and Download buttons.
  * Fork button shown only on final segment when forkInfo is provided.
  *
  * @param activityEntries - Activity entries to display
- * @param segmentKey - Unique segment key (format: {channelId}_{messageTs}_seg_{uuid})
  * @param inProgress - Whether this segment is still in progress
  * @param isFinalSegment - Whether this is the final segment (shows Fork button)
  * @param forkInfo - Fork button info (required for Fork button to show)
  */
 export function buildLiveActivityBlocks(
   activityEntries: ActivityEntry[],
-  segmentKey: string,
   inProgress: boolean = true,
   isFinalSegment: boolean = false,
   forkInfo?: { threadTs?: string; conversationKey: string; sdkMessageId?: string; sessionId?: string }
 ): Block[] {
   const activityText = buildActivityLogText(activityEntries, inProgress, ACTIVITY_LOG_MAX_CHARS);
 
-  // Build action elements - always include View Log, conditionally add Fork
-  const actionElements: any[] = [
-    {
-      type: 'button',
-      text: { type: 'plain_text', text: 'View Log' },
-      action_id: `view_segment_log_${segmentKey}`,
-      value: segmentKey,
-    },
-  ];
-
-  // Fork button only on final segment when forkInfo is provided
-  if (isFinalSegment && forkInfo) {
-    actionElements.push({
-      type: 'button',
-      text: {
-        type: 'plain_text',
-        text: ':twisted_rightwards_arrows: Fork here',
-        emoji: true,
-      },
-      action_id: `fork_here_${forkInfo.conversationKey}`,
-      value: JSON.stringify({
-        threadTs: forkInfo.threadTs,
-        sdkMessageId: forkInfo.sdkMessageId,
-        sessionId: forkInfo.sessionId,
-      }),
-    });
-  }
-
-  return [
+  const blocks: Block[] = [
     {
       type: 'section',
       text: {
@@ -2124,142 +2078,33 @@ export function buildLiveActivityBlocks(
         text: activityText,
       },
     },
-    {
-      type: 'actions',
-      block_id: `activity_actions_${segmentKey}`,
-      elements: actionElements,
-    },
   ];
-}
 
-/**
- * Build modal view for activity log with pagination.
- *
- * @param entries - Activity entries to display
- * @param currentPage - Current page number (1-indexed)
- * @param totalPages - Total number of pages
- * @param segmentKey - Unique segment key for pagination state
- */
-export function buildActivityLogModalView(
-  entries: ActivityEntry[],
-  currentPage: number,
-  totalPages: number,
-  segmentKey: string
-): any {
-  const startIdx = (currentPage - 1) * MODAL_PAGE_SIZE;
-  const pageEntries = entries.slice(startIdx, startIdx + MODAL_PAGE_SIZE);
-
-  const blocks: Block[] = [];
-
-  // Page header
-  blocks.push({
-    type: 'context',
-    elements: [{
-      type: 'mrkdwn',
-      text: `Page ${currentPage} of ${totalPages} | ${entries.length} total entries`,
-    }],
-  });
-
-  blocks.push({ type: 'divider' });
-
-  // Build log content for this page
-  for (const entry of pageEntries) {
-    const timestamp = new Date(entry.timestamp).toLocaleTimeString();
-
-    if (entry.type === 'starting') {
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: `:brain: *Started processing* _${timestamp}_` },
-      });
-    } else if (entry.type === 'thinking') {
-      // Show FULL thinking content in modal (not truncated)
-      const thinkingText = entry.thinkingContent || entry.thinkingTruncated || '';
-      // Truncate to avoid Slack's 3000 char limit per block
-      const displayText = thinkingText.length > 2800
-        ? thinkingText.substring(0, 2800) + '...'
-        : thinkingText;
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `:brain: *Thinking* [${thinkingText.length} chars] _${timestamp}_\n\`\`\`${displayText}\`\`\``,
-        },
-      });
-    } else if (entry.type === 'tool_start') {
-      const emoji = getToolEmoji(entry.tool);
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: `${emoji} *${entry.tool}* started _${timestamp}_` },
-      });
-    } else if (entry.type === 'tool_complete') {
-      const duration = entry.durationMs ? ` (${(entry.durationMs / 1000).toFixed(1)}s)` : '';
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: `:white_check_mark: *${entry.tool}* complete${duration} _${timestamp}_` },
-      });
-    } else if (entry.type === 'error') {
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: `:x: Error: ${entry.message} _${timestamp}_` },
-      });
-    } else if (entry.type === 'generating') {
-      const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-      const status = entry.generatingInProgress ? 'in progress' : '';
-      const statusSuffix = status ? ` (${status})` : '';
-
-      // Show FULL response content in modal (similar to thinking)
-      const responseText = entry.generatingContent || entry.generatingTruncated || '';
-      if (responseText) {
-        // Truncate to avoid Slack's 3000 char limit per block
-        const displayText = responseText.length > 2800
-          ? responseText.substring(0, 2800) + '...'
-          : responseText;
-        blocks.push({
-          type: 'section',
+  // Fork button only on final segment when forkInfo is provided
+  if (isFinalSegment && forkInfo) {
+    blocks.push({
+      type: 'actions',
+      block_id: `activity_actions_fork`,
+      elements: [
+        {
+          type: 'button',
           text: {
-            type: 'mrkdwn',
-            text: `:pencil: *Response* [${responseText.length} chars]${duration}${statusSuffix} _${timestamp}_\n\`\`\`${displayText}\`\`\``,
+            type: 'plain_text',
+            text: ':twisted_rightwards_arrows: Fork here',
+            emoji: true,
           },
-        });
-      } else {
-        // Fallback: show just stats if no content available (shouldn't happen)
-        const chars = entry.generatingChars ? ` ${entry.generatingChars.toLocaleString()} chars` : '';
-        blocks.push({
-          type: 'section',
-          text: { type: 'mrkdwn', text: `:pencil: *Response*${duration}${chars}${statusSuffix} _${timestamp}_` },
-        });
-      }
-    }
-  }
-
-  // Pagination buttons
-  const paginationElements: any[] = [];
-  if (currentPage > 1) {
-    paginationElements.push({
-      type: 'button',
-      text: { type: 'plain_text', text: '◀ Prev' },
-      action_id: `activity_log_page_${currentPage - 1}`,
-    });
-  }
-  if (currentPage < totalPages) {
-    paginationElements.push({
-      type: 'button',
-      text: { type: 'plain_text', text: 'Next ▶' },
-      action_id: `activity_log_page_${currentPage + 1}`,
+          action_id: `fork_here_${forkInfo.conversationKey}`,
+          value: JSON.stringify({
+            threadTs: forkInfo.threadTs,
+            sdkMessageId: forkInfo.sdkMessageId,
+            sessionId: forkInfo.sessionId,
+          }),
+        },
+      ],
     });
   }
 
-  if (paginationElements.length > 0) {
-    blocks.push({ type: 'divider' });
-    blocks.push({ type: 'actions', elements: paginationElements });
-  }
-
-  return {
-    type: 'modal',
-    private_metadata: JSON.stringify({ segmentKey, currentPage }),
-    title: { type: 'plain_text', text: 'Activity Log' },
-    blocks,
-  };
+  return blocks;
 }
 
 // ============================================================================
@@ -2307,4 +2152,156 @@ export function buildWatchingStatusSection(sessionId: string, updateRateSeconds:
       value: JSON.stringify({ sessionId }),
     }],
   };
+}
+
+// ============================================================================
+// Thread Activity Formatting Functions
+// ============================================================================
+
+/**
+ * Format batched activity entries for thread posting.
+ * Shows completed tools with checkmarks, in-progress tools with gear.
+ *
+ * @param entries - Activity entries to format (typically tool_start/tool_complete)
+ * @returns Formatted mrkdwn text for thread message
+ */
+export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
+  if (entries.length === 0) return '';
+
+  // Build set of completed tools to avoid showing both start and complete
+  const completedTools = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type === 'tool_complete' && entry.tool) {
+      completedTools.add(entry.tool);
+    }
+  }
+
+  const lines: string[] = [];
+
+  for (const entry of entries) {
+    switch (entry.type) {
+      case 'starting':
+        lines.push(':brain: *Analyzing request...*');
+        break;
+      case 'tool_start':
+        // Only show tool_start if tool hasn't completed yet
+        if (!completedTools.has(entry.tool || '')) {
+          const emoji = getToolEmoji(entry.tool);
+          lines.push(`${emoji} *${formatToolName(entry.tool || 'Unknown')}* [in progress]`);
+        }
+        break;
+      case 'tool_complete':
+        const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+        lines.push(`:white_check_mark: *${formatToolName(entry.tool || 'Unknown')}*${duration}`);
+        break;
+      case 'error':
+        lines.push(`:x: *Error:* ${entry.message || 'Unknown error'}`);
+        break;
+      // Thinking and generating get their own messages, not batched
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format thinking message for thread posting.
+ * Shows thinking duration, char count, and preview.
+ *
+ * @param entry - Thinking activity entry
+ * @param truncated - Whether the content was truncated (will have .md attachment)
+ * @returns Formatted mrkdwn text for thread message
+ */
+export function formatThreadThinkingMessage(
+  entry: ActivityEntry,
+  truncated: boolean
+): string {
+  const content = entry.thinkingContent || entry.thinkingTruncated || '';
+  const charCount = content.length;
+  const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+  const charInfo = charCount > 0 ? ` _${charCount.toLocaleString()} chars_` : '';
+
+  const lines: string[] = [];
+
+  if (entry.thinkingInProgress) {
+    lines.push(`:brain: *Thinking...*${duration}${charInfo}`);
+  } else {
+    lines.push(`:bulb: *Thinking*${duration}${charInfo}`);
+  }
+
+  // Show preview of thinking content
+  if (content) {
+    const displayText = content.replace(/\n/g, ' ').trim();
+    // Show up to 300 chars for thread preview
+    const preview = displayText.length > 300
+      ? displayText.substring(0, 300) + '...'
+      : displayText;
+    if (preview) {
+      lines.push(`> ${preview}`);
+    }
+  }
+
+  if (truncated && !entry.thinkingInProgress) {
+    lines.push('_...truncated. Full content attached._');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format response message for thread posting.
+ * Shows response duration, char count, and preview.
+ *
+ * @param charCount - Number of characters in the response
+ * @param durationMs - Duration in milliseconds
+ * @param preview - Preview text (first ~300 chars)
+ * @param truncated - Whether the content was truncated (will have .md attachment)
+ * @returns Formatted mrkdwn text for thread message
+ */
+export function formatThreadResponseMessage(
+  charCount: number,
+  durationMs: number | undefined,
+  preview: string,
+  truncated: boolean
+): string {
+  const duration = durationMs ? ` [${(durationMs / 1000).toFixed(1)}s]` : '';
+  const charInfo = charCount > 0 ? ` _${charCount.toLocaleString()} chars_` : '';
+
+  const lines: string[] = [];
+  lines.push(`:pencil: *Response*${duration}${charInfo}`);
+
+  if (preview) {
+    const displayText = preview.replace(/\n/g, ' ').trim();
+    const previewText = displayText.length > 300
+      ? displayText.substring(0, 300) + '...'
+      : displayText;
+    if (previewText) {
+      lines.push(`> ${previewText}`);
+    }
+  }
+
+  if (truncated) {
+    lines.push('_...truncated. Full content attached._');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format starting message for thread posting.
+ *
+ * @returns Formatted mrkdwn text for thread message
+ */
+export function formatThreadStartingMessage(): string {
+  return ':brain: *Analyzing request...*';
+}
+
+/**
+ * Format error message for thread posting.
+ *
+ * @param message - Error message
+ * @returns Formatted mrkdwn text for thread message
+ */
+export function formatThreadErrorMessage(message: string): string {
+  return `:x: *Error:* ${message}`;
 }

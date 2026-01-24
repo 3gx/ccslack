@@ -19,10 +19,7 @@ import {
 import {
   getMessageMapUuids,
   saveMessageMapping,
-  mergeActivityLog,
   isSlackOriginatedUserUuid,
-  generateSegmentKey,
-  saveSegmentActivityLog,
   SlackMessageMapping,
 } from './session-manager.js';
 import {
@@ -365,9 +362,6 @@ async function postTurn(
   const postedUuids: string[] = [];
   const { charLimit, stripEmptyTag, infiniteRetry = false, postTextMessage, activityMessages, onPlanFileDetected, onExitPlanMode } = options;
   const turnKey = turn.userInput.uuid;
-  const activityLogKey = state.conversationKey;
-  // messageTs for segment keys: use threadTs if in thread, conversationKey as fallback
-  const segmentMessageTs = state.threadTs || state.conversationKey;
   const turnStartTime = new Date(turn.userInput.timestamp).getTime();
 
   // Scan all messages in turn for plan file path and ExitPlanMode
@@ -427,19 +421,12 @@ async function postTurn(
       const segmentActivityAlreadyPosted = segment.activityMessages.every(m => alreadyPosted.has(m.uuid));
 
       if (!segmentActivityAlreadyPosted) {
-        // Generate unique segment key for View Log isolation
-        const segmentKey = generateSegmentKey(state.channelId, segmentMessageTs);
-
-        // Save segment activity before posting
-        saveSegmentActivityLog(segmentKey, segmentActivity);
-
         // isLastMessage: true only for the final segment of the final turn (same as text posting)
         const isLastSegment = isFinalTurn && (i === turn.segments.length - 1);
 
         // Post NEW activity message for this segment (not update-in-place)
         const blocks = buildLiveActivityBlocks(
           segmentActivity,
-          segmentKey,
           false,  // not in-progress
           isLastSegment,  // Fork button only on final segment of final turn
           { threadTs: state.threadTs, conversationKey: state.conversationKey }
@@ -447,9 +434,7 @@ async function postTurn(
         const activityResult = await postActivitySummary(state, blocks, infiniteRetry);
 
         if (activityResult?.ts) {
-          // Save activity log (unified with bot)
-          await mergeActivityLog(activityLogKey, segmentActivity);
-          console.log(`[MessageSync] Posted segment activity: ${segmentActivity.length} entries, key: ${segmentKey}`);
+          console.log(`[MessageSync] Posted segment activity: ${segmentActivity.length} entries`);
 
           // Track activity messages as posted
           for (const activityMsg of segment.activityMessages) {
@@ -514,22 +499,8 @@ async function postTurn(
     // Check if we already have a trailing activity message for this turn
     const existingTs = activityMessages?.get(turnKey);
 
-    // Generate unique segment key for trailing activity
-    // NOTE: For /watch, the same segment key should be used for updates
-    // We store the segment key with the turn key for consistent updates
-    const trailingSegmentKeyStorage = `${turnKey}_segmentKey`;
-    let trailingSegmentKey = activityMessages?.get(trailingSegmentKeyStorage);
-    if (!trailingSegmentKey) {
-      trailingSegmentKey = generateSegmentKey(state.channelId, segmentMessageTs);
-      activityMessages?.set(trailingSegmentKeyStorage, trailingSegmentKey);
-    }
-
-    // Update segment activity for View Log (so View Log shows latest even during updates)
-    saveSegmentActivityLog(trailingSegmentKey, trailingActivity);
-
     const blocks = buildLiveActivityBlocks(
       trailingActivity,
-      trailingSegmentKey,
       true,  // in-progress (live updates)
       false,  // no Fork button for in-progress trailing activity
       undefined  // no forkInfo needed
@@ -556,10 +527,7 @@ async function postTurn(
     // Store the ts for next poll
     if (activityTs) {
       activityMessages?.set(turnKey, activityTs);
-
-      // Save activity log (unified with bot)
-      await mergeActivityLog(activityLogKey, trailingActivity);
-      console.log(`[MessageSync] Posted/updated trailing activity: ${trailingActivity.length} entries, key: ${trailingSegmentKey}`);
+      console.log(`[MessageSync] Posted/updated trailing activity: ${trailingActivity.length} entries`);
 
       // Track trailing activity messages as posted
       for (const activityMsg of turn.trailingActivity) {

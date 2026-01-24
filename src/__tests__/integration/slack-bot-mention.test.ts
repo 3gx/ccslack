@@ -346,18 +346,14 @@ describe('slack-bot mention handlers', () => {
       // Third block: spinner + elapsed (ABOVE buttons)
       expect(blocks[2].type).toBe('context');
 
-      // Fourth block: View Log + Abort buttons
+      // Fourth block: Abort button only (no View Log)
       expect(blocks[3].type).toBe('actions');
-      expect(blocks[3].elements.length).toBe(2);
-      // View Log button first
+      expect(blocks[3].elements.length).toBe(1);
+      // Abort button only
       expect(blocks[3].elements[0].type).toBe('button');
-      expect(blocks[3].elements[0].text.text).toBe('View Log');
-      expect(blocks[3].elements[0].action_id).toMatch(/^view_segment_log_/);
-      // Abort button second
-      expect(blocks[3].elements[1].type).toBe('button');
-      expect(blocks[3].elements[1].text.text).toBe('Abort');
-      expect(blocks[3].elements[1].style).toBe('danger');
-      expect(blocks[3].elements[1].action_id).toMatch(/^abort_query_/);
+      expect(blocks[3].elements[0].text.text).toBe('Abort');
+      expect(blocks[3].elements[0].style).toBe('danger');
+      expect(blocks[3].elements[0].action_id).toMatch(/^abort_query_/);
     });
 
     it('should update header with stats on success', async () => {

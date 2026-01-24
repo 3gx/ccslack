@@ -22,11 +22,7 @@ vi.mock('../../session-reader.js', () => ({
 vi.mock('../../session-manager.js', () => ({
   getMessageMapUuids: vi.fn(() => new Set<string>()),
   saveMessageMapping: vi.fn(),
-  mergeActivityLog: vi.fn(),  // Now using merge instead of save
   isSlackOriginatedUserUuid: vi.fn(() => false),  // Default: not Slack-originated
-  // Segment activity log functions
-  generateSegmentKey: vi.fn((channelId, messageTs) => `${channelId}_${messageTs}_seg_mock-uuid`),
-  saveSegmentActivityLog: vi.fn(),
 }));
 
 // Mock session-event-stream module
@@ -649,41 +645,6 @@ describe('message-sync', () => {
       // Text output uses regular ts
       expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
         'channel-1', 'msg-ts', expect.objectContaining({ sdkMessageId: 'a2', type: 'assistant' })
-      );
-    });
-
-    it('should save activity log with conversationKey (unified with bot)', async () => {
-      const userMsg = {
-        type: 'user', uuid: 'user-uuid-123', timestamp: '2024-01-01T00:00:00Z', sessionId: 's1',
-        message: { role: 'user', content: 'Hello' },
-      };
-      const activityMsg = {
-        type: 'assistant', uuid: 'a1', timestamp: '2024-01-01T00:00:01Z', sessionId: 's1',
-        message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'hmm' }] },
-      };
-
-      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [userMsg, activityMsg],
-        newOffset: 2000,
-      });
-      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
-        userInput: userMsg,
-        segments: [],
-        trailingActivity: [activityMsg],
-        allMessageUuids: ['user-uuid-123', 'a1'],
-      }]);
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('');
-      vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([
-        { timestamp: Date.parse('2024-01-01T00:00:01Z'), type: 'thinking' },
-      ]);
-
-      await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
-
-      // NEW: Activity is now saved with conversationKey (unified with bot), not turn-specific key
-      // Uses mergeActivityLog to append entries (handles re-sync deduplication)
-      expect(sessionManager.mergeActivityLog).toHaveBeenCalledWith(
-        'channel-1',  // conversationKey, not segment-specific key
-        expect.arrayContaining([expect.objectContaining({ type: 'thinking' })])
       );
     });
 

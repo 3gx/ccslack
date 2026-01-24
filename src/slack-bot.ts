@@ -11,15 +11,8 @@ import {
   deleteSession,
   saveMessageMapping,
   findForkPointMessageId,
-  saveActivityLog,
-  getActivityLog,
   clearSyncedMessageUuids,
   addSlackOriginatedUserUuid,
-  generateSegmentKey,
-  saveSegmentActivityLog,
-  getSegmentActivityLog,
-  updateSegmentActivityLog,
-  clearSegmentActivityLogs,
   Session,
   ThreadSession,
   PermissionMode,
@@ -42,7 +35,6 @@ import {
   ACTIVITY_LOG_MAX_CHARS,
   formatToolName,
   getToolEmoji,
-  buildActivityLogModalView,
   buildModelSelectionBlocks,
   buildModelDeprecatedBlocks,
   buildStatusDisplayBlocks,
@@ -84,6 +76,12 @@ import {
   extractPlanFilePathFromInput,
 } from './session-reader.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
+import {
+  flushActivityBatch,
+  postThinkingToThread,
+  postStartingToThread,
+  postErrorToThread,
+} from './activity-thread.js';
 import fs from 'fs';
 
 // Answer directory for file-based communication with MCP subprocess
@@ -138,11 +136,14 @@ interface ProcessingState {
   // File tool tracking (Write, Edit, Read) to capture plan file path
   fileToolInputs: Map<number, string>;  // Tracks by tool index
   planFilePath: string | null;
-  // Segment tracking for View Log isolation
-  currentSegmentKey: string | null;
-  lastPostedActivityIndex: number;
   // Upload failure tracking for retry button
   uploadFailed?: boolean;
+  // Thread-based activity tracking
+  activityThreadMsgTs: string | null;      // Current thread message being edited
+  activityBatch: ActivityEntry[];          // Entries waiting to post
+  activityBatchStartIndex: number;         // First entry index in current batch
+  lastActivityPostTime: number;            // For rate limiting thread posts
+  threadParentTs: string | null;           // User input message ts (thread parent)
 }
 
 /**
@@ -236,10 +237,6 @@ interface PendingToolApproval {
   threadTs?: string;
 }
 const pendingToolApprovals = new Map<string, PendingToolApproval>();
-
-// Map from segmentKey -> conversationKey for in-progress segment lookup
-// This allows View Log handler to find segment activity during processing
-const segmentToConversationKey = new Map<string, string>();
 
 // Track tool approval reminders (matches MCP ask_user pattern)
 const toolApprovalReminderIntervals = new Map<string, NodeJS.Timeout>();
@@ -794,17 +791,6 @@ async function runClearSession(
 
     // Clear synced message UUIDs (for /ff resumability)
     await clearSyncedMessageUuids(channelId, threadTs);
-
-    // Clear segment activity logs (for View Log isolation)
-    clearSegmentActivityLogs(channelId, threadTs);
-
-    // Clean up segment-to-conversation lookup map
-    const conversationKey = threadTs ? `${channelId}_${threadTs}` : channelId;
-    for (const [segKey, convKey] of segmentToConversationKey.entries()) {
-      if (convKey === conversationKey) {
-        segmentToConversationKey.delete(segKey);
-      }
-    }
 
     console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
 
@@ -1904,17 +1890,6 @@ app.event('channel_deleted', async ({ event }) => {
     // Delete session (handles both bot records and SDK files)
     await deleteSession(event.channel);
 
-    // Clear segment activity logs for the entire channel
-    clearSegmentActivityLogs(event.channel);
-
-    // Clean up segment-to-conversation lookup map for this channel
-    const channelPrefix = `${event.channel}_`;
-    for (const [segKey, convKey] of segmentToConversationKey.entries()) {
-      if (convKey.startsWith(channelPrefix) || convKey === event.channel) {
-        segmentToConversationKey.delete(segKey);
-      }
-    }
-
     console.log(`${'='.repeat(60)}\n`);
   } catch (error) {
     console.error('Error handling channel deletion:', error);
@@ -2539,8 +2514,6 @@ async function handleMessage(params: {
 
   // Initialize processing state for real-time activity tracking
   const startTime = Date.now();
-  // messageTs for segment keys: use threadTs if in thread, originalTs if main channel
-  const segmentMessageTs = threadTs || originalTs || `${channelId}_${startTime}`;
   const processingState: ProcessingState = {
     status: 'starting',
     toolsCompleted: 0,
@@ -2565,29 +2538,19 @@ async function handleMessage(params: {
     fileToolInputs: new Map(),
     // Initialize from session (falls back to null if not set)
     planFilePath: session.planFilePath || null,
-    // Segment tracking for View Log isolation
-    currentSegmentKey: null,
-    lastPostedActivityIndex: 0,
     // Upload failure tracking for retry button
     uploadFailed: false,
-  };
-
-  // Helper function to generate a new segment key and register it for lookup
-  const startNewSegment = () => {
-    const newKey = generateSegmentKey(channelId, segmentMessageTs);
-    processingState.currentSegmentKey = newKey;
-    segmentToConversationKey.set(newKey, conversationKey);
-    // Save initial segment activity (even if empty, so View Log works immediately)
-    const segmentActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
-    saveSegmentActivityLog(newKey, segmentActivity);
-    return newKey;
+    // Thread-based activity tracking
+    activityThreadMsgTs: null,
+    activityBatch: [],
+    activityBatchStartIndex: 0,
+    lastActivityPostTime: 0,
+    threadParentTs: originalTs || null,  // User input message as thread parent
   };
 
   // Post single combined message (activity log + status panel)
   // Activity log at top, status panel with abort button at bottom
   let statusMsgTs: string | undefined;
-  // Start segment before initial post so View Log works immediately
-  startNewSegment();
   try {
     const combinedResult = await withSlackRetry(async () =>
       client.chat.postMessage({
@@ -2602,7 +2565,6 @@ async function handleMessage(params: {
           elapsedMs: 0,
           conversationKey,
           spinner: SPINNER_FRAMES[0],  // Show spinner immediately
-          segmentKey: processingState.currentSegmentKey || undefined,
           sessionId: session.sessionId || undefined,  // Initial session ID (may be null for new sessions)
         }),
         text: 'Claude is starting...',
@@ -2611,6 +2573,13 @@ async function handleMessage(params: {
     statusMsgTs = (combinedResult as { ts?: string }).ts;
   } catch (error) {
     console.error('Error posting combined status message:', error);
+  }
+
+  // Post starting entry to thread (activity thread reply)
+  if (processingState.threadParentTs) {
+    postStartingToThread(client, channelId, processingState.threadParentTs).catch(err => {
+      console.error('[Activity Thread] Failed to post starting entry:', err);
+    });
   }
 
   // Spinner timer - declared outside try block so it can be cleaned up in finally
@@ -2772,10 +2741,23 @@ async function handleMessage(params: {
     let currentAssistantUuid: string | null = null;  // Current assistant UUID for immediate mapping (point-in-time forking)
     const mappedAssistantUuids: Set<string> = new Set();  // Track UUIDs that got immediate mapped (to skip placeholder)
     let costUsd: number | undefined;
-    // Note: lastPostedActivityIndex is now in processingState for segment isolation
 
     // Helper to start an in-progress thinking entry (for live streaming)
-    const startThinkingEntry = () => {
+    // Flushes pending tool batch to thread before starting thinking
+    const startThinkingEntry = async () => {
+      // Flush pending tool entries to thread before thinking starts
+      if (processingState.activityBatch.length > 0) {
+        const liveConfig = getLiveSessionConfig(channelId, threadTs);
+        await flushActivityBatch(
+          processingState,
+          client,
+          channelId,
+          liveConfig.threadCharLimit,
+          'long_content',
+          userId
+        );
+      }
+
       const elapsedMs = Date.now() - processingState.startTime;
       processingState.activityLog.push({
         timestamp: Date.now(),
@@ -2809,9 +2791,10 @@ async function handleMessage(params: {
       }
     };
 
-    // Helper to finalize the in-progress thinking entry
-    const finalizeThinkingEntry = (content: string) => {
+    // Helper to finalize the in-progress thinking entry and post to thread
+    const finalizeThinkingEntry = async (content: string) => {
       // Find the last in-progress thinking entry and finalize it
+      let finalEntry: ActivityEntry | null = null;
       for (let i = processingState.activityLog.length - 1; i >= 0; i--) {
         const entry = processingState.activityLog[i];
         if (entry.type === 'thinking' && entry.thinkingInProgress) {
@@ -2824,9 +2807,23 @@ async function handleMessage(params: {
           entry.thinkingTruncated = truncated;
           entry.thinkingInProgress = false;
           entry.durationMs = elapsedMs;
+          finalEntry = entry;
           console.log(`[Activity] Thinking block finalized (${content.length} chars)`);
           break;
         }
+      }
+
+      // Post thinking to thread (with .md attachment if content exceeds limit)
+      if (finalEntry && processingState.threadParentTs) {
+        const liveConfig = getLiveSessionConfig(channelId, threadTs);
+        await postThinkingToThread(
+          client,
+          channelId,
+          processingState.threadParentTs,
+          finalEntry,
+          liveConfig.threadCharLimit,
+          userId
+        );
       }
     };
 
@@ -2950,7 +2947,7 @@ async function handleMessage(params: {
       }
     };
 
-    // Helper to add tool start to activity log
+    // Helper to add tool start to activity log and batch
     const logToolStart = async (toolName: string) => {
       // Finalize generating entry to capture content for View Log,
       // but skip posting intermediate text (e.g., "I'll do X...")
@@ -2959,18 +2956,21 @@ async function handleMessage(params: {
 
       const formattedName = formatToolName(toolName);
       const elapsedMs = Date.now() - processingState.startTime;
-      processingState.activityLog.push({
+      const toolEntry: ActivityEntry = {
         timestamp: Date.now(),
         type: 'tool_start',
         tool: formattedName,
         durationMs: elapsedMs,  // Time since processing started
-      });
+      };
+      processingState.activityLog.push(toolEntry);
+      // Also add to batch for thread posting
+      processingState.activityBatch.push(toolEntry);
       processingState.currentTool = formattedName;
       processingState.status = 'tool';
-      console.log(`[Activity] Tool start: ${formattedName}, total: ${processingState.activityLog.length} entries`);
+      console.log(`[Activity] Tool start: ${formattedName}, total: ${processingState.activityLog.length} entries, batch: ${processingState.activityBatch.length}`);
     };
 
-    // Helper to add tool complete to activity log
+    // Helper to add tool complete to activity log and batch
     const logToolComplete = async () => {
       // Finalize with skipPosting - text during tool execution is rare
       // but should be captured for View Log, not posted separately
@@ -2981,13 +2981,25 @@ async function handleMessage(params: {
       if (lastToolStart) {
         // Calculate duration from tool start to now
         const durationMs = Date.now() - lastToolStart.timestamp;
-        processingState.activityLog.push({
+        const toolCompleteEntry: ActivityEntry = {
           timestamp: Date.now(),
           type: 'tool_complete',
           tool: lastToolStart.tool,
           durationMs,
-        });
-        console.log(`[Activity] Tool complete: ${lastToolStart.tool} (${durationMs}ms), total: ${processingState.activityLog.length} entries`);
+        };
+        processingState.activityLog.push(toolCompleteEntry);
+
+        // In batch, replace tool_start with tool_complete
+        const batchStartIdx = processingState.activityBatch.findIndex(
+          e => e.type === 'tool_start' && e.tool === lastToolStart.tool
+        );
+        if (batchStartIdx >= 0) {
+          processingState.activityBatch[batchStartIdx] = toolCompleteEntry;
+        } else {
+          // tool_start was already flushed, add tool_complete to batch
+          processingState.activityBatch.push(toolCompleteEntry);
+        }
+        console.log(`[Activity] Tool complete: ${lastToolStart.tool} (${durationMs}ms), total: ${processingState.activityLog.length} entries, batch: ${processingState.activityBatch.length}`);
       }
       processingState.toolsCompleted++;
       processingState.currentTool = undefined;
@@ -3032,22 +3044,13 @@ async function handleMessage(params: {
         // Completed segments have been posted as separate messages
         if (statusMsgTs) {
           try {
-            // Only show trailing activity (from lastPostedActivityIndex onwards)
-            const trailingActivity = processingState.activityLog.slice(processingState.lastPostedActivityIndex);
-
-            // Save segment activity log so View Log shows current state during processing
-            const segmentKey = processingState.currentSegmentKey;
-            if (segmentKey) {
-              saveSegmentActivityLog(segmentKey, trailingActivity);
-            }
-
             await withSlackRetry(
               () =>
                 client.chat.update({
                   channel: channelId,
                   ts: statusMsgTs,
                   blocks: buildCombinedStatusBlocks({
-                    activityLog: trailingActivity,
+                    activityLog: processingState.activityLog,
                     inProgress: true,
                     status: processingState.status,
                     mode: session.mode,
@@ -3058,7 +3061,6 @@ async function handleMessage(params: {
                     conversationKey,
                     spinner,
                     rateLimitHits: processingState.rateLimitHits,
-                    segmentKey: processingState.currentSegmentKey || undefined,
                     sessionId: newSessionId || session.sessionId || undefined,
                     isNewSession: newSessionId !== null && session.sessionId === null,
                   }),
@@ -3078,9 +3080,21 @@ async function handleMessage(params: {
     // Periodic timer to update spinner even when no events are firing
     // Uses setTimeout pattern to re-read rate from processingState each tick
     // This allows /update-rate commands to take effect immediately
+    // Also flushes pending activity batch to thread replies
     const scheduleUpdate = () => {
       const intervalMs = processingState.updateRateSeconds * 1000;
-      spinnerTimer = setTimeout(() => {
+      spinnerTimer = setTimeout(async () => {
+        // Flush pending activity batch to thread (respects rate limiting)
+        const liveConfig = getLiveSessionConfig(channelId, threadTs);
+        await flushActivityBatch(
+          processingState,
+          client,
+          channelId,
+          liveConfig.threadCharLimit,
+          'timer',
+          userId
+        );
+        // Update status message (spinner)
         updateStatusMessages();
         scheduleUpdate();  // Reschedule with potentially new rate
       }, intervalMs);
@@ -3174,7 +3188,7 @@ async function handleMessage(params: {
           processingState.currentThinkingIndex = event.index;
           processingState.currentThinkingContent = '';
           processingState.status = 'thinking';
-          startThinkingEntry();
+          await startThinkingEntry();
           // Timer will render updated status at next interval
         }
 
@@ -3189,11 +3203,11 @@ async function handleMessage(params: {
           }
         }
 
-        // Thinking block completed - finalize entry with full content
+        // Thinking block completed - finalize entry with full content and post to thread
         if (event?.type === 'content_block_stop' &&
             processingState.currentThinkingIndex === event.index &&
             processingState.currentThinkingContent) {
-          finalizeThinkingEntry(processingState.currentThinkingContent);
+          await finalizeThinkingEntry(processingState.currentThinkingContent);
           processingState.currentThinkingContent = '';
           processingState.currentThinkingIndex = null;
           // Timer will render updated status at next interval
@@ -3357,6 +3371,19 @@ async function handleMessage(params: {
     // Stop the spinner timer now that processing is complete
     clearTimeout(spinnerTimer);
 
+    // Flush any remaining activity batch to thread
+    if (processingState.activityBatch.length > 0) {
+      const liveConfig = getLiveSessionConfig(channelId, threadTs);
+      await flushActivityBatch(
+        processingState,
+        client,
+        channelId,
+        liveConfig.threadCharLimit,
+        'complete',
+        userId
+      );
+    }
+
     // Calculate context percentage using input tokens + cache read tokens
     // This gives accurate context utilization since cached tokens are in the context window
     const totalContextTokens = (processingState.inputTokens || 0) + (processingState.cacheReadInputTokens || 0);
@@ -3388,7 +3415,7 @@ async function handleMessage(params: {
         // Update status message to completion state with FULL activity log
         if (statusMsgTs) {
           try {
-            // Build completion blocks with full activity log (not just trailing)
+            // Build completion blocks with full activity log
             const completionBlocks = buildCombinedStatusBlocks({
               activityLog: processingState.activityLog,
               inProgress: false,
@@ -3404,7 +3431,6 @@ async function handleMessage(params: {
               costUsd: processingState.costUsd,
               conversationKey: activityLogKey,
               rateLimitHits: processingState.rateLimitHits,
-              segmentKey: processingState.currentSegmentKey || undefined,
               sessionId: newSessionId || session.sessionId || undefined,
               isNewSession: newSessionId !== null && session.sessionId === null,
               isFinalSegment: isQueryComplete,  // Show Fork button on successful completion
@@ -3438,10 +3464,6 @@ async function handleMessage(params: {
           }
         }
       });
-
-      // Save activity log for modal/download (keyed by message, not conversation)
-      console.log(`[Activity] Saving activity log for ${activityLogKey}: ${processingState.activityLog.length} entries`);
-      await saveActivityLog(activityLogKey, processingState.activityLog);
 
       // Save usage data for /status and /context commands
       if (processingState.model && processingState.contextWindow) {
@@ -3627,6 +3649,16 @@ async function handleMessage(params: {
           message: error.message,
         });
 
+        // Post error to thread
+        if (processingState.threadParentTs) {
+          await postErrorToThread(
+            client,
+            channelId,
+            processingState.threadParentTs,
+            error.message
+          );
+        }
+
         // Update combined message to error state
         if (statusMsgTs) {
           try {
@@ -3642,7 +3674,6 @@ async function handleMessage(params: {
                 elapsedMs: Date.now() - processingState.startTime,
                 conversationKey,
                 errorMessage: error.message,
-                segmentKey: processingState.currentSegmentKey || undefined,
                 sessionId: processingState.sessionId || session.sessionId || undefined,
                 // Error states: show stats if we have them
                 inputTokens: processingState.inputTokens,
@@ -3688,14 +3719,6 @@ async function handleMessage(params: {
     activeQueries.delete(conversationKey);
     clearAborted(conversationKey);
     cleanupMutex(conversationKey);
-
-    // Clean up all segment-to-conversation mappings for this query
-    // This marks segments as "completed" so View Log shows first page
-    for (const [segKey, convKey] of segmentToConversationKey.entries()) {
-      if (convKey === conversationKey) {
-        segmentToConversationKey.delete(segKey);
-      }
-    }
   }
 }
 
@@ -3906,7 +3929,6 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
               toolsCompleted: active.processingState.toolsCompleted,
               elapsedMs,
               conversationKey,
-              segmentKey: active.processingState.currentSegmentKey || undefined,
               sessionId: active.processingState.sessionId,
               // Include stats if available (SDK may have reported them before abort)
               inputTokens: active.processingState.inputTokens,
@@ -4766,152 +4788,8 @@ app.action(/^concurrent_proceed_(.+)$/, async ({ action, ack, body, client }) =>
 });
 
 // ============================================================================
-// Activity Log Modal and Download Handlers (Segment-Based)
+// Fork Here Handler
 // ============================================================================
-
-const MODAL_PAGE_SIZE = 15;  // Entries per page for modal
-
-// Handle "View Log" button click - opens modal with SEGMENT-SPECIFIC activity log
-// Each View Log button now uses a unique segment key to show only that segment's entries
-app.action(/^view_segment_log_(.+)$/, async ({ action, ack, body, client }) => {
-  await ack();
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^view_segment_log_(.+)$/);
-  const segmentKey = match ? match[1] : '';
-
-  console.log(`[ViewLog] Segment view requested: ${segmentKey}`);
-
-  const bodyWithTrigger = body as any;
-  const triggerId = bodyWithTrigger.trigger_id;
-
-  if (!triggerId) {
-    console.error('No trigger_id found for segment log modal');
-    return;
-  }
-
-  // Get segment-specific activity log from in-memory storage
-  // This works for BOTH in-progress (updated via updateSegmentActivityLog) AND completed segments
-  let activityLog = getSegmentActivityLog(segmentKey);
-
-  // If not found in segment storage, check if this is an active query segment
-  // (fallback for edge case where View Log clicked before first save)
-  if (!activityLog) {
-    const conversationKey = segmentToConversationKey.get(segmentKey);
-    if (conversationKey) {
-      const activeQuery = activeQueries.get(conversationKey);
-      if (activeQuery && activeQuery.processingState.currentSegmentKey === segmentKey) {
-        // Get current segment activity from processingState
-        const lastIdx = activeQuery.processingState.lastPostedActivityIndex || 0;
-        activityLog = activeQuery.processingState.activityLog.slice(lastIdx);
-        console.log(`[ViewLog] Retrieved from active query: ${activityLog.length} entries`);
-      }
-    }
-  }
-
-  if (!activityLog || activityLog.length === 0) {
-    // Segment not found or empty - session was cleared or bot restarted
-    try {
-      await client.views.open({
-        trigger_id: triggerId,
-        view: {
-          type: 'modal',
-          title: { type: 'plain_text', text: 'Activity Log' },
-          blocks: [{
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: ':warning: Activity log is no longer available.\n\nThis can happen if the session was cleared or the bot was restarted.',
-            },
-          }],
-        },
-      });
-    } catch (error) {
-      console.error('Error opening segment log error modal:', error);
-    }
-    return;
-  }
-
-  console.log(`[ViewLog] Showing ${activityLog.length} entries for segment`);
-
-  // Determine if segment is from a live/in-progress query
-  // Segments stay in segmentToConversationKey until query completes (finally block)
-  const isLiveSegment = segmentToConversationKey.has(segmentKey);
-
-  // Open modal - start from last page if live (to see latest activity), first page if completed
-  const totalPages = Math.ceil(activityLog.length / MODAL_PAGE_SIZE);
-  const startPage = isLiveSegment ? totalPages : 1;
-  console.log(`[ViewLog] isLive=${isLiveSegment}, startPage=${startPage}, totalPages=${totalPages}`);
-
-  try {
-    await client.views.open({
-      trigger_id: triggerId,
-      view: buildActivityLogModalView(activityLog, startPage, totalPages, segmentKey),
-    });
-  } catch (error) {
-    console.error('Error opening segment log modal:', error);
-  }
-});
-
-// Handle pagination buttons in modal (uses segmentKey from private_metadata)
-app.action(/^activity_log_page_(\d+)$/, async ({ action, ack, body, client }) => {
-  await ack();
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^activity_log_page_(\d+)$/);
-  const page = match ? parseInt(match[1], 10) : 1;
-
-  const bodyWithView = body as any;
-  const viewId = bodyWithView.view?.id;
-  const privateMetadata = bodyWithView.view?.private_metadata;
-
-  if (!viewId || !privateMetadata) {
-    console.error('Missing view info for pagination');
-    return;
-  }
-
-  let metadata: { segmentKey: string };
-  try {
-    metadata = JSON.parse(privateMetadata);
-  } catch (e) {
-    console.error('Error parsing private_metadata:', e);
-    return;
-  }
-
-  const { segmentKey } = metadata;
-
-  // Get segment-specific activity log
-  let activityLog = getSegmentActivityLog(segmentKey);
-
-  // Fallback to active query if segment not found (in-progress)
-  if (!activityLog) {
-    const conversationKey = segmentToConversationKey.get(segmentKey);
-    if (conversationKey) {
-      const activeQuery = activeQueries.get(conversationKey);
-      if (activeQuery && activeQuery.processingState.currentSegmentKey === segmentKey) {
-        const lastIdx = activeQuery.processingState.lastPostedActivityIndex || 0;
-        activityLog = activeQuery.processingState.activityLog.slice(lastIdx);
-      }
-    }
-  }
-
-  if (!activityLog) {
-    console.error('Segment activity log not found for pagination');
-    return;
-  }
-
-  const totalPages = Math.ceil(activityLog.length / MODAL_PAGE_SIZE);
-
-  // Update modal with new page (in-place pagination)
-  try {
-    await client.views.update({
-      view_id: viewId,
-      view: buildActivityLogModalView(activityLog, page, totalPages, segmentKey),
-    });
-  } catch (error) {
-    console.error('Error updating segment log modal page:', error);
-  }
-});
 
 // Handle "Fork here" button click - opens modal for new channel creation
 app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
@@ -5061,116 +4939,21 @@ app.action(/^refresh_fork_(.+)$/, async ({ action, ack, body, client }) => {
 });
 
 // Handle "Generate Output" retry button click when upload failed
-app.action(/^retry_upload_(.+)$/, async ({ action, ack, body, client }) => {
+// Note: This feature requires activity log persistence which has been removed.
+// This handler exists for backwards compatibility with old messages that may have the button.
+app.action(/^retry_upload_(.+)$/, async ({ ack, body, client }) => {
   await ack();
 
-  // Extract info from button value
-  const value = 'value' in action ? action.value : '';
-  let retryInfo: { activityLogKey: string; channelId: string; threadTs?: string; statusMsgTs: string };
-  try {
-    retryInfo = JSON.parse(value || '{}');
-  } catch {
-    console.error('[RetryUpload] Invalid button value');
-    return;
-  }
-
-  const { activityLogKey, channelId, threadTs, statusMsgTs } = retryInfo;
+  const channelId = body.channel?.id;
   const userId = body.user?.id;
 
   if (!channelId || !userId) return;
 
-  // Check for concurrent query - block if conversation is busy
-  const conversationKey = threadTs ? `${channelId}_${threadTs}` : channelId;
-  if (busyConversations.has(conversationKey)) {
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: ':hourglass: A query is currently in progress. Please wait for it to complete before retrying.',
-    });
-    return;
-  }
-
-  // Load response content from activity log file (getActivityLog reads from sessions.json)
-  const activityLog = await getActivityLog(activityLogKey);
-
-  // Find the LAST generating entry with content (handles multiple segments)
-  const generatingEntries = activityLog?.filter(
-    e => e.type === 'generating' && e.generatingContent && !e.generatingInProgress
-  ) || [];
-  const generatingEntry = generatingEntries[generatingEntries.length - 1];
-
-  if (!generatingEntry?.generatingContent) {
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: ':warning: Response content is no longer available. The activity log may have been cleared.',
-    });
-    return;
-  }
-
-  // Reconstruct upload data from activity log
-  const markdown = generatingEntry.generatingContent;
-  const liveConfig = getLiveSessionConfig(channelId, threadTs);
-  const strippedResponse = stripMarkdownCodeFence(markdown, { stripEmptyTag: liveConfig.stripEmptyTag });
-  const prefixedResponse = ':speech_balloon: *Response*\n' + markdownToSlack(strippedResponse);
-
-  console.log(`[RetryUpload] Retrying upload for ${activityLogKey}: ${markdown.length} chars`);
-
-  // Retry the upload
-  const uploadResult = await uploadMarkdownAndPngWithResponse(
-    client as WebClient,
-    channelId,
-    strippedResponse,
-    prefixedResponse,
-    threadTs,          // Use explicit threadTs (undefined for main channel)
-    userId,
-    liveConfig.threadCharLimit,
-    liveConfig.stripEmptyTag
-  );
-
-  if (uploadResult?.ts || uploadResult?.uploadSucceeded) {
-    console.log('[RetryUpload] Upload succeeded');
-
-    // Update activity message to remove retry button
-    try {
-      const currentMessage = await client.conversations.history({
-        channel: channelId,
-        latest: statusMsgTs,
-        inclusive: true,
-        limit: 1,
-      });
-
-      const existingBlocks = (currentMessage as any).messages?.[0]?.blocks || [];
-      const updatedBlocks = existingBlocks.map((block: any) => {
-        if (block.type === 'actions' && block.elements) {
-          return {
-            ...block,
-            elements: block.elements.filter((el: any) =>
-              !el.action_id?.startsWith('retry_upload_')
-            ),
-          };
-        }
-        return block;
-      });
-
-      await withSlackRetry(() =>
-        client.chat.update({
-          channel: channelId,
-          ts: statusMsgTs,
-          blocks: updatedBlocks,
-          text: 'Complete',
-        })
-      );
-    } catch (error) {
-      console.error('[RetryUpload] Error removing button:', error);
-    }
-  } else {
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: ':x: File upload failed again. Please try again later.',
-    });
-  }
+  await client.chat.postEphemeral({
+    channel: channelId,
+    user: userId,
+    text: ':warning: Response content is no longer available. Activity logs are not persisted.',
+  });
 });
 
 // Handle "Stop Watching" button click for terminal session watcher
