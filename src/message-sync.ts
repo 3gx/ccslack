@@ -687,7 +687,7 @@ async function postUserInput(
 }
 
 /**
- * Post activity summary with View Log and Download buttons.
+ * Post activity summary with Fork button.
  */
 async function postActivitySummary(
   state: MessageSyncState,

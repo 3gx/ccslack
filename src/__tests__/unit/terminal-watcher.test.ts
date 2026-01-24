@@ -82,7 +82,7 @@ import * as activityThread from '../../activity-thread.js';
 vi.mock('../../blocks.js', () => ({
   buildLiveActivityBlocks: vi.fn(() => [
     { type: 'section', text: { type: 'mrkdwn', text: ':brain: *Thinking...*' } },
-    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Log' } }] },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Fork here' } }] },
   ]),
   buildWatchingStatusSection: vi.fn((sessionId: string, updateRateSeconds: number) => ({
     type: 'actions',

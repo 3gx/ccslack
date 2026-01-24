@@ -1439,7 +1439,7 @@ async function updateSourceMessageWithJumpLink(
     const updatedBlocks: any[] = [];
     for (const block of msg.blocks) {
       if (block.type === 'actions') {
-        // Filter out fork_here button, keep other buttons (like View Log)
+        // Filter out fork_here button, keep any remaining buttons
         const remainingElements = block.elements.filter(
           (el: any) => !el.action_id?.startsWith('fork_here_')
         );
@@ -2844,7 +2844,7 @@ async function handleMessage(params: {
         entry.generatingChunks = generatingChunkCount;
         entry.generatingChars = segmentCharCount;
         entry.durationMs = Date.now() - (generatingStartTime || processingState.startTime);
-        // Store response content for View Log modal (similar to thinking content)
+        // Store response content for activity log
         entry.generatingContent = currentResponse;
         entry.generatingTruncated = currentResponse.length > 500
           ? currentResponse.substring(0, 500) + '...'
@@ -2856,7 +2856,7 @@ async function handleMessage(params: {
       }
 
       // Post the current segment (activity + text) if there's response text
-      // skipPosting: capture content for View Log, but don't post intermediate text as separate message
+      // skipPosting: capture content for activity log, but don't post intermediate text as separate message
       if (!skipPosting && currentResponse.trim() && !isAborted(conversationKey)) {
         // Activity stays in the status message (updated in-place via chat.update)
         // Only post response text as separate message
@@ -2949,7 +2949,7 @@ async function handleMessage(params: {
 
     // Helper to add tool start to activity log and batch
     const logToolStart = async (toolName: string) => {
-      // Finalize generating entry to capture content for View Log,
+      // Finalize generating entry to capture content for activity log,
       // but skip posting intermediate text (e.g., "I'll do X...")
       await finalizeGeneratingEntry(currentResponse.length, false, true);  // skipPosting=true
       currentResponse = '';  // Discard after capturing
@@ -2973,7 +2973,7 @@ async function handleMessage(params: {
     // Helper to add tool complete to activity log and batch
     const logToolComplete = async () => {
       // Finalize with skipPosting - text during tool execution is rare
-      // but should be captured for View Log, not posted separately
+      // but should be captured for activity log, not posted separately
       await finalizeGeneratingEntry(currentResponse.length, false, true);  // skipPosting=true
       currentResponse = '';  // Discard after capturing
 

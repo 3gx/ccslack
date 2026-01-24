@@ -346,7 +346,7 @@ describe('slack-bot mention handlers', () => {
       // Third block: spinner + elapsed (ABOVE buttons)
       expect(blocks[2].type).toBe('context');
 
-      // Fourth block: Abort button only (no View Log)
+      // Fourth block: Abort button only
       expect(blocks[3].type).toBe('actions');
       expect(blocks[3].elements.length).toBe(1);
       // Abort button only
@@ -417,7 +417,6 @@ describe('slack-bot mention handlers', () => {
       // 0: _plan | claude-sonnet | session-id_ (context - TOP line)
       // 1: Activity log (section)
       // 2: _plan | claude-sonnet | session-id | stats..._ (context - BOTTOM stats line)
-      // 3: [View Log] (actions)
       const completeBlocks = statusPanelComplete![0].blocks;
 
       // Find the TOP status line (first context block with mode)
@@ -898,9 +897,9 @@ describe('slack-bot mention handlers', () => {
       );
       expect(statsLine).toBeDefined();
 
-      // Actions block (View Log button)
+      // Actions block (may contain Fork here or Generate Output buttons)
       const actionsBlock = completionBlocks.find((b: any) => b.type === 'actions');
-      expect(actionsBlock).toBeDefined();
+      // Actions block is optional on completion (only present with Fork or retry buttons)
 
       // No spinner block in completion (spinner only during in-progress)
       // Completion should have exactly 4 blocks: TOP + activity + BOTTOM + actions

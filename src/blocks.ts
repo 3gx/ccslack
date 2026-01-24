@@ -1582,7 +1582,7 @@ export interface CombinedStatusParams extends StatusPanelParams {
   forkInfo?: { threadTs?: string; conversationKey: string; sdkMessageId?: string; sessionId?: string };  // For Fork button
   hasFailedUpload?: boolean;  // Show retry button when upload failed
   retryUploadInfo?: {
-    activityLogKey: string;   // Key for getActivityLog() - NOT conversationKey
+    activityLogKey: string;   // Key for activity log lookup - NOT conversationKey
     channelId: string;
     threadTs?: string;        // Explicit threadTs for thread/channel parity
     statusMsgTs: string;

@@ -260,7 +260,7 @@ const THINKING_TRUNCATE_LENGTH = 500;
 /**
  * Build activity entries from a session file message.
  * Converts content blocks (thinking, tool_use, text) into ActivityEntry format
- * for display in View Log modal.
+ * for display in activity log.
  *
  * @returns Array of activity entries (may be empty for user messages or messages with no activity)
  */

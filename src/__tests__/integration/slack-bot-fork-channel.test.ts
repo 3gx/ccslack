@@ -587,7 +587,7 @@ describe('slack-bot fork to channel handlers', () => {
         channel: { id: 'CNEW123', name: 'my-fork-channel' },
       });
 
-      // Mock source message with View Log and Fork here buttons
+      // Mock source message with Fork here button
       mockClient.conversations.history.mockResolvedValue({
         messages: [{
           ts: '1234567890.123456',
@@ -597,7 +597,6 @@ describe('slack-bot fork to channel handlers', () => {
             {
               type: 'actions',
               elements: [
-                { type: 'button', action_id: 'view_log_C123', text: { type: 'plain_text', text: 'View Log' } },
                 { type: 'button', action_id: 'fork_here_C123', text: { type: 'plain_text', text: 'Fork here' } },
               ],
             },
@@ -638,11 +637,12 @@ describe('slack-bot fork to channel handlers', () => {
 
       const updateCall = mockClient.chat.update.mock.calls[0][0];
 
-      // View Log button should be preserved in actions block
+      // Fork here button should be removed from actions block
       const actionsBlock = updateCall.blocks.find((b: any) => b.type === 'actions');
-      expect(actionsBlock).toBeDefined();
-      expect(actionsBlock.elements.some((e: any) => e.action_id === 'view_log_C123')).toBe(true);
-      expect(actionsBlock.elements.some((e: any) => e.action_id?.startsWith('fork_here_'))).toBe(false);
+      // Actions block may still exist but Fork here should be removed
+      if (actionsBlock) {
+        expect(actionsBlock.elements.some((e: any) => e.action_id?.startsWith('fork_here_'))).toBe(false);
+      }
 
       // Context block with channel mention link should be added
       const contextBlock = updateCall.blocks.find((b: any) => b.type === 'context');
@@ -857,7 +857,6 @@ describe('slack-bot fork to channel handlers', () => {
             {
               type: 'actions',
               elements: [
-                { type: 'button', action_id: 'view_log_C_SOURCE', text: { type: 'plain_text', text: 'View Log' } },
                 { type: 'button', action_id: 'refresh_fork_C_SOURCE', text: { type: 'plain_text', text: '🔄 Refresh fork' } },
               ],
             },
