@@ -486,15 +486,14 @@ describe('slack-bot mention handlers', () => {
       expect(responseCall[0].text).toContain(':speech_balloon: *Response*');
     });
 
-    it('should upload .md file without initial_comment when response is truncated', async () => {
+    it('should post text first then upload .md file as thread reply in main channel', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
+      // Mock chat.postMessage to return a ts for the response message
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'response-ts-123' });
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
-        files: [{
-          id: 'F123',
-          shares: { public: { 'C123': [{ ts: 'file-msg-ts' }] } },
-        }],
+        files: [{ id: 'F123' }],
       });
 
       vi.mocked(getSession).mockReturnValue({
@@ -534,12 +533,18 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md and .png files WITH initial_comment (text attached to files)
+      // In main channel (no thread_ts), text is posted first
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const responseCall = postCalls.find((call: any) => call[0].text?.includes('very long markdown'));
+      expect(responseCall).toBeDefined();
+      // Response should NOT have thread_ts (it's a top-level message)
+      expect(responseCall[0].thread_ts).toBeUndefined();
+
+      // Files are uploaded as thread reply to the response message
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
-          thread_ts: undefined,
-          initial_comment: expect.stringContaining('very long markdown'),
+          thread_ts: 'response-ts-123',  // Files threaded under response
           file_uploads: expect.arrayContaining([
             expect.objectContaining({
               file: expect.any(Buffer),  // Markdown as Buffer
@@ -549,16 +554,9 @@ describe('slack-bot mention handlers', () => {
           ]),
         })
       );
-      // Verify initial_comment IS present (text is attached to files, not separate)
+      // No initial_comment for main channel (text already posted separately)
       const uploadCall = mockClient.files.uploadV2.mock.calls[0][0] as any;
-      expect(uploadCall.initial_comment).toBeDefined();
-      expect(uploadCall.initial_comment).toContain('very long markdown');
-
-      // Text should NOT be posted separately via chat.postMessage when truncated
-      // (it's attached to the file via initial_comment)
-      const postCalls = mockClient.chat.postMessage.mock.calls;
-      const responseCall = postCalls.find((call: any) => call[0].text?.includes('very long markdown'));
-      expect(responseCall).toBeUndefined();
+      expect(uploadCall.initial_comment).toBeUndefined();
     });
 
     it('should fall back to chat.postMessage when file upload fails', async () => {

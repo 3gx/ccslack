@@ -1068,4 +1068,102 @@ describe('streaming', () => {
       );
     });
   });
+
+  describe('uploadMarkdownAndPngWithResponse main channel attachment threading', () => {
+    it('should post text first, then files as thread reply in main channel', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'response-ts-123' });
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({ ok: true, files: [{ id: 'F123' }] });
+
+      const longResponse = 'A'.repeat(150);
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        undefined,  // Main channel - no threadTs
+        'U456',
+        100
+      );
+
+      // Text posted first without thread_ts
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          text: expect.any(String),
+        })
+      );
+      expect(mockClient.chat.postMessage.mock.calls[0][0].thread_ts).toBeUndefined();
+
+      // Files uploaded as thread reply to response
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          thread_ts: 'response-ts-123',
+        })
+      );
+      // No initial_comment for main channel
+      expect(mockClient.files.uploadV2.mock.calls[0][0].initial_comment).toBeUndefined();
+    });
+
+    it('should keep bundled behavior for thread responses', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123', shares: { public: { 'C123': [{ ts: 'file-msg-ts' }] } } }],
+      });
+
+      const longResponse = 'B'.repeat(150);
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        'existing-thread-ts',  // In a thread
+        'U456',
+        100
+      );
+
+      // Should NOT call chat.postMessage for threads
+      expect(mockClient.chat.postMessage).not.toHaveBeenCalled();
+
+      // Files use original threadTs with initial_comment
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          thread_ts: 'existing-thread-ts',
+          initial_comment: expect.any(String),
+        })
+      );
+    });
+
+    it('should still return text ts when file upload fails in main channel', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'response-ts-456' });
+      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+      mockClient.chat.postEphemeral = vi.fn().mockResolvedValue({ ok: true });
+
+      const longResponse = 'C'.repeat(150);
+      const result = await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        '# ' + longResponse,
+        longResponse,
+        undefined,  // Main channel
+        'U456',
+        100
+      );
+
+      // Text was posted successfully
+      expect(result?.ts).toBe('response-ts-456');
+      // Ephemeral error notification sent
+      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          user: 'U456',
+          text: expect.stringContaining('Failed to attach files'),
+        })
+      );
+    });
+  });
 });

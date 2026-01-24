@@ -502,45 +502,89 @@ export async function uploadMarkdownAndPngWithResponse(
         });
       }
 
-      // Upload files WITH the response text as initial_comment
-      // This posts files and text together in the same message
-      const fileResult = await withSlackRetry(() =>
-        client.files.uploadV2({
-          channel_id: channelId,
-          thread_ts: threadTs,
-          initial_comment: textToPost,
-          file_uploads: files.map((f) => ({
-            file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
-            filename: f.filename,
-            title: f.title,
-          })),
-        } as any)
-      );
+      if (!threadTs) {
+        // MAIN CHANNEL / DM: Post text first, then attachments as thread reply
+        const textResult = await withSlackRetry(() =>
+          client.chat.postMessage({
+            channel: channelId,
+            text: textToPost,
+          })
+        );
+        textTs = (textResult as any).ts;
 
-      // Get ts from the file message for mapping
-      // files.uploadV2 returns files array with shares info
-      // Check both public and private shares (private channels use shares.private)
-      const shares = (fileResult as any)?.files?.[0]?.shares;
-      textTs = shares?.public?.[channelId]?.[0]?.ts ?? shares?.private?.[channelId]?.[0]?.ts;
+        // Upload files as thread reply to the response message
+        if (textTs) {
+          postedMessages.push({ ts: textTs });
 
-      // files.uploadV2 is async - shares may be empty initially
-      // Poll files.info until shares is populated to ensure message is visible
-      if (!textTs) {
-        // Get the first file ID to poll for shares
-        const fileId = (fileResult as any)?.files?.[0]?.files?.[0]?.id;
-        if (fileId) {
-          console.log(`[uploadMarkdownAndPng] shares empty, polling for file ${fileId}`);
-          textTs = (await pollForFileShares(client, fileId, channelId)) ?? undefined;
+          try {
+            await withSlackRetry(() =>
+              client.files.uploadV2({
+                channel_id: channelId,
+                thread_ts: textTs,  // Response becomes thread parent
+                file_uploads: files.map((f) => ({
+                  file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
+                  filename: f.filename,
+                  title: f.title,
+                })),
+              } as any)
+            );
+          } catch (fileError) {
+            // Text posted successfully but file upload failed
+            // Log error and notify user via ephemeral message
+            console.error('[uploadMarkdownAndPng] File upload failed after text post:', fileError);
+            if (userId) {
+              try {
+                await client.chat.postEphemeral({
+                  channel: channelId,
+                  user: userId,
+                  text: `Failed to attach files: ${fileError instanceof Error ? fileError.message : 'Unknown error'}`,
+                });
+              } catch {
+                // Ignore ephemeral failure
+              }
+            }
+          }
         }
-      }
-
-      if (textTs) {
-        postedMessages.push({ ts: textTs });
       } else {
-        // Polling timed out - log for debugging
-        console.error('[uploadMarkdownAndPng] textTs extraction failed after polling');
-        console.error('[uploadMarkdownAndPng] channelId:', channelId);
-        console.error('[uploadMarkdownAndPng] fileResult:', JSON.stringify(fileResult, null, 2));
+        // THREAD: Keep current bundled behavior (files + initial_comment together)
+        const fileResult = await withSlackRetry(() =>
+          client.files.uploadV2({
+            channel_id: channelId,
+            thread_ts: threadTs,
+            initial_comment: textToPost,
+            file_uploads: files.map((f) => ({
+              file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
+              filename: f.filename,
+              title: f.title,
+            })),
+          } as any)
+        );
+
+        // Get ts from the file message for mapping
+        // files.uploadV2 returns files array with shares info
+        // Check both public and private shares (private channels use shares.private)
+        const shares = (fileResult as any)?.files?.[0]?.shares;
+        textTs = shares?.public?.[channelId]?.[0]?.ts ?? shares?.private?.[channelId]?.[0]?.ts;
+
+        // files.uploadV2 is async - shares may be empty initially
+        // Poll files.info until shares is populated to ensure message is visible
+        if (!textTs) {
+          // Get the first file ID to poll for shares
+          const fileId = (fileResult as any)?.files?.[0]?.files?.[0]?.id;
+          if (fileId) {
+            console.log(`[uploadMarkdownAndPng] shares empty, polling for file ${fileId}`);
+            textTs = (await pollForFileShares(client, fileId, channelId)) ?? undefined;
+          }
+        }
+
+        if (textTs) {
+          postedMessages.push({ ts: textTs });
+        } else {
+          // Polling timed out - log for debugging
+          console.error('[uploadMarkdownAndPng] textTs extraction failed after polling');
+          console.error('[uploadMarkdownAndPng] channelId:', channelId);
+          console.error('[uploadMarkdownAndPng] fileResult:', JSON.stringify(fileResult, null, 2));
+        }
       }
     } else {
       // Short response - just post text (no files)
