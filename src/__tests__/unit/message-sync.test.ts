@@ -1409,4 +1409,123 @@ describe('message-sync', () => {
       expect(postActivityToThread).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('segment activity deduplication (infinite loop prevention)', () => {
+    it('should persist segment activity UUIDs via saveMessageMapping to prevent reprocessing', async () => {
+      // This test verifies the fix for the infinite loop bug where segment activity
+      // messages were not being persisted to messageMap, causing turns to be
+      // reprocessed indefinitely because allMessageUuids included activity UUIDs
+      // that were never marked as posted.
+
+      const userMsg = { uuid: 'u1', type: 'user' as const, timestamp: '2024-01-01T00:00:00Z', sessionId: 's1', message: { role: 'user', content: 'Hello' } };
+      const activityMsg = { uuid: 'activity-1', type: 'assistant' as const, timestamp: '2024-01-01T00:00:01Z', sessionId: 's1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } };
+      const textMsg = { uuid: 'text-1', type: 'assistant' as const, timestamp: '2024-01-01T00:00:02Z', sessionId: 's1', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }] } };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [userMsg, activityMsg, textMsg],
+        newOffset: 1000,
+      });
+
+      // allMessageUuids includes the activity message UUID
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: userMsg,
+        segments: [{ activityMessages: [activityMsg], textOutput: textMsg }],
+        trailingActivity: [],
+        allMessageUuids: ['u1', 'activity-1', 'text-1'],  // activity-1 is included!
+      }]);
+
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Done');
+      vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([
+        { timestamp: Date.parse('2024-01-01T00:00:01.000Z'), type: 'tool_start', tool: 'Read' },
+        { timestamp: Date.parse('2024-01-01T00:00:01.500Z'), type: 'tool_complete', tool: 'Read', durationMs: 500 },
+      ]);
+
+      // First sync - nothing posted yet
+      vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(new Set<string>());
+
+      await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
+
+      // Verify saveMessageMapping was called for the segment activity message
+      expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
+        'channel-1',
+        'activity_activity-1',  // Key format: activity_${uuid}
+        expect.objectContaining({
+          sdkMessageId: 'activity-1',
+          sessionId: 'session-123',
+          type: 'assistant',
+        })
+      );
+    });
+
+    it('should skip turn when all UUIDs including segment activity are already posted', async () => {
+      // This test simulates the second poll after the fix - the turn should be
+      // skipped because all UUIDs (including activity) are in alreadyPosted
+
+      const userMsg = { uuid: 'u1', type: 'user' as const, timestamp: '2024-01-01T00:00:00Z', sessionId: 's1', message: { role: 'user', content: 'Hello' } };
+      const activityMsg = { uuid: 'activity-1', type: 'assistant' as const, timestamp: '2024-01-01T00:00:01Z', sessionId: 's1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } };
+      const textMsg = { uuid: 'text-1', type: 'assistant' as const, timestamp: '2024-01-01T00:00:02Z', sessionId: 's1', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }] } };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [userMsg, activityMsg, textMsg],
+        newOffset: 1000,
+      });
+
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: userMsg,
+        segments: [{ activityMessages: [activityMsg], textOutput: textMsg }],
+        trailingActivity: [],
+        allMessageUuids: ['u1', 'activity-1', 'text-1'],
+      }]);
+
+      // Simulate second poll: ALL UUIDs including activity are now in messageMap
+      vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(
+        new Set(['u1', 'activity-1', 'text-1'])
+      );
+
+      const result = await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
+
+      // Turn should be skipped (0 turns to process)
+      expect(result.syncedCount).toBe(0);
+      expect(result.totalToSync).toBe(0);
+
+      // No new messages should be posted
+      expect(mockClient.chat.postMessage).not.toHaveBeenCalled();
+    });
+
+    it('should reprocess turn if segment activity UUID is missing from alreadyPosted (bug scenario)', async () => {
+      // This test demonstrates what happens WITHOUT the fix - if activity UUID
+      // is not in alreadyPosted, the turn gets reprocessed
+
+      const userMsg = { uuid: 'u1', type: 'user' as const, timestamp: '2024-01-01T00:00:00Z', sessionId: 's1', message: { role: 'user', content: 'Hello' } };
+      const activityMsg = { uuid: 'activity-1', type: 'assistant' as const, timestamp: '2024-01-01T00:00:01Z', sessionId: 's1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } };
+      const textMsg = { uuid: 'text-1', type: 'assistant' as const, timestamp: '2024-01-01T00:00:02Z', sessionId: 's1', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }] } };
+
+      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
+        messages: [userMsg, activityMsg, textMsg],
+        newOffset: 1000,
+      });
+
+      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
+        userInput: userMsg,
+        segments: [{ activityMessages: [activityMsg], textOutput: textMsg }],
+        trailingActivity: [],
+        allMessageUuids: ['u1', 'activity-1', 'text-1'],
+      }]);
+
+      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Done');
+      vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([]);
+
+      // Simulate bug scenario: activity-1 is MISSING from alreadyPosted
+      // (user and text are present, but activity was never persisted)
+      vi.mocked(sessionManager.getMessageMapUuids).mockReturnValue(
+        new Set(['u1', 'text-1'])  // activity-1 missing!
+      );
+
+      const result = await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
+
+      // Turn IS processed because activity-1 is not in alreadyPosted
+      // This is the bug scenario - before the fix, this would cause infinite loop
+      expect(result.totalToSync).toBe(1);  // 1 turn to process
+    });
+  });
 });

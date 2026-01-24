@@ -499,9 +499,17 @@ async function postTurn(
           }
         }
 
-        // Track activity messages as posted
+        // Track activity messages as posted AND persist to messageMap
+        // This is critical to prevent infinite loop - without persistence,
+        // next poll will not find these UUIDs in alreadyPosted and reprocess the turn
         for (const activityMsg of segment.activityMessages) {
           if (!alreadyPosted.has(activityMsg.uuid)) {
+            const mappingKey = `activity_${activityMsg.uuid}`;
+            await saveMessageMapping(state.channelId, mappingKey, {
+              sdkMessageId: activityMsg.uuid,
+              sessionId: state.sessionId,
+              type: 'assistant',
+            });
             postedUuids.push(activityMsg.uuid);
           }
         }
