@@ -653,6 +653,126 @@ describe('slack-bot mention handlers', () => {
       // Should NOT add eyes reaction (early return before processing)
       expect(mockClient.reactions.add).not.toHaveBeenCalled();
     });
+
+    it('should reject @bot mentions with no message content', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mention bot with just the mention, no text
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123>',
+          channel: 'C123',
+          ts: 'msg789',
+        },
+        client: mockClient,
+      });
+
+      // Should post error message about empty messages
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C123',
+        text: expect.stringContaining('Empty messages are not permitted'),
+      });
+
+      // Should NOT start Claude query
+      expect(startClaudeQuery).not.toHaveBeenCalled();
+    });
+
+    it('should reject @bot mentions with only whitespace', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mention bot with just whitespace after
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123>    ',
+          channel: 'C123',
+          ts: 'msg790',
+        },
+        client: mockClient,
+      });
+
+      // Should post error message about empty messages
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C123',
+        text: expect.stringContaining('Empty messages are not permitted'),
+      });
+
+      // Should NOT start Claude query
+      expect(startClaudeQuery).not.toHaveBeenCalled();
+    });
+
+    it('should normalize multiple spaces after stripping @bot mention', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Message with @bot in the middle, which would leave double spaces after stripping
+      await handler({
+        event: {
+          user: 'U123',
+          text: 'say <@BOT123> hello',
+          channel: 'C123',
+          ts: 'msg791',
+        },
+        client: mockClient,
+      });
+
+      // Should have called startClaudeQuery with normalized text (single space)
+      // First argument is the prompt string
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'say hello',  // Single space, not double
+        expect.anything()
+      );
+    });
+
+    it('should normalize multiple whitespace characters in message', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Message with multiple mentions and irregular spacing
+      // Note: The regex strips ALL @mentions (/<@[A-Z0-9]+>/g), not just the bot
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123>   <@USER456>   hello    world',
+          channel: 'C123',
+          ts: 'msg792',
+        },
+        client: mockClient,
+      });
+
+      // All @mentions are stripped and spaces normalized
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'hello world',  // All mentions stripped, spaces normalized
+        expect.anything()
+      );
+    });
   });
 
   describe('status message position and activity consolidation', () => {
@@ -1214,6 +1334,136 @@ describe('slack-bot mention handlers', () => {
         )
       );
       expect(hasActivitySection).toBe(true);
+    });
+  });
+
+  describe('/show-plan command integration', () => {
+    it('should post plan content to thread when plan file exists', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const planContent = '# My Plan\n\n## Steps\n1. Do this\n2. Do that';
+      vi.mocked(fs.promises.readFile).mockResolvedValue(planContent);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: '/home/user/.claude/plans/test-plan.md',
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /show-plan',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should read the plan file
+      expect(fs.promises.readFile).toHaveBeenCalledWith(
+        '/home/user/.claude/plans/test-plan.md',
+        'utf-8'
+      );
+
+      // Should post plan content (via postMessage or uploadV2)
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const planPost = postCalls.find((call: any) =>
+        call[0].text?.includes('Current Plan') ||
+        call[0].text?.includes('My Plan')
+      );
+      expect(planPost).toBeDefined();
+
+      // Should NOT start Claude query (command handled internally)
+      expect(startClaudeQuery).not.toHaveBeenCalled();
+    });
+
+    it('should post error when plan file does not exist', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mock file read to throw error (file not found)
+      vi.mocked(fs.promises.readFile).mockRejectedValue(new Error('ENOENT: no such file'));
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        planFilePath: '/home/user/.claude/plans/missing-plan.md',
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /show-plan',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should post error message about file not found
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const errorPost = postCalls.find((call: any) =>
+        call[0].text?.includes('Plan file not found')
+      );
+      expect(errorPost).toBeDefined();
+      expect(errorPost[0].text).toContain('missing-plan.md');
+
+      // Should NOT start Claude query
+      expect(startClaudeQuery).not.toHaveBeenCalled();
+    });
+
+    it('should post error when no plan file path in session', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+        // No planFilePath
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /show-plan',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should post error message about no plan file
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const errorPost = postCalls.find((call: any) =>
+        call[0].text?.includes('No plan file found')
+      );
+      expect(errorPost).toBeDefined();
+
+      // Should NOT start Claude query
+      expect(startClaudeQuery).not.toHaveBeenCalled();
     });
   });
 

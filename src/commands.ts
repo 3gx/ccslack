@@ -54,6 +54,9 @@ export interface CommandResult {
   stopTerminalWatch?: boolean;
   // For /ff command - signals to fast-forward sync missed terminal messages then start watching
   fastForward?: boolean;
+  // For /show-plan command - signals to post plan file content to thread
+  showPlan?: boolean;
+  planFilePath?: string;
 }
 
 /**
@@ -118,6 +121,8 @@ export function parseCommand(
       return handleMessageSize(argString, session);
     case 'strip-empty-tag':
       return handleStripEmptyTag(argString, session);
+    case 'show-plan':
+      return handleShowPlan(session);
     default:
       // Unknown command - return error
       return {
@@ -138,7 +143,8 @@ function handleHelp(): CommandResult {
 \`/set-current-path\` - Lock current directory (one-time only)
 \`/status\` - Show session info (ID, mode, directory, context)
 \`/context\` - Show context window usage
-\`/mode\` - Show mode picker
+\`/mode [plan|bypass|ask|edit]\` - Set mode or show picker
+\`/show-plan\` - Show current plan file in thread
 \`/model\` - Show model picker
 \`/max-thinking-tokens [n]\` - Set thinking budget (0=disable, 1024-128000, default=31999)
 \`/update-rate [n]\` - Set status update interval (1-10 seconds, default=2)
@@ -369,23 +375,41 @@ function handleContext(session: Session): CommandResult {
   };
 }
 
+// Mode shortcut mapping for quick /mode <arg> switching
+const MODE_SHORTCUTS: Record<string, PermissionMode> = {
+  plan: 'plan',
+  bypass: 'bypassPermissions',
+  ask: 'default',
+  edit: 'acceptEdits',
+};
+
 /**
- * /mode - Show mode picker (selection only, no typed arguments)
+ * /mode [arg] - Show mode picker or switch mode with shortcut
+ * Shortcuts: plan, bypass, ask, edit
  */
 function handleMode(modeArg: string, session: Session): CommandResult {
-  // If user tries to type a mode, redirect to selection UI
-  if (modeArg) {
+  // No argument - show picker
+  if (!modeArg) {
     return {
       handled: true,
-      response: `Please use the mode picker to select a mode.`,
       blocks: buildModeSelectionBlocks(session.mode),
     };
   }
 
-  // Show button selection UI
+  // Valid shortcut - switch mode directly
+  const mode = MODE_SHORTCUTS[modeArg.toLowerCase()];
+  if (mode) {
+    return {
+      handled: true,
+      response: `Mode set to \`${mode}\``,
+      sessionUpdate: { mode },
+    };
+  }
+
+  // Invalid argument - reject with help
   return {
     handled: true,
-    blocks: buildModeSelectionBlocks(session.mode),
+    response: `❌ Unknown mode \`${modeArg}\`. Usage: \`/mode [plan|bypass|ask|edit]\``,
   };
 }
 
@@ -792,5 +816,24 @@ function handleStripEmptyTag(args: string, session: Session): CommandResult {
   return {
     handled: true,
     response: 'Invalid value. Usage: `/strip-empty-tag [true|false]`',
+  };
+}
+
+/**
+ * /show-plan - Show current plan file content in thread
+ */
+function handleShowPlan(session: Session): CommandResult {
+  if (!session.planFilePath) {
+    return {
+      handled: true,
+      response: '❌ No plan file found. A plan is created when using plan mode.',
+    };
+  }
+
+  // Return special marker for slack-bot.ts to handle file reading/posting
+  return {
+    handled: true,
+    showPlan: true,
+    planFilePath: session.planFilePath,
   };
 }

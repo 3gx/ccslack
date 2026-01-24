@@ -132,27 +132,45 @@ describe('commands', () => {
       expect(defaultButton?.style).toBeUndefined();
     });
 
-    it('should redirect to mode picker when arg provided', () => {
-      const result = parseCommand('/mode bypassPermissions', mockSession);
-
+    it('should switch to plan mode with /mode plan', () => {
+      const result = parseCommand('/mode plan', mockSession);
       expect(result.handled).toBe(true);
-      expect(result.response).toContain('Please use the mode picker');
-      expect(result.blocks).toBeDefined();
-      expect(result.sessionUpdate).toBeUndefined();
+      expect(result.sessionUpdate?.mode).toBe('plan');
+      expect(result.response).toContain('Mode set to');
     });
 
-    it('should show picker for any typed mode argument', () => {
-      const result = parseCommand('/mode default', mockSession);
-      expect(result.response).toContain('Please use the mode picker');
-      expect(result.blocks).toBeDefined();
+    it('should switch to bypass mode with /mode bypass', () => {
+      const result = parseCommand('/mode bypass', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.mode).toBe('bypassPermissions');
+      expect(result.response).toContain('Mode set to');
     });
 
-    it('should show picker even for invalid mode argument', () => {
+    it('should switch to ask mode with /mode ask', () => {
+      const result = parseCommand('/mode ask', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.mode).toBe('default');
+      expect(result.response).toContain('Mode set to');
+    });
+
+    it('should switch to edit mode with /mode edit', () => {
+      const result = parseCommand('/mode edit', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.mode).toBe('acceptEdits');
+      expect(result.response).toContain('Mode set to');
+    });
+
+    it('should handle mode shortcuts case-insensitively', () => {
+      const result = parseCommand('/mode PLAN', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.mode).toBe('plan');
+    });
+
+    it('should reject invalid mode argument with usage hint', () => {
       const result = parseCommand('/mode invalid', mockSession);
-
       expect(result.handled).toBe(true);
-      expect(result.response).toContain('Please use the mode picker');
-      expect(result.blocks).toBeDefined();
+      expect(result.response).toContain('Unknown mode');
+      expect(result.response).toContain('/mode [plan|bypass|ask|edit]');
       expect(result.sessionUpdate).toBeUndefined();
     });
   });
@@ -936,6 +954,31 @@ describe('commands', () => {
       const result = parseCommand('/help', mockSession);
       expect(result.response).toContain('/strip-empty-tag');
       expect(result.response).toContain('true|false');
+    });
+  });
+
+  describe('/show-plan', () => {
+    it('should return error when no plan file path', () => {
+      const result = parseCommand('/show-plan', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('No plan file found');
+      expect(result.showPlan).toBeUndefined();
+    });
+
+    it('should return showPlan flag when plan file exists', () => {
+      const sessionWithPlan: Session = {
+        ...mockSession,
+        planFilePath: '/home/user/.claude/plans/my-plan.md',
+      };
+      const result = parseCommand('/show-plan', sessionWithPlan);
+      expect(result.handled).toBe(true);
+      expect(result.showPlan).toBe(true);
+      expect(result.planFilePath).toBe('/home/user/.claude/plans/my-plan.md');
+    });
+
+    it('should appear in /help output', () => {
+      const result = parseCommand('/help', mockSession);
+      expect(result.response).toContain('/show-plan');
     });
   });
 });

@@ -1919,8 +1919,20 @@ app.event('app_mention', async ({ event, client }) => {
 
     console.log(`Received mention from ${event.user}: ${event.text}`);
 
-    // Remove the @mention from the text
-    const userText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
+    // Remove the @mention from the text and normalize spaces
+    const userText = event.text
+      .replace(/<@[A-Z0-9]+>/g, '')
+      .replace(/\s+/g, ' ')  // Normalize multiple spaces to single
+      .trim();
+
+    // Reject empty messages
+    if (!userText) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        text: '❌ Empty messages are not permitted. Please include a message or command after @bot.',
+      });
+      return;
+    }
 
     // Extract files from event (if any)
     const eventFiles = (event as any).files as SlackFile[] | undefined;
@@ -2540,6 +2552,30 @@ async function handleMessage(params: {
     } else if (commandResult.fastForward && session?.sessionId) {
       // Fast-forward: sync missed terminal messages and start watching
       await handleFastForwardSync(client, channelId, threadTs, session, userId);
+    } else if (commandResult.showPlan && commandResult.planFilePath) {
+      // /show-plan command: post plan file content to thread
+      try {
+        const planContent = await fs.promises.readFile(commandResult.planFilePath, 'utf-8');
+        const slackFormatted = markdownToSlack(planContent);
+        const liveConfig = getLiveSessionConfig(channelId, threadTs);
+        const headerText = `:clipboard: *Current Plan*\n\`${commandResult.planFilePath}\``;
+        await uploadMarkdownAndPngWithResponse(
+          client,
+          channelId,
+          planContent,
+          `${headerText}\n\n${slackFormatted}`,
+          threadTs,
+          userId,
+          liveConfig.threadCharLimit,
+          liveConfig.stripEmptyTag
+        );
+      } catch (e) {
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: `❌ Plan file not found at \`${commandResult.planFilePath}\``,
+        });
+      }
     } else if (commandResult.response) {
       await client.chat.postMessage({
         channel: channelId,
