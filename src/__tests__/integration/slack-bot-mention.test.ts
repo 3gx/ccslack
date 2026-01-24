@@ -624,64 +624,15 @@ describe('slack-bot mention handlers', () => {
       expect(responseCall[0].text).toContain(':speech_balloon: *Response*');
     });
 
-    it('should upload .md file in thread when response is truncated', async () => {
+    it('should reject @bot mentions in threads with error message', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
-      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
-        ok: true,
-        files: [{
-          id: 'F123',
-          shares: { public: { 'C123': [{ ts: 'thread-file-ts' }] } },
-        }],
-      });
 
-      vi.mocked(getSession).mockReturnValue({
-        sessionId: 'parent-session',
-        workingDir: '/test',
-        mode: 'default',
-        createdAt: Date.now(),
-        lastActiveAt: Date.now(),
-        pathConfigured: true,
-        configuredPath: '/test/dir',
-        configuredBy: 'U123',
-        configuredAt: Date.now(),
-      });
-
-      vi.mocked(getOrCreateThreadSession).mockReturnValue({
-        session: {
-          sessionId: 'thread-session',
-          forkedFrom: 'parent-session',
-          workingDir: '/test',
-          mode: 'default',
-          createdAt: Date.now(),
-          lastActiveAt: Date.now(),
-          pathConfigured: true,
-          configuredPath: '/test/dir',
-          configuredBy: 'U123',
-          configuredAt: Date.now(),
-        },
-        isNewFork: false,
-      });
-
-      // Long response that exceeds default 500 char limit to trigger file upload
-      const longThreadResponse = 'Thread response with lots of content. '.repeat(20);
-      const mockMessages = [
-        { type: 'system', subtype: 'init', session_id: 'thread-session', model: 'claude-sonnet' },
-        { type: 'result', result: longThreadResponse },
-      ];
-      vi.mocked(startClaudeQuery).mockReturnValue({
-        [Symbol.asyncIterator]: async function* () {
-          for (const msg of mockMessages) {
-            yield msg;
-          }
-        },
-        interrupt: vi.fn(),
-      } as any);
-
+      // Mention bot in a thread (thread_ts is present)
       await handler({
         event: {
           user: 'U123',
-          text: '<@BOT123> reply in thread',
+          text: '<@BOT123> hello from thread',
           channel: 'C123',
           ts: 'msg456',
           thread_ts: 'thread123',
@@ -689,35 +640,18 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md and .png files to the ACTIVITY thread (status message)
-      // WITH initial_comment (text attached to files)
-      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel_id: 'C123',
-          thread_ts: expect.any(String),  // Activity thread (status message ts)
-          initial_comment: expect.stringContaining(':speech_balloon: *Response*'),
-          file_uploads: expect.arrayContaining([
-            expect.objectContaining({
-              file: expect.any(Buffer),  // Markdown as Buffer
-              filename: expect.stringMatching(/^response-\d+\.md$/),
-              title: 'Full Response (Markdown)',
-            }),
-          ]),
-        })
-      );
-      // Verify initial_comment IS present (text is attached to files, not separate)
-      const uploadCall = mockClient.files.uploadV2.mock.calls[0][0] as any;
-      expect(uploadCall.initial_comment).toBeDefined();
-      expect(uploadCall.initial_comment).toContain(':speech_balloon: *Response*');
+      // Should post rejection message IN the thread
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C123',
+        thread_ts: 'thread123',
+        text: expect.stringContaining('@bot can only be mentioned in the main channel'),
+      });
 
-      // Text should NOT be posted separately via chat.postMessage when truncated
-      // (it's attached to the file via initial_comment in activity thread)
-      const postCalls = mockClient.chat.postMessage.mock.calls;
-      const responseCall = postCalls.find((call: any) =>
-        call[0].text?.includes('Thread response with lots') &&
-        !call[0].thread_ts  // Main channel posts don't have thread_ts
-      );
-      expect(responseCall).toBeUndefined();
+      // Should NOT start Claude query
+      expect(startClaudeQuery).not.toHaveBeenCalled();
+
+      // Should NOT add eyes reaction (early return before processing)
+      expect(mockClient.reactions.add).not.toHaveBeenCalled();
     });
   });
 

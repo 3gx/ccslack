@@ -1907,6 +1907,16 @@ app.event('app_mention', async ({ event, client }) => {
       return;
     }
 
+    // Reject @bot mentions in threads - only main channel allowed
+    if (event.thread_ts) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: event.thread_ts,
+        text: '❌ @bot can only be mentioned in the main channel, not in threads.',
+      });
+      return;
+    }
+
     console.log(`Received mention from ${event.user}: ${event.text}`);
 
     // Remove the @mention from the text

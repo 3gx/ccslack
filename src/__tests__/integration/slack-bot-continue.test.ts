@@ -688,40 +688,6 @@ describe('slack-bot /watch command', () => {
       );
     });
 
-    it('should work in thread context', async () => {
-      const handler = registeredHandlers['event_app_mention'];
-      const mockClient = createMockSlackClient();
-
-      vi.mocked(stopWatching).mockReturnValue(true);
-
-      vi.mocked(getSession).mockReturnValue({
-        sessionId: 'existing-session-123',
-        workingDir: '/test/project',
-        mode: 'default',
-        createdAt: Date.now(),
-        lastActiveAt: Date.now(),
-        pathConfigured: true,
-        configuredPath: '/test/project',
-        configuredBy: 'U123',
-        configuredAt: Date.now(),
-      });
-
-      await handler({
-        event: { text: '<@BOT123> /stop-watching', channel: 'C123', ts: 'msg-ts', thread_ts: 'thread-ts-123', user: 'U123' },
-        client: mockClient,
-        say: vi.fn(),
-      });
-
-      expect(stopWatching).toHaveBeenCalledWith('C123', 'thread-ts-123');
-      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel: 'C123',
-          thread_ts: 'thread-ts-123',
-          text: expect.stringContaining('Stopped watching'),
-        })
-      );
-    });
-
     it('should allow /stop-watching command while watching', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
