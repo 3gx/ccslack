@@ -470,7 +470,10 @@ export async function uploadMarkdownAndPngWithResponse(
       : truncateWithClosedFormatting(slackFormattedResponse, limit);
 
     // Track if response was truncated (for conditional file attachment)
-    const wasTruncated = slackFormattedResponse.length > limit;
+    // Check the MARKDOWN content length, not the formatted preview length
+    // The formatted preview may already be truncated (e.g., thinking preview is ~300 chars)
+    // but the full markdown content could be 10k+ chars and needs .md attachment
+    const wasTruncated = cleanMarkdown.length > limit;
 
     let textTs: string | undefined;
     const postedMessages: { ts: string }[] = [];

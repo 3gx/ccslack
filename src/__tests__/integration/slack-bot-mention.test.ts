@@ -1177,4 +1177,122 @@ describe('slack-bot mention handlers', () => {
     });
   });
 
+  describe('thinking thread activity with long content', () => {
+    it('should delete thinking placeholder before posting new message with .md attachment', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Track the ts of the thinking placeholder message
+      let thinkingPlaceholderTs: string | null = null;
+      const originalPostMessage = mockClient.chat.postMessage;
+      mockClient.chat.postMessage = vi.fn().mockImplementation(async (opts: any) => {
+        // Intercept thinking placeholder posts
+        if (opts.text?.includes('*Thinking...*')) {
+          thinkingPlaceholderTs = `thinking-placeholder-${Date.now()}`;
+          return { ok: true, ts: thinkingPlaceholderTs };
+        }
+        return originalPostMessage(opts);
+      });
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        threadCharLimit: 100,  // Low limit to trigger .md attachment
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Simulate thinking with long content (exceeds 100 char limit)
+      const longThinking = 'A'.repeat(500);  // 500 chars, way over 100 limit
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
+        // Thinking block start
+        {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'thinking' },
+          },
+        },
+        // Thinking content (long)
+        {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'thinking_delta', thinking: longThinking },
+          },
+        },
+        // Thinking block stop
+        {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_stop',
+            index: 0,
+          },
+        },
+        { type: 'result', result: 'Done!' },
+      ];
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> think about this',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // When thinking content exceeds charLimit (100):
+      // 1. A thinking placeholder should have been posted
+      // 2. It should be deleted before posting new message with .md attachment
+      // This prevents duplicate thinking messages in the thread
+
+      // Verify thinking placeholder was posted
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const thinkingPlaceholderPost = postCalls.find((call: any) =>
+        call[0].text?.includes('*Thinking...*')
+      );
+      expect(thinkingPlaceholderPost).toBeDefined();
+
+      // Verify chat.delete was called for the thinking placeholder
+      // (This is the bug fix - delete old placeholder before posting new message)
+      if (thinkingPlaceholderTs) {
+        const deleteCalls = mockClient.chat.delete.mock.calls;
+        const deleteForThinking = deleteCalls.find((call: any) =>
+          call[0].ts === thinkingPlaceholderTs
+        );
+        // With the fix, the placeholder should be deleted
+        // Note: This may be undefined if chat.delete mock doesn't capture it
+        // The key assertion is that chat.delete IS called (not toHaveBeenCalled check)
+      }
+
+      // The important assertion: with long content, we should see chat.delete called
+      // to remove the placeholder before posting the new message with attachment
+      // (status message delete is not called, only thinking placeholder)
+      const deleteCalls = mockClient.chat.delete.mock.calls;
+      // Filter out any status message deletes (look for thinking placeholder pattern)
+      const thinkingDeleteCall = deleteCalls.find((call: any) =>
+        call[0].ts?.startsWith('thinking-placeholder-')
+      );
+      expect(thinkingDeleteCall).toBeDefined();
+    });
+  });
+
 });

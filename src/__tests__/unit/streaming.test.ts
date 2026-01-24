@@ -1024,5 +1024,48 @@ describe('streaming', () => {
       // Restore fake timers for other tests
       vi.useFakeTimers();
     });
+
+    it('should upload files when markdown is long but formatted text is short (thread activity fix)', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { public: { 'C123': [{ ts: 'file-msg-ts' }] } },
+        }],
+      });
+
+      // This simulates thread activity scenario:
+      // - Full markdown content is very long (10000 chars)
+      // - But formatted preview text is short (e.g., ":bulb: *Thinking* [5s] _10000 chars_\n> first 300 chars...")
+      const longMarkdown = 'X'.repeat(10000);  // Full thinking content
+      const shortFormattedPreview = ':bulb: *Thinking* [5s] _10000 chars_\n> ' + 'X'.repeat(300) + '...';  // ~350 chars
+
+      // charLimit is 500, formatted preview is ~350 chars (under limit)
+      // But markdown is 10000 chars (way over limit) - should still upload .md
+      await uploadMarkdownAndPngWithResponse(
+        mockClient as any,
+        'C123',
+        longMarkdown,           // Full markdown (10000 chars)
+        shortFormattedPreview,  // Short preview (~350 chars)
+        'thread123',
+        'U456',
+        500  // charLimit - preview is under this, but markdown is way over
+      );
+
+      // Files SHOULD be uploaded because markdown content exceeds limit
+      // (even though formatted preview text is under the limit)
+      expect(mockClient.files.uploadV2).toHaveBeenCalled();
+
+      // Verify the full markdown is included in the file upload
+      const uploadCall = mockClient.files.uploadV2.mock.calls[0][0];
+      expect(uploadCall.file_uploads).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            filename: expect.stringMatching(/^response-\d+\.md$/),
+          }),
+        ])
+      );
+    });
   });
 });

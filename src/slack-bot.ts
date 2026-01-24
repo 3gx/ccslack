@@ -2861,6 +2861,19 @@ async function handleMessage(params: {
         // If content exceeds limit, need to post new message with .md attachment
         // (can't attach files to existing messages via update)
         if (content.length > charLimit) {
+          // Delete old placeholder to avoid duplicate messages
+          if (processingState.activityThreadMsgTs) {
+            try {
+              await client.chat.delete({
+                channel: channelId,
+                ts: processingState.activityThreadMsgTs,
+              });
+              console.log(`[Activity Thread] Deleted thinking placeholder: ${processingState.activityThreadMsgTs}`);
+            } catch (err) {
+              // Non-fatal: placeholder may already be deleted or we lack permissions
+              console.warn('[Activity Thread] Failed to delete thinking placeholder:', err);
+            }
+          }
           // Post new message with .md attachment
           await postThinkingToThread(
             client,
