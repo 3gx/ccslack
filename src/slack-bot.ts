@@ -3999,19 +3999,36 @@ app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
   const channelId = bodyWithTrigger.channel?.id;
   const messageTs = bodyWithTrigger.message?.ts;
 
-  if (bodyWithTrigger.trigger_id && channelId) {
-    try {
-      await client.views.open({
-        trigger_id: bodyWithTrigger.trigger_id,
-        view: buildAbortConfirmationModalView({
-          abortType: 'question',
-          key: questionId,
-          channelId,
-          messageTs: messageTs || '',
-        }),
+  if (!bodyWithTrigger.trigger_id || !channelId) {
+    console.error('Missing trigger_id or channelId for abort modal');
+    if (channelId && bodyWithTrigger.user?.id) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithTrigger.user.id,
+        text: ':warning: Failed to open abort confirmation. Please try again.',
       });
-    } catch (error) {
-      console.error('Error opening abort confirmation modal:', error);
+    }
+    return;
+  }
+
+  try {
+    await client.views.open({
+      trigger_id: bodyWithTrigger.trigger_id,
+      view: buildAbortConfirmationModalView({
+        abortType: 'question',
+        key: questionId,
+        channelId,
+        messageTs: messageTs || '',
+      }),
+    });
+  } catch (error) {
+    console.error('Error opening abort confirmation modal:', error);
+    if (bodyWithTrigger.user?.id) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithTrigger.user.id,
+        text: ':warning: Failed to open abort confirmation. Please try again.',
+      });
     }
   }
 });
@@ -4186,19 +4203,36 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
   const channelId = bodyWithTrigger.channel?.id;
   const messageTs = bodyWithTrigger.message?.ts;
 
-  if (bodyWithTrigger.trigger_id && channelId) {
-    try {
-      await client.views.open({
-        trigger_id: bodyWithTrigger.trigger_id,
-        view: buildAbortConfirmationModalView({
-          abortType: 'query',
-          key: conversationKey,
-          channelId,
-          messageTs: messageTs || '',
-        }),
+  if (!bodyWithTrigger.trigger_id || !channelId) {
+    console.error('Missing trigger_id or channelId for abort query modal');
+    if (channelId && bodyWithTrigger.user?.id) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithTrigger.user.id,
+        text: ':warning: Failed to open abort confirmation. Please try again.',
       });
-    } catch (error) {
-      console.error('Error opening abort confirmation modal:', error);
+    }
+    return;
+  }
+
+  try {
+    await client.views.open({
+      trigger_id: bodyWithTrigger.trigger_id,
+      view: buildAbortConfirmationModalView({
+        abortType: 'query',
+        key: conversationKey,
+        channelId,
+        messageTs: messageTs || '',
+      }),
+    });
+  } catch (error) {
+    console.error('Error opening abort confirmation modal:', error);
+    if (bodyWithTrigger.user?.id) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithTrigger.user.id,
+        text: ':warning: Failed to open abort confirmation. Please try again.',
+      });
     }
   }
 });
@@ -4888,19 +4922,36 @@ app.action(/^sdkq_abort_(.+)$/, async ({ action, ack, body, client }) => {
   const channelId = bodyWithTrigger.channel?.id;
   const messageTs = bodyWithTrigger.message?.ts;
 
-  if (bodyWithTrigger.trigger_id && channelId) {
-    try {
-      await client.views.open({
-        trigger_id: bodyWithTrigger.trigger_id,
-        view: buildAbortConfirmationModalView({
-          abortType: 'sdk_question',
-          key: questionId,
-          channelId,
-          messageTs: messageTs || '',
-        }),
+  if (!bodyWithTrigger.trigger_id || !channelId) {
+    console.error('Missing trigger_id or channelId for SDK abort modal');
+    if (channelId && bodyWithTrigger.user?.id) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithTrigger.user.id,
+        text: ':warning: Failed to open abort confirmation. Please try again.',
       });
-    } catch (error) {
-      console.error('Error opening abort confirmation modal:', error);
+    }
+    return;
+  }
+
+  try {
+    await client.views.open({
+      trigger_id: bodyWithTrigger.trigger_id,
+      view: buildAbortConfirmationModalView({
+        abortType: 'sdk_question',
+        key: questionId,
+        channelId,
+        messageTs: messageTs || '',
+      }),
+    });
+  } catch (error) {
+    console.error('Error opening abort confirmation modal:', error);
+    if (bodyWithTrigger.user?.id) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: bodyWithTrigger.user.id,
+        text: ':warning: Failed to open abort confirmation. Please try again.',
+      });
     }
   }
 });

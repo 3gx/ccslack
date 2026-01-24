@@ -168,6 +168,117 @@ describe('slack-bot button handlers', () => {
         })
       );
     });
+
+    it('should post ephemeral error when trigger_id is missing', async () => {
+      const handler = registeredHandlers['action_^abort_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'abort_q_789' },
+        ack,
+        body: {
+          // No trigger_id
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.open).not.toHaveBeenCalled();
+      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith({
+        channel: 'C123',
+        user: 'U456',
+        text: ':warning: Failed to open abort confirmation. Please try again.',
+      });
+    });
+
+    it('should post ephemeral error when views.open fails', async () => {
+      const handler = registeredHandlers['action_^abort_(.+)$'];
+      const mockClient = createMockSlackClient();
+      mockClient.views.open = vi.fn().mockRejectedValue(new Error('Slack API error'));
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'abort_q_789' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.open).toHaveBeenCalled();
+      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith({
+        channel: 'C123',
+        user: 'U456',
+        text: ':warning: Failed to open abort confirmation. Please try again.',
+      });
+    });
+  });
+
+  describe('SDK question abort button handler', () => {
+    it('should open confirmation modal', async () => {
+      const handler = registeredHandlers['action_^sdkq_abort_(.+)$'];
+      expect(handler).toBeDefined();
+
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'sdkq_abort_q_sdk_123' },
+        ack,
+        body: {
+          trigger_id: 'trigger123',
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trigger_id: 'trigger123',
+          view: expect.objectContaining({
+            callback_id: 'abort_confirmation_modal',
+            type: 'modal',
+          }),
+        })
+      );
+    });
+
+    it('should post ephemeral error when trigger_id is missing', async () => {
+      const handler = registeredHandlers['action_^sdkq_abort_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        action: { action_id: 'sdkq_abort_q_sdk_123' },
+        ack,
+        body: {
+          // No trigger_id
+          channel: { id: 'C123' },
+          message: { ts: 'msg123' },
+          user: { id: 'U456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.open).not.toHaveBeenCalled();
+      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith({
+        channel: 'C123',
+        user: 'U456',
+        text: ':warning: Failed to open abort confirmation. Please try again.',
+      });
+    });
   });
 
   describe('freetext button handler', () => {
@@ -264,6 +375,32 @@ describe('slack-bot button handlers', () => {
         '/tmp/ccslack-answers/q_123.json',
         expect.stringContaining('__ABORTED__')
       );
+    });
+
+    it('should update message for SDK question abort type', async () => {
+      const handler = registeredHandlers['view_abort_confirmation_modal'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        ack,
+        body: {},
+        view: {
+          callback_id: 'abort_confirmation_modal',
+          private_metadata: JSON.stringify({
+            abortType: 'sdk_question',
+            key: 'sdk_q_456',
+            channelId: 'C123',
+            messageTs: 'msg789',
+          }),
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // SDK question abort doesn't write to file, it resolves the pending promise
+      // and updates the message - verify no file write for this type
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
   });
 
