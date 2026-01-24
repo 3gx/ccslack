@@ -26,10 +26,11 @@ import {
   readActivityLog,
   ActivityEntry,
 } from './session-event-stream.js';
-import { buildLiveActivityBlocks } from './blocks.js';
+import { buildLiveActivityBlocks, formatThreadActivityBatch } from './blocks.js';
 import { withSlackRetry, withInfiniteRetry, sleep } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownWithResponse } from './streaming.js';
 import { MESSAGE_SIZE_DEFAULT } from './commands.js';
+import { postActivityToThread, postThinkingToThread } from './activity-thread.js';
 
 /**
  * State required for posting messages to Slack.
@@ -396,9 +397,12 @@ async function postTurn(
   }
 
   // 1. Post user input (skip if already posted - partial turn recovery)
+  // Track user input ts as thread parent for activity replies
+  let userInputTs: string | null = null;
   if (!alreadyPosted.has(turn.userInput.uuid)) {
     const inputResult = await postUserInput(state, turn.userInput, infiniteRetry, charLimit);
-    if (inputResult?.ts) {
+    if (inputResult?.ts && inputResult.ts !== 'skipped') {
+      userInputTs = inputResult.ts;
       await saveMessageMapping(state.channelId, inputResult.ts, {
         sdkMessageId: turn.userInput.uuid,
         sessionId: state.sessionId,
@@ -408,6 +412,13 @@ async function postTurn(
     }
   }
 
+  // Determine thread parent for activity replies
+  // - If we just posted user input, use its ts
+  // - If user input was skipped (Slack-originated) or already posted, we can't thread
+  // - Threading only works in channels, not in existing threads (no nested threads)
+  const canThreadActivity = userInputTs && !state.threadTs;
+  const activityThreadParent = canThreadActivity ? userInputTs : null;
+
   // 2. Post INTERLEAVED activity + text for each segment
   for (let i = 0; i < turn.segments.length; i++) {
     const segment = turn.segments[i];
@@ -415,38 +426,43 @@ async function postTurn(
     // 2a. Get activity entries for THIS segment
     const segmentActivity = getActivityForSegment(i, turn.segments, turnStartTime, activityEntries);
 
-    // 2b. Post activity message for this segment (if there's activity and not already posted)
+    // 2b. Post activity as thread replies (if we have a thread parent) or as sibling message
     if (segmentActivity.length > 0) {
       // Check if segment activity messages are already posted
       const segmentActivityAlreadyPosted = segment.activityMessages.every(m => alreadyPosted.has(m.uuid));
 
       if (!segmentActivityAlreadyPosted) {
-        // isLastMessage: true only for the final segment of the final turn (same as text posting)
         const isLastSegment = isFinalTurn && (i === turn.segments.length - 1);
 
-        // Post NEW activity message for this segment (not update-in-place)
-        const blocks = buildLiveActivityBlocks(
-          segmentActivity,
-          false,  // not in-progress
-          isLastSegment,  // Fork button only on final segment of final turn
-          { threadTs: state.threadTs, conversationKey: state.conversationKey }
-        );
-        const activityResult = await postActivitySummary(state, blocks, infiniteRetry);
+        if (activityThreadParent) {
+          // Post activity as thread replies under user input
+          await postActivityAsThreadReplies(
+            state,
+            activityThreadParent,
+            segmentActivity,
+            charLimit,
+            infiniteRetry
+          );
+          console.log(`[MessageSync] Posted segment activity as thread replies: ${segmentActivity.length} entries`);
+        } else {
+          // Fallback: Post as sibling message (existing behavior)
+          const blocks = buildLiveActivityBlocks(
+            segmentActivity,
+            false,  // not in-progress
+            isLastSegment,  // Fork button only on final segment of final turn
+            { threadTs: state.threadTs, conversationKey: state.conversationKey }
+          );
+          const activityResult = await postActivitySummary(state, blocks, infiniteRetry);
 
-        if (activityResult?.ts) {
-          console.log(`[MessageSync] Posted segment activity: ${segmentActivity.length} entries`);
+          if (activityResult?.ts) {
+            console.log(`[MessageSync] Posted segment activity as sibling: ${segmentActivity.length} entries`);
+          }
+        }
 
-          // Track activity messages as posted
-          for (const activityMsg of segment.activityMessages) {
-            if (!alreadyPosted.has(activityMsg.uuid)) {
-              const mappingKey = `${activityResult.ts}_${activityMsg.uuid}`;
-              await saveMessageMapping(state.channelId, mappingKey, {
-                sdkMessageId: activityMsg.uuid,
-                sessionId: state.sessionId,
-                type: 'assistant',
-              });
-              postedUuids.push(activityMsg.uuid);
-            }
+        // Track activity messages as posted
+        for (const activityMsg of segment.activityMessages) {
+          if (!alreadyPosted.has(activityMsg.uuid)) {
+            postedUuids.push(activityMsg.uuid);
           }
         }
       }
@@ -492,53 +508,83 @@ async function postTurn(
     }
   }
 
+  // Post Fork button message as sibling on final segment (if we threaded activity)
+  if (isFinalTurn && activityThreadParent && turn.segments.length > 0) {
+    const blocks = buildLiveActivityBlocks(
+      [],  // No activity entries needed, just the Fork button
+      false,
+      true,  // Show Fork button
+      { threadTs: state.threadTs, conversationKey: state.conversationKey }
+    );
+    await postActivitySummary(state, blocks, infiniteRetry);
+  }
+
   // 3. Post/update trailing activity (for in-progress turns only)
   // Trailing activity uses update-in-place for /watch live updates
   const trailingActivity = getTrailingActivity(turn.segments, turnStartTime, activityEntries);
   if (trailingActivity.length > 0) {
-    // Check if we already have a trailing activity message for this turn
-    const existingTs = activityMessages?.get(turnKey);
-
-    const blocks = buildLiveActivityBlocks(
-      trailingActivity,
-      true,  // in-progress (live updates)
-      false,  // no Fork button for in-progress trailing activity
-      undefined  // no forkInfo needed
-    );
-
-    let activityTs: string | undefined;
-
-    if (existingTs) {
-      // UPDATE existing message (for /watch live updates)
-      const updateResult = await updateActivitySummary(state, existingTs, blocks, infiniteRetry);
-      if (updateResult.success) {
-        activityTs = updateResult.ts;
-      } else if (updateResult.messageNotFound) {
-        console.log(`[MessageSync] Trailing activity message ${existingTs} was deleted, posting new`);
-        const postResult = await postActivitySummary(state, blocks, infiniteRetry);
-        activityTs = postResult?.ts;
-      }
-    } else {
-      // POST new message
-      const postResult = await postActivitySummary(state, blocks, infiniteRetry);
-      activityTs = postResult?.ts;
-    }
-
-    // Store the ts for next poll
-    if (activityTs) {
-      activityMessages?.set(turnKey, activityTs);
-      console.log(`[MessageSync] Posted/updated trailing activity: ${trailingActivity.length} entries`);
+    if (activityThreadParent) {
+      // Post trailing activity as thread replies under user input
+      await postActivityAsThreadReplies(
+        state,
+        activityThreadParent,
+        trailingActivity,
+        charLimit,
+        infiniteRetry
+      );
+      console.log(`[MessageSync] Posted trailing activity as thread replies: ${trailingActivity.length} entries`);
 
       // Track trailing activity messages as posted
       for (const activityMsg of turn.trailingActivity) {
         if (!alreadyPosted.has(activityMsg.uuid)) {
-          const mappingKey = `${activityTs}_${activityMsg.uuid}`;
-          await saveMessageMapping(state.channelId, mappingKey, {
-            sdkMessageId: activityMsg.uuid,
-            sessionId: state.sessionId,
-            type: 'assistant',
-          });
           postedUuids.push(activityMsg.uuid);
+        }
+      }
+    } else {
+      // Fallback: use existing sibling message with update-in-place
+      const existingTs = activityMessages?.get(turnKey);
+
+      const blocks = buildLiveActivityBlocks(
+        trailingActivity,
+        true,  // in-progress (live updates)
+        false,  // no Fork button for in-progress trailing activity
+        undefined  // no forkInfo needed
+      );
+
+      let activityTs: string | undefined;
+
+      if (existingTs) {
+        // UPDATE existing message (for /watch live updates)
+        const updateResult = await updateActivitySummary(state, existingTs, blocks, infiniteRetry);
+        if (updateResult.success) {
+          activityTs = updateResult.ts;
+        } else if (updateResult.messageNotFound) {
+          console.log(`[MessageSync] Trailing activity message ${existingTs} was deleted, posting new`);
+          const postResult = await postActivitySummary(state, blocks, infiniteRetry);
+          activityTs = postResult?.ts;
+        }
+      } else {
+        // POST new message
+        const postResult = await postActivitySummary(state, blocks, infiniteRetry);
+        activityTs = postResult?.ts;
+      }
+
+      // Store the ts for next poll
+      if (activityTs) {
+        activityMessages?.set(turnKey, activityTs);
+        console.log(`[MessageSync] Posted/updated trailing activity as sibling: ${trailingActivity.length} entries`);
+
+        // Track trailing activity messages as posted
+        for (const activityMsg of turn.trailingActivity) {
+          if (!alreadyPosted.has(activityMsg.uuid)) {
+            const mappingKey = `${activityTs}_${activityMsg.uuid}`;
+            await saveMessageMapping(state.channelId, mappingKey, {
+              sdkMessageId: activityMsg.uuid,
+              sessionId: state.sessionId,
+              type: 'assistant',
+            });
+            postedUuids.push(activityMsg.uuid);
+          }
         }
       }
     }
@@ -811,4 +857,109 @@ async function postTextResponse(
   }
 
   return await post();
+}
+
+/**
+ * Post activity entries as thread replies under a parent message.
+ * Groups entries by type: thinking gets its own message with .md attachment,
+ * tools are batched together.
+ */
+async function postActivityAsThreadReplies(
+  state: MessageSyncState,
+  parentTs: string,
+  entries: ActivityEntry[],
+  charLimit: number,
+  infiniteRetry: boolean
+): Promise<void> {
+  // Group consecutive tool entries together, thinking entries separate
+  const batches: { type: 'thinking' | 'tools'; entries: ActivityEntry[] }[] = [];
+
+  for (const entry of entries) {
+    if (entry.type === 'thinking') {
+      // Thinking gets its own message
+      batches.push({ type: 'thinking', entries: [entry] });
+    } else if (entry.type === 'tool_start' || entry.type === 'tool_complete') {
+      // Batch tools together
+      const lastBatch = batches[batches.length - 1];
+      if (lastBatch?.type === 'tools') {
+        lastBatch.entries.push(entry);
+      } else {
+        batches.push({ type: 'tools', entries: [entry] });
+      }
+    }
+    // Skip 'starting', 'generating', 'error' - they're less relevant for /ff/watch sync
+  }
+
+  // Post each batch
+  for (const batch of batches) {
+    if (batch.type === 'thinking' && batch.entries[0]) {
+      // Post thinking with potential .md attachment
+      const thinkingEntry = batch.entries[0];
+      try {
+        if (infiniteRetry) {
+          await withInfiniteRetry(
+            () => postThinkingToThread(
+              state.client,
+              state.channelId,
+              parentTs,
+              thinkingEntry,
+              charLimit
+            ),
+            {
+              baseDelayMs: 3000,
+              maxDelayMs: 30000,
+              onRetry: (error, attempt, delayMs) => {
+                console.log(`[MessageSync] Thinking thread reply failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+              },
+            }
+          );
+        } else {
+          await postThinkingToThread(
+            state.client,
+            state.channelId,
+            parentTs,
+            thinkingEntry,
+            charLimit
+          );
+        }
+      } catch (error) {
+        console.error('[MessageSync] Failed to post thinking to thread:', error);
+      }
+    } else if (batch.type === 'tools' && batch.entries.length > 0) {
+      // Batch tools together and post
+      const content = formatThreadActivityBatch(batch.entries);
+      if (content) {
+        try {
+          if (infiniteRetry) {
+            await withInfiniteRetry(
+              () => postActivityToThread(
+                state.client,
+                state.channelId,
+                parentTs,
+                content,
+                { charLimit }
+              ),
+              {
+                baseDelayMs: 3000,
+                maxDelayMs: 30000,
+                onRetry: (error, attempt, delayMs) => {
+                  console.log(`[MessageSync] Tools thread reply failed (attempt ${attempt}), retrying in ${delayMs}ms:`, error);
+                },
+              }
+            );
+          } else {
+            await postActivityToThread(
+              state.client,
+              state.channelId,
+              parentTs,
+              content,
+              { charLimit }
+            );
+          }
+        } catch (error) {
+          console.error('[MessageSync] Failed to post tools to thread:', error);
+        }
+      }
+    }
+  }
 }

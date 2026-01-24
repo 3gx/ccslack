@@ -69,6 +69,15 @@ vi.mock('../../session-event-stream.js', () => ({
   readActivityLog: vi.fn(() => Promise.resolve([])),
 }));
 
+// Mock activity-thread (for thread-based activity posting)
+vi.mock('../../activity-thread.js', () => ({
+  postActivityToThread: vi.fn(() => Promise.resolve({ ts: 'thread-reply-ts' })),
+  postThinkingToThread: vi.fn(() => Promise.resolve('thinking-ts')),
+}));
+
+// Import mocked activity-thread for use in tests
+import * as activityThread from '../../activity-thread.js';
+
 // Mock blocks
 vi.mock('../../blocks.js', () => ({
   buildLiveActivityBlocks: vi.fn(() => [
@@ -86,6 +95,7 @@ vi.mock('../../blocks.js', () => ({
       value: JSON.stringify({ sessionId }),
     }],
   })),
+  formatThreadActivityBatch: vi.fn(() => ':white_check_mark: *Read* [0.1s]'),
 }));
 
 // Mock fs
@@ -498,9 +508,8 @@ describe('terminal-watcher', () => {
       // Should NOT use uploadMarkdownAndPngWithResponse for activity-only turns
       expect(streaming.uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
 
-      // Activity is now posted via buildLiveActivityBlocks for in-progress turns (trailingActivity)
-      const { buildLiveActivityBlocks } = await import('../../blocks.js');
-      expect(buildLiveActivityBlocks).toHaveBeenCalled();
+      // Activity is now posted as thread replies for in-progress turns (trailingActivity)
+      expect(activityThread.postActivityToThread).toHaveBeenCalled();
     });
 
     it('should post multiple tool-only messages without file attachments', async () => {
@@ -547,9 +556,8 @@ describe('terminal-watcher', () => {
       // Should NOT use uploadMarkdownAndPngWithResponse for activity-only turns
       expect(streaming.uploadMarkdownAndPngWithResponse).not.toHaveBeenCalled();
 
-      // Activity is now posted via buildLiveActivityBlocks for in-progress turns (trailingActivity)
-      const { buildLiveActivityBlocks } = await import('../../blocks.js');
-      expect(buildLiveActivityBlocks).toHaveBeenCalled();
+      // Activity is now posted as thread replies for in-progress turns (trailingActivity)
+      expect(activityThread.postActivityToThread).toHaveBeenCalled();
     });
 
     it('should still use file attachments for mixed content (text + tools)', async () => {

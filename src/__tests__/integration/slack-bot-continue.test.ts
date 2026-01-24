@@ -1014,9 +1014,9 @@ describe('slack-bot /watch command', () => {
       // Find any call that includes :inbox_tray: (user input marker)
       const userInputCall = postCalls.find((c: any) => c[0].text?.includes(':inbox_tray:'));
       expect(userInputCall).toBeDefined();
-      // Should NOT have posted more than initial status + 1 turn (2 messages: user input + text response)
-      // Plus final status = roughly 3-4 calls
-      expect(postCalls.length).toBeLessThanOrEqual(5);
+      // Should NOT have posted more than initial status + 1 turn + Fork button + final status
+      // (user input, text response, Fork button message, status updates)
+      expect(postCalls.length).toBeLessThanOrEqual(6);
     });
 
     it('should show "already up to date" and start watching when no new messages', async () => {

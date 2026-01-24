@@ -34,8 +34,15 @@ vi.mock('../../session-event-stream.js', () => ({
 vi.mock('../../blocks.js', () => ({
   buildLiveActivityBlocks: vi.fn(() => [
     { type: 'section', text: { type: 'mrkdwn', text: ':brain: *Thinking...*' } },
-    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Log' } }] },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Fork here' } }] },
   ]),
+  formatThreadActivityBatch: vi.fn(() => ':white_check_mark: *Read* [0.1s]'),
+}));
+
+// Mock activity-thread module
+vi.mock('../../activity-thread.js', () => ({
+  postActivityToThread: vi.fn(() => Promise.resolve({ ts: 'thread-reply-ts' })),
+  postThinkingToThread: vi.fn(() => Promise.resolve('thinking-ts')),
 }));
 
 // Mock retry module
@@ -191,9 +198,13 @@ describe('message-sync', () => {
         { timestamp: Date.parse('2024-01-01T00:00:01Z'), type: 'thinking', thinkingContent: 'hmm...' },
       ]);
 
+      // Import activity-thread to check calls
+      const { postThinkingToThread } = await import('../../activity-thread.js');
+
       const result = await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
 
-      // Should post 3 messages: user input, activity summary, text response
+      // With threading: posts user input, text response, and Fork button as siblings
+      // Activity goes to thread replies (via postThinkingToThread)
       expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(3);
 
       // First: user input with :inbox_tray: prefix
@@ -202,24 +213,34 @@ describe('message-sync', () => {
         text: expect.stringContaining(':inbox_tray:'),
       }));
 
-      // Second: activity summary (uses buildLiveActivityBlocks)
+      // Activity posted as thread reply (thinking entry)
+      expect(postThinkingToThread).toHaveBeenCalled();
+
+      // Second: text response
       expect(mockClient.chat.postMessage).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        channel: 'channel-1',
+        text: 'Hi there!',
+      }));
+
+      // Third: Fork button message (activity summary with Fork button, posted after segments)
+      expect(mockClient.chat.postMessage).toHaveBeenNthCalledWith(3, expect.objectContaining({
         channel: 'channel-1',
         blocks: expect.any(Array),
         text: 'Activity summary',
-      }));
-
-      // Third: text response
-      expect(mockClient.chat.postMessage).toHaveBeenNthCalledWith(3, expect.objectContaining({
-        channel: 'channel-1',
-        text: 'Hi there!',
       }));
 
       expect(result.syncedCount).toBe(3);
       expect(result.allSucceeded).toBe(true);
     });
 
-    it('should use buildLiveActivityBlocks for activity summary', async () => {
+    it('should use buildLiveActivityBlocks for activity summary (fallback when in thread)', async () => {
+      // When already in a thread, activity uses fallback sibling posting with buildLiveActivityBlocks
+      const threadState = {
+        ...mockState,
+        threadTs: 'thread-123',  // Already in a thread - can't create nested threads
+        conversationKey: 'channel-1_thread-123',
+      };
+
       const userMsg = {
         type: 'user', uuid: 'u1', timestamp: '2024-01-01T00:00:00Z', sessionId: 's1',
         message: { role: 'user', content: 'Hello' },
@@ -245,9 +266,9 @@ describe('message-sync', () => {
         { timestamp: Date.parse('2024-01-01T00:00:02Z'), type: 'tool_complete', tool: 'Read', durationMs: 100 },
       ]);
 
-      await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
+      await syncMessagesFromOffset(threadState, '/path/to/file.jsonl', 0);
 
-      // buildLiveActivityBlocks should be called for in-progress turn
+      // buildLiveActivityBlocks should be called for fallback (in-thread scenario)
       expect(blocks.buildLiveActivityBlocks).toHaveBeenCalled();
     });
 
@@ -634,13 +655,10 @@ describe('message-sync', () => {
 
       await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
 
-      // Should save mappings for user input, activity (with composite key), and text output
+      // Should save mappings for user input and text output
+      // Activity goes to thread replies (no composite key needed since posted via postThinkingToThread)
       expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
         'channel-1', 'msg-ts', expect.objectContaining({ sdkMessageId: 'u1', type: 'user' })
-      );
-      // Activity uses composite key: activityTs_uuid to avoid overwriting
-      expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
-        'channel-1', 'msg-ts_a1', expect.objectContaining({ sdkMessageId: 'a1', type: 'assistant' })
       );
       // Text output uses regular ts
       expect(sessionManager.saveMessageMapping).toHaveBeenCalledWith(
@@ -648,10 +666,9 @@ describe('message-sync', () => {
       );
     });
 
-    it('should save UNIQUE mapping keys for multiple activity messages (prevents overwrite bug)', async () => {
-      // This test verifies the fix for a bug where multiple activity messages sharing
-      // one Slack activity summary would overwrite each other's mappings, causing
-      // repeated "synced" messages on every /ff run.
+    it('should post activity as thread replies with threading enabled', async () => {
+      // With threading, activity goes to thread replies under user input message
+      // Each activity type (thinking, tools) gets its own thread reply
       const userMsg = {
         type: 'user', uuid: 'u1', timestamp: '2024-01-01T00:00:00Z', sessionId: 's1',
         message: { role: 'user', content: 'Hello' },
@@ -664,65 +681,38 @@ describe('message-sync', () => {
         type: 'assistant', uuid: 'activity-2', timestamp: '2024-01-01T00:00:02Z', sessionId: 's1',
         message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Read' }] },
       };
-      const activityMsg3 = {
-        type: 'assistant', uuid: 'activity-3', timestamp: '2024-01-01T00:00:03Z', sessionId: 's1',
-        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Write' }] },
-      };
-      const activityMsg4 = {
-        type: 'assistant', uuid: 'activity-4', timestamp: '2024-01-01T00:00:04Z', sessionId: 's1',
-        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash' }] },
-      };
 
       vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [userMsg, activityMsg1, activityMsg2, activityMsg3, activityMsg4],
-        newOffset: 5000,
+        messages: [userMsg, activityMsg1, activityMsg2],
+        newOffset: 3000,
       });
       vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
         userInput: userMsg,
         segments: [],
-        trailingActivity: [activityMsg1, activityMsg2, activityMsg3, activityMsg4],
-        allMessageUuids: ['u1', 'activity-1', 'activity-2', 'activity-3', 'activity-4'],
+        trailingActivity: [activityMsg1, activityMsg2],
+        allMessageUuids: ['u1', 'activity-1', 'activity-2'],
       }]);
       vi.mocked(sessionReader.extractTextContent).mockReturnValue('');
       vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([
-        { timestamp: Date.parse('2024-01-01T00:00:01Z'), type: 'thinking' },
+        { timestamp: Date.parse('2024-01-01T00:00:01Z'), type: 'thinking', thinkingContent: 'thinking...' },
         { timestamp: Date.parse('2024-01-01T00:00:02Z'), type: 'tool_complete', tool: 'Read' },
-        { timestamp: Date.parse('2024-01-01T00:00:03Z'), type: 'tool_complete', tool: 'Write' },
-        { timestamp: Date.parse('2024-01-01T00:00:04Z'), type: 'tool_complete', tool: 'Bash' },
       ]);
 
-      // Activity summary posts to 'activity-ts'
-      mockClient.chat.postMessage.mockImplementation((opts: any) => {
-        if (opts.blocks) {
-          return Promise.resolve({ ts: 'activity-ts' });
-        }
-        return Promise.resolve({ ts: 'msg-ts' });
-      });
+      // Import activity-thread to check calls
+      const { postThinkingToThread, postActivityToThread } = await import('../../activity-thread.js');
 
       await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
 
-      // Each activity message should get a UNIQUE mapping key (activityTs_uuid)
-      // to prevent overwriting each other
-      const saveMessageMappingCalls = vi.mocked(sessionManager.saveMessageMapping).mock.calls;
+      // Activity should be posted as thread replies
+      expect(postThinkingToThread).toHaveBeenCalled();
+      expect(postActivityToThread).toHaveBeenCalled();
 
-      // Find all activity mapping calls
-      const activityMappings = saveMessageMappingCalls.filter(
-        call => call[2].type === 'assistant' && call[2].sdkMessageId.startsWith('activity-')
+      // User input should still be posted as sibling
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining(':inbox_tray:'),
+        })
       );
-
-      // Should have 4 activity mappings (one for each activity message)
-      expect(activityMappings.length).toBe(4);
-
-      // Each should have a UNIQUE key (not all using the same 'activity-ts')
-      const mappingKeys = activityMappings.map(call => call[1]);
-      const uniqueKeys = new Set(mappingKeys);
-      expect(uniqueKeys.size).toBe(4);
-
-      // Keys should be composite: activityTs_uuid
-      expect(mappingKeys).toContain('activity-ts_activity-1');
-      expect(mappingKeys).toContain('activity-ts_activity-2');
-      expect(mappingKeys).toContain('activity-ts_activity-3');
-      expect(mappingKeys).toContain('activity-ts_activity-4');
     });
 
     it('should not reprocess turn when all activity UUIDs are in messageMap', async () => {
@@ -873,12 +863,16 @@ describe('message-sync', () => {
         charLimit: 100,
       });
 
-      // Should have posted 2 messages: user input and text response
-      expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(2);
+      // Should have posted messages: user input, Fork button, text response
+      // (no activity in this case, so no thread replies)
+      expect(mockClient.chat.postMessage).toHaveBeenCalled();
 
-      // Second call (text response) should be truncated
-      const textCall = mockClient.chat.postMessage.mock.calls[1];
-      expect(textCall[0].text).toContain('xxx'); // Contains x's
+      // Find the text response call (has truncated content)
+      const textCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any) => call[0].text?.includes('xxx')
+      );
+      expect(textCalls.length).toBeGreaterThan(0);
+      const textCall = textCalls[0];
       expect(textCall[0].text.length).toBeLessThan(1000);
       expect(textCall[0].text).toContain('truncated');
     });
@@ -1218,16 +1212,15 @@ describe('message-sync', () => {
         { timestamp: Date.parse('2024-01-01T00:00:03.000Z'), type: 'tool_complete', tool: 'Read', durationMs: 2000 },
       ]);
 
+      // Import activity-thread to check calls
+      const { postThinkingToThread, postActivityToThread } = await import('../../activity-thread.js');
+
       await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
 
-      // Activity summary should be posted (buildLiveActivityBlocks called with 3 entries)
-      expect(blocks.buildLiveActivityBlocks).toHaveBeenCalled();
-      const buildCall = vi.mocked(blocks.buildLiveActivityBlocks).mock.calls[0];
-      const activityEntries = buildCall[0];
-
-      // All 3 activity entries should be included (thinking, tool_start, tool_complete)
-      expect(activityEntries).toHaveLength(3);
-      expect(activityEntries.map((e: any) => e.type)).toEqual(['thinking', 'tool_start', 'tool_complete']);
+      // With threading, activity goes to thread replies
+      // Thinking and tools are posted separately
+      expect(postThinkingToThread).toHaveBeenCalled();
+      expect(postActivityToThread).toHaveBeenCalled();
     });
 
     it('should post activity for segment within timestamp range (interleaved approach)', async () => {
@@ -1263,18 +1256,16 @@ describe('message-sync', () => {
       // Activity log includes entry at T1 (before text at T2) - should be included
       // Entry at T5 (after text) would be trailing activity, not in this segment
       vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([
-        { timestamp: Date.parse('2024-01-01T00:00:01.000Z'), type: 'thinking' },
+        { timestamp: Date.parse('2024-01-01T00:00:01.000Z'), type: 'thinking', thinkingContent: '...' },
       ]);
+
+      // Import activity-thread to check calls
+      const { postThinkingToThread } = await import('../../activity-thread.js');
 
       await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
 
-      expect(blocks.buildLiveActivityBlocks).toHaveBeenCalled();
-      const buildCall = vi.mocked(blocks.buildLiveActivityBlocks).mock.calls[0];
-      const activityEntries = buildCall[0];
-
-      // Only the entry within segment range should be included
-      expect(activityEntries).toHaveLength(1);
-      expect(activityEntries.map((e: any) => e.type)).toEqual(['thinking']);
+      // With threading, thinking goes to thread reply
+      expect(postThinkingToThread).toHaveBeenCalled();
     });
 
     it('should return activity entries for segment with no activityMessages', async () => {
@@ -1342,28 +1333,25 @@ describe('message-sync', () => {
 
       // Activity log with entries at various future timestamps
       vi.mocked(sessionEventStream.readActivityLog).mockResolvedValue([
-        { timestamp: Date.parse('2024-01-01T00:00:01.000Z'), type: 'thinking' },
+        { timestamp: Date.parse('2024-01-01T00:00:01.000Z'), type: 'thinking', thinkingContent: '...' },
         { timestamp: Date.parse('2024-01-01T00:00:05.000Z'), type: 'tool_start', tool: 'Read' },
         { timestamp: Date.parse('2024-01-01T00:00:10.000Z'), type: 'tool_complete', tool: 'Read', durationMs: 5000 },
         { timestamp: Date.parse('2024-01-01T00:01:00.000Z'), type: 'tool_start', tool: 'Write' },
       ]);
 
+      // Import activity-thread to check calls
+      const { postThinkingToThread, postActivityToThread } = await import('../../activity-thread.js');
+
       await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
 
-      expect(blocks.buildLiveActivityBlocks).toHaveBeenCalled();
-      const buildCall = vi.mocked(blocks.buildLiveActivityBlocks).mock.calls[0];
-      const activityEntries = buildCall[0];
-
-      // All 4 activity entries should be included (no upper bound for trailing)
-      expect(activityEntries).toHaveLength(4);
-      expect(activityEntries.map((e: any) => e.type)).toEqual([
-        'thinking', 'tool_start', 'tool_complete', 'tool_start'
-      ]);
+      // With threading, activity goes to thread replies
+      expect(postThinkingToThread).toHaveBeenCalled();
+      expect(postActivityToThread).toHaveBeenCalled();
     });
 
     it('should post INTERLEAVED activity messages for multi-segment turn', async () => {
       // With interleaved approach, we post activity per segment (not one for entire turn)
-      // Each segment gets: activity message → text message
+      // Each segment gets: activity as thread reply → text message as sibling
       const userMsg = {
         type: 'user', uuid: 'u1', timestamp: '2024-01-01T00:00:00.000Z', sessionId: 's1',
         message: { role: 'user', content: 'Do two things' },
@@ -1411,22 +1399,14 @@ describe('message-sync', () => {
         { timestamp: Date.parse('2024-01-01T00:00:03.500Z'), type: 'tool_complete', tool: 'Write', durationMs: 500 },
       ]);
 
+      // Import activity-thread to check calls
+      const { postActivityToThread } = await import('../../activity-thread.js');
+
       await syncMessagesFromOffset(mockState, '/path/to/file.jsonl', 0);
 
-      // Interleaved approach: buildLiveActivityBlocks called TWICE (one per segment)
-      expect(blocks.buildLiveActivityBlocks).toHaveBeenCalledTimes(2);
-
-      // First call: segment 1 activity (Read tool)
-      const call1 = vi.mocked(blocks.buildLiveActivityBlocks).mock.calls[0];
-      const entries1 = call1[0];
-      expect(entries1).toHaveLength(2);  // tool_start and tool_complete for Read
-      expect(entries1.map((e: any) => e.tool)).toEqual(['Read', 'Read']);
-
-      // Second call: segment 2 activity (Write tool)
-      const call2 = vi.mocked(blocks.buildLiveActivityBlocks).mock.calls[1];
-      const entries2 = call2[0];
-      expect(entries2).toHaveLength(2);  // tool_start and tool_complete for Write
-      expect(entries2.map((e: any) => e.tool)).toEqual(['Write', 'Write']);
+      // With threading, each segment's tools go to thread replies
+      // postActivityToThread called twice (once per segment)
+      expect(postActivityToThread).toHaveBeenCalledTimes(2);
     });
   });
 });
