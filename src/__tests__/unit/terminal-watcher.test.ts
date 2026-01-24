@@ -843,8 +843,12 @@ describe('terminal-watcher', () => {
 
   });
 
-  describe('status message movement', () => {
-    it('should delete old status message after posting new messages', async () => {
+  describe('anchor message behavior (thread-based output)', () => {
+    // With thread-based output, the anchor message stays in place
+    // and all terminal activity is posted as thread replies.
+    // The anchor message is NOT moved after posting messages.
+
+    it('should not move or delete anchor message when messages are synced', async () => {
       const mockMessage = {
         type: 'user',
         uuid: '123',
@@ -865,247 +869,29 @@ describe('terminal-watcher', () => {
         allMessageUuids: ['123'],
       }]);
 
-      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+      startWatching('channel-1', undefined, mockSession, mockClient, 'anchor-ts');
 
       // Advance timer to trigger poll
       await vi.advanceTimersByTimeAsync(2000);
 
-      // Should delete old status message
-      expect(mockClient.chat.delete).toHaveBeenCalledWith({
-        channel: 'channel-1',
-        ts: 'status-ts',
-      });
+      // Anchor message should NOT be deleted (stays in place)
+      expect(mockClient.chat.delete).not.toHaveBeenCalled();
     });
 
-    it('should post new status message at bottom after posting new messages', async () => {
-      const mockMessage = {
-        type: 'user',
-        uuid: '123',
-        timestamp: '2024-01-01T00:00:00Z',
-        sessionId: 'sess-1',
-        message: { role: 'user', content: 'Hello from terminal' },
-      };
-
-      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockMessage],
-        newOffset: 2000,
-      });
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello from terminal');
-      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
-        userInput: mockMessage as any,
-        segments: [],
-        trailingActivity: [],
-        allMessageUuids: ['123'],
-      }]);
-
-      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
-
-      // Advance timer to trigger poll
-      await vi.advanceTimersByTimeAsync(2000);
-
-      // Should post new status message with Stop Watching button
-      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel: 'channel-1',
-          blocks: expect.arrayContaining([
-            expect.objectContaining({
-              type: 'actions',
-              elements: expect.arrayContaining([
-                expect.objectContaining({
-                  action_id: 'stop_terminal_watch',
-                  text: expect.objectContaining({ text: expect.stringContaining('Stop Watching') }),
-                }),
-              ]),
-            }),
-          ]),
-        })
-      );
-    });
-
-    it('should update watcher state with new status message ts', async () => {
-      const mockMessage = {
-        type: 'user',
-        uuid: '123',
-        timestamp: '2024-01-01T00:00:00Z',
-        sessionId: 'sess-1',
-        message: { role: 'user', content: 'Hello' },
-      };
-
-      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockMessage],
-        newOffset: 2000,
-      });
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
-      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
-        userInput: mockMessage as any,
-        segments: [],
-        trailingActivity: [],
-        allMessageUuids: ['123'],
-      }]);
-
-      // Track postMessage calls and return different ts based on call content
-      let callCount = 0;
-      mockClient.chat.postMessage.mockImplementation(() => {
-        callCount++;
-        // First call is content message, second is status message
-        return Promise.resolve({ ts: callCount === 1 ? 'content-msg-ts' : 'new-status-ts' });
-      });
-
-      startWatching('channel-1', undefined, mockSession, mockClient, 'old-status-ts');
-
-      // Advance timer to trigger poll
-      await vi.advanceTimersByTimeAsync(2000);
-
-      // Watcher should have updated statusMsgTs
-      const watcher = getWatcher('channel-1');
-      expect(watcher?.statusMsgTs).toBe('new-status-ts');
-    });
-
-    it('should not move status message if no new messages', async () => {
+    it('should not modify anchor when no new messages', async () => {
       vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
         messages: [],
         newOffset: 1000,
       });
 
-      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
+      startWatching('channel-1', undefined, mockSession, mockClient, 'anchor-ts');
 
       // Advance timer to trigger poll
       await vi.advanceTimersByTimeAsync(2000);
 
-      // Should NOT delete or post status message when no new content
+      // Should NOT delete or update anchor message when no new content
       expect(mockClient.chat.delete).not.toHaveBeenCalled();
-      // Only the initial postMessage from startWatching should have happened (none in this case)
-    });
-
-    it('should move status message when turns attempted even if syncedCount is 0', async () => {
-      // This tests the fix for "stuck button" issue where messages are posted
-      // but ts extraction fails, causing syncedCount=0 even though messages appeared
-      const mockUserInput = {
-        type: 'user',
-        uuid: 'user-stuck-btn',
-        timestamp: '2024-01-01T00:00:00Z',
-        sessionId: 'sess-1',
-        message: { role: 'user', content: 'prompt' },
-      };
-      const mockMessage = {
-        type: 'assistant',
-        uuid: 'assistant-stuck-btn',
-        timestamp: '2024-01-01T00:00:01Z',
-        sessionId: 'sess-1',
-        message: { role: 'assistant', content: [{ type: 'text', text: 'Response' }] },
-      };
-
-      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockUserInput, mockMessage],
-        newOffset: 2000,
-      });
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Response');
-      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
-        userInput: mockUserInput as any,
-        segments: [{ activityMessages: [], textOutput: mockMessage as any }],
-        trailingActivity: [],
-        allMessageUuids: ['user-stuck-btn', 'assistant-stuck-btn'],
-      }]);
-
-      // Simulate ts extraction failure - messages posted but ts undefined
-      // User input: postMessage returns no ts
-      // Assistant: upload returns uploadSucceeded but no ts
-      mockClient.chat.postMessage.mockResolvedValue({ ok: true }); // No ts!
-      vi.mocked(streaming.uploadMarkdownAndPngWithResponse).mockResolvedValue({
-        ts: undefined,
-        postedMessages: [],
-        uploadSucceeded: true,  // Upload worked but ts extraction failed
-      });
-
-      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
-
-      // Advance timer to trigger poll
-      await vi.advanceTimersByTimeAsync(2000);
-
-      // Even though syncedCount may be 0 (ts extraction failed),
-      // button should STILL move because we attempted to process turns (totalToSync > 0)
-      expect(mockClient.chat.delete).toHaveBeenCalledWith({
-        channel: 'channel-1',
-        ts: 'status-ts',
-      });
-    });
-
-    it('should include watching text with update rate in status message', async () => {
-      const mockMessage = {
-        type: 'user',
-        uuid: '123',
-        timestamp: '2024-01-01T00:00:00Z',
-        sessionId: 'sess-1',
-        message: { role: 'user', content: 'Hello' },
-      };
-
-      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockMessage],
-        newOffset: 2000,
-      });
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
-      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
-        userInput: mockMessage as any,
-        segments: [],
-        trailingActivity: [],
-        allMessageUuids: ['123'],
-      }]);
-
-      const sessionWithRate = { ...mockSession, updateRateSeconds: 5 };
-      startWatching('channel-1', undefined, sessionWithRate, mockClient, 'status-ts');
-
-      await vi.advanceTimersByTimeAsync(5000);
-
-      // Should include rate in button text (may not be the first postMessage call due to activity messages)
-      const postCalls = mockClient.chat.postMessage.mock.calls;
-      const statusCall = postCalls.find((call: any[]) => {
-        const arg = call[0] as any;
-        return arg.blocks?.some((block: any) =>
-          block.type === 'actions' &&
-          block.elements?.some((el: any) => el.text?.text?.includes('(5s)'))
-        );
-      });
-      expect(statusCall).toBeDefined();
-    });
-
-    it('should handle delete error gracefully and still post new status', async () => {
-      const mockMessage = {
-        type: 'user',
-        uuid: '123',
-        timestamp: '2024-01-01T00:00:00Z',
-        sessionId: 'sess-1',
-        message: { role: 'user', content: 'Hello' },
-      };
-
-      vi.mocked(sessionReader.readNewMessages).mockResolvedValue({
-        messages: [mockMessage],
-        newOffset: 2000,
-      });
-      vi.mocked(sessionReader.extractTextContent).mockReturnValue('Hello');
-      vi.mocked(sessionReader.groupMessagesByTurn).mockReturnValue([{
-        userInput: mockMessage as any,
-        segments: [],
-        trailingActivity: [],
-        allMessageUuids: ['123'],
-      }]);
-
-      // Simulate delete error (message already deleted)
-      mockClient.chat.delete.mockRejectedValue(new Error('message_not_found'));
-
-      startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
-
-      await vi.advanceTimersByTimeAsync(2000);
-
-      // Should still post new status message despite delete error
-      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          blocks: expect.arrayContaining([
-            expect.objectContaining({
-              type: 'actions',
-            }),
-          ]),
-        })
-      );
+      expect(mockClient.chat.update).not.toHaveBeenCalled();
     });
   });
 

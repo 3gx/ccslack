@@ -2119,9 +2119,10 @@ export function buildLiveActivityBlocks(
  * Used by both /watch and /ff commands to show consistent button styling.
  *
  * @param sessionId - The session ID being watched
+ * @param threadTs - Optional thread ts for watcher lookup (anchor ts for thread-based output)
  * @returns Block with danger-styled button
  */
-export function buildStopWatchingButton(sessionId: string): Block {
+export function buildStopWatchingButton(sessionId: string, threadTs?: string): Block {
   return {
     type: 'actions',
     block_id: `terminal_watch_${sessionId}`,
@@ -2130,7 +2131,7 @@ export function buildStopWatchingButton(sessionId: string): Block {
       text: { type: 'plain_text', text: '🛑 Stop Watching', emoji: true },
       action_id: 'stop_terminal_watch',
       style: 'danger',
-      value: JSON.stringify({ sessionId }),
+      value: JSON.stringify({ sessionId, threadTs }),
     }],
   };
 }
@@ -2141,9 +2142,10 @@ export function buildStopWatchingButton(sessionId: string): Block {
  *
  * @param sessionId - The session ID being watched
  * @param updateRateSeconds - Update rate in seconds (e.g., 2)
+ * @param threadTs - Optional thread ts for watcher lookup (anchor ts for thread-based output)
  * @returns Actions block with stop button including rate info
  */
-export function buildWatchingStatusSection(sessionId: string, updateRateSeconds: number): Block {
+export function buildWatchingStatusSection(sessionId: string, updateRateSeconds: number, threadTs?: string): Block {
   return {
     type: 'actions',
     block_id: `terminal_watch_${sessionId}`,
@@ -2152,7 +2154,7 @@ export function buildWatchingStatusSection(sessionId: string, updateRateSeconds:
       text: { type: 'plain_text', text: `🛑 Stop Watching (${updateRateSeconds}s)`, emoji: true },
       action_id: 'stop_terminal_watch',
       style: 'danger',
-      value: JSON.stringify({ sessionId }),
+      value: JSON.stringify({ sessionId, threadTs }),
     }],
   };
 }

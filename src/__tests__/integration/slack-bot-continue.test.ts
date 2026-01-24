@@ -235,12 +235,14 @@ describe('slack-bot /watch command', () => {
         say: vi.fn(),
       });
 
+      // With thread-based output, anchor ts is used as BOTH statusMsgTs AND threadTs
+      // All terminal activity posts as thread replies to the anchor
       expect(startWatching).toHaveBeenCalledWith(
         'C123',
-        undefined,
+        'response-ts-456',  // anchorTs used as threadTs for activity replies
         expect.objectContaining({ sessionId: 'existing-session-123' }),
         mockClient,
-        'response-ts-456',
+        'response-ts-456',  // anchorTs used as statusMsgTs
         'U123'  // userId for ephemeral error notifications
       );
     });
@@ -315,6 +317,44 @@ describe('slack-bot /watch command', () => {
         })
       );
     });
+
+    it('should NOT post mode header message for /watch command (no Bypass/Plan message)', async () => {
+      // This test verifies the fix for extra "Bypass" message appearing before /watch anchor
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'bypassPermissions',  // This would show as "Bypass" in header
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      mockClient.chat.postMessage.mockResolvedValue({ ts: 'response-ts' });
+
+      await handler({
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'original-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should NOT post a header message with mode (Bypass/Plan/etc)
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const headerCall = postCalls.find((call: any) => {
+        const blocks = call[0].blocks;
+        return blocks?.some((b: any) =>
+          b.type === 'context' &&
+          b.elements?.some((e: any) => e.text?.includes('Bypass') || e.text?.includes('Plan'))
+        );
+      });
+
+      expect(headerCall).toBeUndefined();
+    });
   });
 
   describe('stop_terminal_watch button handler', () => {
@@ -365,6 +405,49 @@ describe('slack-bot /watch command', () => {
           ]),
         })
       );
+    });
+
+    it('should extract threadTs from button value for watcher lookup (thread-based output)', async () => {
+      // This test verifies the fix for stop button not working with thread-based output
+      // where the anchor message contains anchorTs in the button value
+      const handler = registeredHandlers['action_stop_terminal_watch'];
+      const mockClient = createMockSlackClient();
+
+      await handler({
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'anchor-msg-ts' },  // Anchor is NOT in a thread, so no thread_ts
+          actions: [{
+            value: JSON.stringify({ sessionId: 'sess-123', threadTs: 'anchor-ts-for-watcher' }),
+          }],
+        },
+        client: mockClient,
+      });
+
+      // Should use threadTs from button value, not from message.thread_ts
+      expect(stopWatching).toHaveBeenCalledWith('C123', 'anchor-ts-for-watcher');
+    });
+
+    it('should fallback to message.thread_ts if button value has no threadTs (backwards compatibility)', async () => {
+      const handler = registeredHandlers['action_stop_terminal_watch'];
+      const mockClient = createMockSlackClient();
+
+      await handler({
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'msg-ts', thread_ts: 'thread-ts-fallback' },
+          actions: [{
+            value: JSON.stringify({ sessionId: 'sess-123' }),  // No threadTs in value
+          }],
+        },
+        client: mockClient,
+      });
+
+      // Should fallback to undefined since threadTs in value is undefined
+      // (message.thread_ts is only used if JSON parsing fails)
+      expect(stopWatching).toHaveBeenCalledWith('C123', undefined);
     });
   });
 
@@ -942,13 +1025,14 @@ describe('slack-bot /watch command', () => {
 
       // messageMap is updated by postTerminalMessage -> saveMessageMapping (no separate tracking)
 
-      // Should start watching after sync
+      // Should start watching after sync with anchor as thread parent
+      // With thread-based output, anchor ts is used as BOTH statusMsgTs AND threadTs
       expect(startWatching).toHaveBeenCalledWith(
         'C123',
-        undefined,
+        expect.any(String),  // anchorTs used as threadTs for activity replies
         expect.objectContaining({ sessionId: 'existing-session-123' }),
         mockClient,
-        expect.any(String),
+        expect.any(String),  // anchorTs used as statusMsgTs
         'U123'
       );
     });

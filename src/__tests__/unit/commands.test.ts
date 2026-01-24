@@ -324,6 +324,21 @@ describe('commands', () => {
   });
 
   describe('/watch', () => {
+    it('should reject when called from a thread', () => {
+      const result = parseCommand('/watch', mockSession, 'some-thread-ts');
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('can only be used in the main channel');
+      expect(result.startTerminalWatch).toBeFalsy();
+    });
+
+    it('should allow when called from main channel', () => {
+      const result = parseCommand('/watch', mockSession, undefined);
+
+      expect(result.handled).toBe(true);
+      expect(result.startTerminalWatch).toBe(true);
+    });
+
     it('should return error when no session ID', () => {
       const sessionWithoutId: Session = { ...mockSession, sessionId: null };
       const result = parseCommand('/watch', sessionWithoutId);
@@ -797,6 +812,21 @@ describe('commands', () => {
   });
 
   describe('/ff', () => {
+    it('should reject when called from a thread', () => {
+      const result = parseCommand('/ff', mockSession, 'some-thread-ts');
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('can only be used in the main channel');
+      expect(result.fastForward).toBeFalsy();
+    });
+
+    it('should allow when called from main channel', () => {
+      const result = parseCommand('/ff', mockSession, undefined);
+
+      expect(result.handled).toBe(true);
+      expect(result.fastForward).toBe(true);
+    });
+
     it('should return error when no session ID', () => {
       const sessionWithoutId: Session = { ...mockSession, sessionId: null };
       const result = parseCommand('/ff', sessionWithoutId);

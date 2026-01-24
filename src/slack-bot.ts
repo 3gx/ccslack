@@ -859,22 +859,24 @@ const FF_PACING_DELAY_MS = 500;
  * - UUID tracking: tracks all synced message UUIDs (handles gaps, crash-safe)
  * - Infinite retries: never gives up on rate limits, uses exponential backoff
  * - Pacing: 500ms delay between messages to reduce rate limit hits
- * - Progress updates: shows sync progress to user
+ * - Progress updates: shows sync progress to user via anchor message updates
+ *
+ * Threading pattern (after thread-based output change):
+ * - Anchor message posted to main channel (no thread_ts)
+ * - All synced messages posted as thread replies to anchor
+ * - Progress updates anchor in place (no delete/repost)
+ * - After sync: anchor shows completion + Stop Watching button
  */
 async function handleFastForwardSync(
   client: any,
   channelId: string,
-  threadTs: string | undefined,
+  threadTs: string | undefined,  // Always undefined now (rejected in commands.ts)
   session: Session,
   userId?: string
 ): Promise<void> {
-  // Get effective session (thread session if in thread)
-  const effectiveSession = threadTs
-    ? getThreadSession(channelId, threadTs) ?? session
-    : session;
-
-  const sessionId = effectiveSession.sessionId;
-  const conversationKey = threadTs ? `${channelId}_${threadTs}` : channelId;
+  // Since /ff is now rejected in threads, we always use main channel session
+  const sessionId = session.sessionId;
+  const conversationKey = channelId;  // Always main channel
 
   // Clear any previous abort flag
   clearFfAborted(conversationKey);
@@ -882,41 +884,113 @@ async function handleFastForwardSync(
   if (!sessionId) {
     await client.chat.postMessage({
       channel: channelId,
-      thread_ts: threadTs,
       text: ':warning: No active session. Start a conversation first.',
     });
     return;
   }
 
   // Check if session file exists
-  if (!sessionFileExists(sessionId, effectiveSession.workingDir)) {
+  if (!sessionFileExists(sessionId, session.workingDir)) {
     await client.chat.postMessage({
       channel: channelId,
-      thread_ts: threadTs,
       text: ':warning: Session file not found. The session may have been deleted.',
     });
     return;
   }
 
-  // Post initial status message
-  const statusMsg = await withSlackRetry(() =>
+  const updateRate = session.updateRateSeconds ?? 2;
+  const terminalCommand = `cd ${session.workingDir} && claude --dangerously-skip-permissions --resume ${sessionId}`;
+
+  // Helper to build anchor blocks with progress
+  // anchorTs is required for 'watching' status to enable stop button
+  const buildAnchorBlocks = (status: 'syncing' | 'watching' | 'stopped', synced?: number, total?: number, anchorTs?: string) => {
+    if (status === 'syncing') {
+      const progressText = total !== undefined
+        ? `:fast_forward: Syncing terminal messages... ${synced ?? 0}/${total}`
+        : ':fast_forward: Syncing terminal messages...';
+      return [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: progressText },
+        },
+        {
+          type: 'actions',
+          block_id: `ff_sync_${sessionId}`,
+          elements: [{
+            type: 'button',
+            text: { type: 'plain_text', text: 'Stop FF' },
+            action_id: 'stop_ff_sync',
+            style: 'danger',
+            value: JSON.stringify({ sessionId }),
+          }],
+        },
+      ];
+    }
+
+    if (status === 'stopped') {
+      const remaining = (total ?? 0) - (synced ?? 0);
+      return [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `:stop_sign: Sync stopped at ${synced}/${total}.\n:point_right: Run \`/ff\` again to sync remaining ${remaining} message(s).`,
+          },
+        },
+      ];
+    }
+
+    // status === 'watching' - show terminal command + Stop Watching button
+    return [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:white_check_mark: Synced ${total ?? 0} message(s) from terminal.`,
+        },
+      },
+      {
+        type: 'divider',
+      },
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: 'Continue in Terminal' },
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: 'Run this command to continue your session locally:' },
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: '```' + terminalCommand + '```' },
+      },
+      {
+        type: 'divider',
+      },
+      buildWatchingStatusSection(sessionId, updateRate, anchorTs),
+    ];
+  };
+
+  // Post anchor message to main channel (no thread_ts)
+  const anchorMsg = await withSlackRetry(() =>
     client.chat.postMessage({
       channel: channelId,
-      thread_ts: threadTs,
+      // No thread_ts - this is the anchor in main channel
       text: ':fast_forward: Syncing terminal messages...',
+      blocks: buildAnchorBlocks('syncing'),
     })
   );
-  const statusMsgTs = (statusMsg as { ts?: string }).ts!;
+  const anchorTs = (anchorMsg as { ts?: string }).ts!;
 
   try {
-    // 1. Prepare sync state
-    const filePath = getSessionFilePath(sessionId, effectiveSession.workingDir);
+    // Prepare sync state - all messages go to anchor thread
+    const filePath = getSessionFilePath(sessionId, session.workingDir);
     const syncState: MessageSyncState = {
       conversationKey,
       channelId,
-      threadTs,
+      threadTs: anchorTs,  // Posts to anchor thread
       sessionId,
-      workingDir: effectiveSession.workingDir,
+      workingDir: session.workingDir,
       client,
     };
 
@@ -924,220 +998,115 @@ async function handleFastForwardSync(
     const watchState: WatchState = {
       conversationKey,
       channelId,
-      threadTs,
+      threadTs: anchorTs,  // Posts to anchor thread
       sessionId,
-      workingDir: effectiveSession.workingDir,
+      workingDir: session.workingDir,
       fileOffset: 0,  // Not used for posting
       intervalId: null as any,  // Not used for posting
-      statusMsgTs,
+      statusMsgTs: anchorTs,
       client,
-      updateRateMs: (effectiveSession.updateRateSeconds ?? 2) * 1000,
+      updateRateMs: updateRate * 1000,
       userId,
       activityMessages: new Map(),  // Track activity ts during sync (update-in-place)
       planFilePath: null,  // Not used for /ff
     };
 
-    // Track current status message ts (will change as we move it to bottom)
-    let currentStatusMsgTs = statusMsgTs;
     let lastReportedTotal = 0;
 
-    // Helper to build progress blocks
-    const buildProgressBlocks = (current: number, total: number) => [
-      {
-        type: 'context',
-        elements: [{
-          type: 'mrkdwn',
-          text: `:fast_forward: Syncing terminal messages... ${current}/${total}`,
-        }],
-      },
-      {
-        type: 'actions',
-        block_id: `ff_sync_${sessionId}`,
-        elements: [{
-          type: 'button',
-          text: { type: 'plain_text', text: 'Stop FF' },
-          action_id: 'stop_ff_sync',
-          style: 'danger',
-          value: JSON.stringify({ sessionId }),
-        }],
-      },
-    ];
-
-    // Helper to move status message to bottom (delete old, post new)
-    const moveStatusToBottom = async (current: number, total: number): Promise<void> => {
-      // Delete old status message
-      try {
-        await client.chat.delete({
-          channel: channelId,
-          ts: currentStatusMsgTs,
-        });
-      } catch (error) {
-        // Ignore delete errors (message may already be deleted)
-        console.log(`[FastForward] Could not delete old status message: ${error}`);
-      }
-
-      // Post new status message at bottom
-      try {
-        const result = await withSlackRetry(() =>
-          client.chat.postMessage({
-            channel: channelId,
-            thread_ts: threadTs,
-            text: `:fast_forward: Syncing terminal messages... ${current}/${total}`,
-            blocks: buildProgressBlocks(current, total),
-          })
-        );
-        const newTs = (result as { ts?: string }).ts;
-        if (newTs) {
-          currentStatusMsgTs = newTs;
-        }
-      } catch (error) {
-        console.error(`[FastForward] Failed to post new status message:`, error);
-      }
-    };
-
-    // 2. Run sync with progress tracking
+    // Run sync with progress tracking
     const syncResult = await syncMessagesFromOffset(syncState, filePath, 0, {
       infiniteRetry: true,
       isAborted: () => isFfAborted(conversationKey),
       pacingDelayMs: FF_PACING_DELAY_MS,
       postTextMessage: (s, msg) => postTerminalMessage(watchState, msg),
-      activityMessages: watchState.activityMessages,  // Pass activity ts map for update-in-place
-      charLimit: effectiveSession.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,  // Use session's message size setting
+      activityMessages: watchState.activityMessages,
+      charLimit: session.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
       onProgress: async (synced, total) => {
         lastReportedTotal = total;
-        // Update initial status on first message
-        if (synced === 1) {
-          await withSlackRetry(() =>
-            client.chat.update({
-              channel: channelId,
-              ts: currentStatusMsgTs,
-              text: `:fast_forward: Syncing ${total} message(s) from terminal...`,
-              blocks: buildProgressBlocks(synced, total),
-            })
-          );
-        }
-        // Move status message to bottom every 10 messages or on last message
-        if (synced % 10 === 0 || synced === total) {
-          await moveStatusToBottom(synced, total);
-        }
+        // Update anchor in place (no delete/repost)
+        await withSlackRetry(() =>
+          client.chat.update({
+            channel: channelId,
+            ts: anchorTs,
+            text: `:fast_forward: Syncing terminal messages... ${synced}/${total}`,
+            blocks: buildAnchorBlocks('syncing', synced, total),
+          })
+        );
       },
     });
 
     // Clear abort flag
     clearFfAborted(conversationKey);
 
-    // 3. Handle "already up to date" case
+    // Handle "already up to date" case
     if (syncResult.totalToSync === 0) {
+      // Update anchor to show "up to date" + terminal command + Stop Watching button
       await withSlackRetry(() =>
         client.chat.update({
           channel: channelId,
-          ts: statusMsgTs,
-          text: ':white_check_mark: Already up to date. No new terminal messages to sync.',
+          ts: anchorTs,
+          text: ':white_check_mark: Already up to date.',
+          blocks: [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: ':white_check_mark: Already up to date. No new terminal messages to sync.' },
+            },
+            { type: 'divider' },
+            {
+              type: 'header',
+              text: { type: 'plain_text', text: 'Continue in Terminal' },
+            },
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: 'Run this command to continue your session locally:' },
+            },
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: '```' + terminalCommand + '```' },
+            },
+            { type: 'divider' },
+            buildWatchingStatusSection(sessionId, updateRate, anchorTs),
+          ],
         })
       );
-
-      // Still start watching - show terminal command like /watch does
-      const updateRate = effectiveSession.updateRateSeconds ?? 2;
-      const terminalCommand = `cd ${effectiveSession.workingDir} && claude --dangerously-skip-permissions --resume ${sessionId}`;
-      const watchStatusMsg = await client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: `Continue in Terminal: ${terminalCommand}`,
-        blocks: [
-          {
-            type: 'header',
-            text: { type: 'plain_text', text: 'Continue in Terminal' },
-          },
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: 'Run this command to continue your session locally:' },
-          },
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: '```' + terminalCommand + '```' },
-          },
-          {
-            type: 'divider',
-          },
-          buildWatchingStatusSection(sessionId, updateRate),
-        ],
-      });
-      startWatching(channelId, threadTs, effectiveSession as Session, client, watchStatusMsg.ts as string, userId);
+      // Start watching with anchor as thread parent
+      startWatching(channelId, anchorTs, session, client, anchorTs, userId);
       return;
     }
 
-    // Use tracked values for completion message
     const totalToSync = lastReportedTotal || syncResult.totalToSync;
     const syncedCount = syncResult.syncedCount;
     const wasStopped = syncResult.wasAborted;
 
-    // 8. Update status to show completion or stopped
+    // Handle stopped case
     if (wasStopped) {
-      const remaining = totalToSync - syncedCount;
       await withSlackRetry(() =>
         client.chat.update({
           channel: channelId,
-          ts: currentStatusMsgTs,
-          text: `:stop_sign: Sync stopped. Synced ${syncedCount}/${totalToSync} message(s). Run \`/ff\` again to continue.`,
-          blocks: [{
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `:stop_sign: Sync stopped. Synced ${syncedCount}/${totalToSync} message(s).\n:point_right: Run \`/ff\` again to sync remaining ${remaining} message(s).`,
-            },
-          }],
+          ts: anchorTs,
+          text: `:stop_sign: Sync stopped.`,
+          blocks: buildAnchorBlocks('stopped', syncedCount, totalToSync),
         })
       );
       return;  // Don't start watching after stop
     }
 
+    // Update anchor to show completion + terminal command + Stop Watching button
     await withSlackRetry(() =>
       client.chat.update({
         channel: channelId,
-        ts: currentStatusMsgTs,
+        ts: anchorTs,
         text: `:white_check_mark: Synced ${totalToSync} message(s) from terminal.`,
-        blocks: [{
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `:white_check_mark: Synced ${totalToSync} message(s) from terminal.`,
-          },
-        }],
+        blocks: buildAnchorBlocks('watching', totalToSync, totalToSync, anchorTs),
       })
     );
 
-    // 9. Start watching (same as /watch) - show terminal command
-    const updateRate = effectiveSession.updateRateSeconds ?? 2;
-    const terminalCommand = `cd ${effectiveSession.workingDir} && claude --dangerously-skip-permissions --resume ${sessionId}`;
-    const watchStatusMsg = await client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: `Continue in Terminal: ${terminalCommand}`,
-      blocks: [
-        {
-          type: 'header',
-          text: { type: 'plain_text', text: 'Continue in Terminal' },
-        },
-        {
-          type: 'section',
-          text: { type: 'mrkdwn', text: 'Run this command to continue your session locally:' },
-        },
-        {
-          type: 'section',
-          text: { type: 'mrkdwn', text: '```' + terminalCommand + '```' },
-        },
-        {
-          type: 'divider',
-        },
-        buildWatchingStatusSection(sessionId, updateRate),
-      ],
-    });
-
-    const result = startWatching(channelId, threadTs, effectiveSession as Session, client, watchStatusMsg.ts as string, userId);
+    // Start watching with anchor as thread parent
+    const result = startWatching(channelId, anchorTs, session, client, anchorTs, userId);
     if (!result.success) {
       await client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: anchorTs,
         text: `:warning: Could not start watching: ${result.error}`,
       });
     }
@@ -1147,7 +1116,7 @@ async function handleFastForwardSync(
     await withSlackRetry(() =>
       client.chat.update({
         channel: channelId,
-        ts: statusMsgTs,
+        ts: anchorTs,
         text: `:x: Failed to sync terminal messages: ${error instanceof Error ? error.message : String(error)}`,
       })
     );
@@ -2197,7 +2166,7 @@ async function handleMessage(params: {
   }
 
   // Check for slash commands (e.g., /status, /mode, /continue)
-  const commandResult = parseCommand(userText, session);
+  const commandResult = parseCommand(userText, session, threadTs);
 
   // Handle /wait command (rate limit stress test)
   if (commandResult.waitTest) {
@@ -2333,35 +2302,74 @@ async function handleMessage(params: {
     }
 
     // Post header showing mode (so user always sees current mode)
-    await withSlackRetry(() =>
-      client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        blocks: buildHeaderBlocks({
-          status: 'starting',
-          mode: displayMode,
-        }),
-        text: displayMode,
-      })
-    );
+    // Skip for /watch and /ff - they have their own anchor messages
+    const skipHeader = commandResult.startTerminalWatch || commandResult.fastForward;
+    if (!skipHeader) {
+      await withSlackRetry(() =>
+        client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          blocks: buildHeaderBlocks({
+            status: 'starting',
+            mode: displayMode,
+          }),
+          text: displayMode,
+        })
+      );
+    }
 
     // Post command response
     if (commandResult.blocks) {
+      // For /watch command: anchor posted to main channel (no thread_ts)
+      // Activity will post as thread replies to the anchor
+      const postToThread = commandResult.startTerminalWatch ? undefined : threadTs;
       const response = await client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: postToThread,
         blocks: commandResult.blocks,
         text: 'Command response',
       });
 
-      // Start terminal watcher if requested (for /continue command)
+      // Start terminal watcher if requested (for /watch command)
+      // Use response.ts as BOTH the status message ts AND the threadTs for activity
+      // This makes all terminal activity post as thread replies to the anchor
       if (commandResult.startTerminalWatch && session?.sessionId && response.ts) {
-        const result = startWatching(channelId, threadTs, session, client, response.ts, userId);
+        const anchorTs = response.ts as string;
+
+        // Update the anchor with correct blocks that include anchorTs for stop button
+        // This is needed because commands.ts doesn't know anchorTs when building blocks
+        const updateRate = session.updateRateSeconds ?? 2;
+        const terminalCommand = `cd ${session.workingDir} && claude --dangerously-skip-permissions --resume ${session.sessionId}`;
+        await client.chat.update({
+          channel: channelId,
+          ts: anchorTs,
+          text: 'Terminal Watch',
+          blocks: [
+            {
+              type: 'header',
+              text: { type: 'plain_text', text: 'Continue in Terminal' },
+            },
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: 'Run this command to continue your session locally:' },
+            },
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: '```' + terminalCommand + '```' },
+            },
+            {
+              type: 'divider',
+            },
+            buildWatchingStatusSection(session.sessionId, updateRate, anchorTs),
+          ],
+        });
+
+        const result = startWatching(channelId, anchorTs, session, client, anchorTs, userId);
         if (!result.success) {
-          // Notify user of error
+          // Notify user of error - post as thread reply to anchor
           await client.chat.postMessage({
             channel: channelId,
-            thread_ts: threadTs,
+            thread_ts: anchorTs,
             text: `:warning: Could not start watching: ${result.error}`,
           });
         }
@@ -5139,9 +5147,18 @@ app.action('stop_terminal_watch', async ({ ack, body, client }) => {
   const channelId = body.channel?.id;
   if (!channelId) return;
 
-  // Get threadTs from message if in thread
   const bodyWithMessage = body as any;
-  const threadTs = bodyWithMessage.message?.thread_ts;
+
+  // Get threadTs from button value (for thread-based output where anchor has the button)
+  // Falls back to message's thread_ts for backwards compatibility
+  let threadTs: string | undefined;
+  try {
+    const buttonValue = JSON.parse(bodyWithMessage.actions?.[0]?.value || '{}');
+    threadTs = buttonValue.threadTs;
+  } catch {
+    // Fallback to message's thread_ts
+    threadTs = bodyWithMessage.message?.thread_ts;
+  }
 
   const stopped = stopWatching(channelId, threadTs);
 

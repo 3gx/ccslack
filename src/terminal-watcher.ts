@@ -17,7 +17,6 @@ import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse, uploadMarkdownWithResponse } from './streaming.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
-import { buildWatchingStatusSection } from './blocks.js';
 import { MESSAGE_SIZE_DEFAULT } from './commands.js';
 
 /**
@@ -250,62 +249,12 @@ async function pollForChanges(state: WatchState): Promise<void> {
     // Note: We don't update fileOffset - messageMap handles deduplication
     // This simplifies logic and avoids offset advancement bugs
 
-    // Move status message to bottom after attempting to post messages
-    // Use totalToSync (not syncedCount) to handle edge cases where messages
-    // are posted but ts extraction fails - button should still move
-    if (syncResult.totalToSync > 0) {
-      await moveStatusMessageToBottom(state);
-    }
+    // No status message movement needed - anchor stays in place, activity goes to thread
   } catch (error) {
     console.error(`[TerminalWatcher] Poll error for ${state.conversationKey}:`, error);
     // Don't stop on transient errors - will retry next poll
   } finally {
     state.pollInProgress = false;
-  }
-}
-
-/**
- * Build blocks for the status message with Stop Watching button.
- */
-function buildStatusBlocks(state: WatchState): any[] {
-  const updateRateSeconds = state.updateRateMs / 1000;
-  return [
-    buildWatchingStatusSection(state.sessionId, updateRateSeconds),
-  ];
-}
-
-/**
- * Move status message to bottom by deleting old and posting new.
- */
-async function moveStatusMessageToBottom(state: WatchState): Promise<void> {
-  try {
-    // Delete old status message
-    await state.client.chat.delete({
-      channel: state.channelId,
-      ts: state.statusMsgTs,
-    });
-  } catch (error) {
-    // Ignore delete errors (message may already be deleted)
-    console.log(`[TerminalWatcher] Could not delete old status message: ${error}`);
-  }
-
-  try {
-    // Post new status message at bottom
-    const result = await withSlackRetry(() =>
-      state.client.chat.postMessage({
-        channel: state.channelId,
-        thread_ts: state.threadTs,
-        text: 'Watching terminal...',
-        blocks: buildStatusBlocks(state),
-      })
-    );
-
-    // Update state with new message ts
-    if (result?.ts) {
-      state.statusMsgTs = result.ts as string;
-    }
-  } catch (error) {
-    console.error(`[TerminalWatcher] Failed to post new status message:`, error);
   }
 }
 

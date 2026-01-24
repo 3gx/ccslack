@@ -56,10 +56,14 @@ export interface CommandResult {
 /**
  * Parse and handle slash commands.
  * Returns { handled: false } if text is not a command (passes to Claude).
+ * @param text - The command text (e.g., "/watch", "/ff")
+ * @param session - Current session state
+ * @param threadTs - Thread timestamp if command is from a thread (undefined for main channel)
  */
 export function parseCommand(
   text: string,
-  session: Session
+  session: Session,
+  threadTs?: string
 ): CommandResult {
   // Only handle slash commands
   if (!text.startsWith('/')) {
@@ -85,12 +89,12 @@ export function parseCommand(
     case 'ls':
       return handleLs(argString, session);
     case 'watch':
-      return handleWatch(session);
+      return handleWatch(session, threadTs);
     case 'stop-watching':
       return handleStopWatching();
     case 'ff':
     case 'fast-forward':
-      return handleFastForward(session);
+      return handleFastForward(session, threadTs);
     case 'fork':
       return handleFork(session);
     case 'resume':
@@ -384,8 +388,17 @@ function handleMode(modeArg: string, session: Session): CommandResult {
 
 /**
  * /watch - Show command to continue session in terminal and start watching
+ * Only allowed in main channel (rejected in threads).
  */
-function handleWatch(session: Session): CommandResult {
+function handleWatch(session: Session, threadTs?: string): CommandResult {
+  // Reject if called from a thread
+  if (threadTs) {
+    return {
+      handled: true,
+      response: ':warning: `/watch` can only be used in the main channel, not in threads.',
+    };
+  }
+
   if (!session.sessionId) {
     return {
       handled: true,
@@ -435,8 +448,17 @@ function handleStopWatching(): CommandResult {
 /**
  * /ff (fast-forward) - Sync missed terminal messages and start watching
  * Use when you forgot to use /watch and did work directly in terminal.
+ * Only allowed in main channel (rejected in threads).
  */
-function handleFastForward(session: Session): CommandResult {
+function handleFastForward(session: Session, threadTs?: string): CommandResult {
+  // Reject if called from a thread
+  if (threadTs) {
+    return {
+      handled: true,
+      response: ':warning: `/ff` can only be used in the main channel, not in threads.',
+    };
+  }
+
   if (!session.sessionId) {
     return {
       handled: true,

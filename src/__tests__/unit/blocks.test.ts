@@ -3296,6 +3296,20 @@ describe('blocks', () => {
       expect(value.sessionId).toBe('my-session');
     });
 
+    it('should include threadTs in button value when provided (for stop button to find watcher)', () => {
+      const block = buildWatchingStatusSection('my-session', 3, 'anchor-ts-123');
+      const value = JSON.parse(block.elements![0].value);
+      expect(value.sessionId).toBe('my-session');
+      expect(value.threadTs).toBe('anchor-ts-123');
+    });
+
+    it('should have undefined threadTs in button value when not provided', () => {
+      const block = buildWatchingStatusSection('my-session', 3);
+      const value = JSON.parse(block.elements![0].value);
+      expect(value.sessionId).toBe('my-session');
+      expect(value.threadTs).toBeUndefined();
+    });
+
     it('should use dynamic update rate in button text', () => {
       const block1 = buildWatchingStatusSection('sess', 2);
       const block2 = buildWatchingStatusSection('sess', 10);
