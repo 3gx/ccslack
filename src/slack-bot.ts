@@ -49,7 +49,7 @@ import {
   refreshModelCache,
   getModelInfo,
 } from './model-cache.js';
-import { uploadMarkdownAndPngWithResponse } from './streaming.js';
+import { uploadMarkdownAndPngWithResponse, extractTailWithFormatting } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
@@ -93,6 +93,8 @@ const THINKING_TRUNCATE_LENGTH = 500;
 const MAX_LIVE_ENTRIES = 300;  // Switch to rolling window if exceeded
 const ROLLING_WINDOW_SIZE = 20; // Show last N entries when in rolling mode
 const STATUS_UPDATE_INTERVAL = 1000; // TEMP: 1s for testing spinner updates
+// Max chars to show in activity thread during streaming (rolling tail window)
+const ACTIVITY_STREAM_CHAR_LIMIT = 3000;
 
 // Processing state for real-time activity tracking
 interface ProcessingState {
@@ -2843,8 +2845,9 @@ async function handleMessage(params: {
 
         // Only update if enough time passed since last update
         if (now - processingState.lastUpdateTime >= intervalMs) {
-          const preview = content.length > processingState.charLimit
-            ? content.substring(0, processingState.charLimit) + '...'
+          // Use rolling tail window for thread message during streaming
+          const preview = content.length > ACTIVITY_STREAM_CHAR_LIMIT
+            ? extractTailWithFormatting(content, ACTIVITY_STREAM_CHAR_LIMIT)
             : content;
           // Store promise so finalization can await it before delete
           processingState.pendingThinkingUpdate = client.chat.update({

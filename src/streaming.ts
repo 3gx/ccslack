@@ -347,6 +347,76 @@ export function truncateWithClosedFormatting(text: string, limit: number): strin
 }
 
 // ============================================================================
+// Tail Extraction with Formatting Preservation
+// ============================================================================
+
+/**
+ * Extract the last N chars of text with proper formatting preservation.
+ * Used for rolling window display during streaming.
+ *
+ * - Extracts last `maxChars` from text
+ * - Finds good break point (start of line preferred)
+ * - Detects if extraction starts inside a code block → reopens it
+ * - Detects open inline formatting → reopens it
+ * - Prepends "..." to indicate truncation
+ *
+ * @param text - Full text content
+ * @param maxChars - Max chars to extract from tail
+ * @returns Extracted tail with formatting preserved, prefixed with "..."
+ */
+export function extractTailWithFormatting(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  // Find extraction start point
+  let startIdx = text.length - maxChars;
+
+  // Try to find a good break point (newline) within first 20% of extraction
+  const searchEnd = startIdx + Math.floor(maxChars * 0.2);
+  const nextNewline = text.indexOf('\n', startIdx);
+  if (nextNewline !== -1 && nextNewline < searchEnd) {
+    startIdx = nextNewline + 1;
+  }
+
+  // Extract tail
+  let tail = text.substring(startIdx);
+
+  // Check formatting state BEFORE extraction point
+  const beforeExtract = text.substring(0, startIdx);
+
+  // Count code blocks (```) - odd count means we're inside one
+  const codeBlockMatches = beforeExtract.match(/```(\w*)?/g) || [];
+  const insideCodeBlock = codeBlockMatches.length % 2 === 1;
+
+  // Get language tag from last opening code block
+  let codeBlockLang = '';
+  if (insideCodeBlock) {
+    const lastMatch = codeBlockMatches[codeBlockMatches.length - 1];
+    codeBlockLang = lastMatch.substring(3);
+  }
+
+  // Only check inline formatting if NOT inside code block
+  let prefix = '...';
+  if (insideCodeBlock) {
+    prefix = '...\n```' + codeBlockLang + '\n';
+  } else {
+    // Check inline formatting (only if outside code block)
+    const inlineCode = (beforeExtract.match(/(?<!`)`(?!`)/g) || []).length % 2 === 1;
+    const bold = (beforeExtract.match(/(?<!\*)\*(?!\*)/g) || []).length % 2 === 1;
+    const italic = (beforeExtract.match(/(?<!_)_(?!_)/g) || []).length % 2 === 1;
+    const strike = (beforeExtract.match(/~/g) || []).length % 2 === 1;
+
+    if (inlineCode) prefix += '`';
+    if (bold) prefix += '*';
+    if (italic) prefix += '_';
+    if (strike) prefix += '~';
+  }
+
+  return prefix + tail;
+}
+
+// ============================================================================
 // Markdown File Attachment
 // ============================================================================
 

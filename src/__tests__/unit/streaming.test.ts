@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse, uploadMarkdownAndPngWithResponse, truncateWithClosedFormatting } from '../../streaming.js';
+import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse, uploadMarkdownAndPngWithResponse, truncateWithClosedFormatting, extractTailWithFormatting } from '../../streaming.js';
 import { createMockSlackClient } from '../__fixtures__/slack-messages.js';
 import { createMockClaudeStream, mockSystemInit, mockAssistantText, mockAssistantContentBlocks, mockResult } from '../__fixtures__/claude-messages.js';
 
@@ -336,6 +336,88 @@ describe('streaming', () => {
       const inlineCodeCount = (result.match(/(?<!`)`(?!`)/g) || []).length;
       expect(boldCount % 2).toBe(0);
       expect(inlineCodeCount % 2).toBe(0);
+    });
+  });
+
+  describe('extractTailWithFormatting', () => {
+    const LIMIT = 100;
+
+    it('returns full text if under limit', () => {
+      expect(extractTailWithFormatting('short text', LIMIT)).toBe('short text');
+    });
+
+    it('extracts tail with ... prefix', () => {
+      const text = 'a'.repeat(200);
+      const result = extractTailWithFormatting(text, LIMIT);
+      expect(result.startsWith('...')).toBe(true);
+      expect(result.length).toBeLessThanOrEqual(LIMIT + 10); // prefix overhead
+    });
+
+    it('reopens code block if extraction starts inside one', () => {
+      const text = '```python\n' + 'x = 1\n'.repeat(100) + '```';
+      const result = extractTailWithFormatting(text, 50);
+      expect(result).toMatch(/^\.\.\.[\s\S]*```python/);
+    });
+
+    it('reopens code block without language tag', () => {
+      const text = '```\n' + 'x = 1\n'.repeat(100) + '```';
+      const result = extractTailWithFormatting(text, 50);
+      expect(result.startsWith('...\n```\n')).toBe(true);
+    });
+
+    it('reopens bold formatting', () => {
+      const text = 'normal *bold text ' + 'x'.repeat(200) + ' still bold*';
+      const result = extractTailWithFormatting(text, 50);
+      expect(result.startsWith('...*')).toBe(true);
+    });
+
+    it('reopens italic formatting', () => {
+      const text = 'normal _italic text ' + 'x'.repeat(200) + ' still italic_';
+      const result = extractTailWithFormatting(text, 50);
+      expect(result.startsWith('..._')).toBe(true);
+    });
+
+    it('reopens strikethrough formatting', () => {
+      const text = 'normal ~struck text ' + 'x'.repeat(200) + ' still struck~';
+      const result = extractTailWithFormatting(text, 50);
+      expect(result.startsWith('...~')).toBe(true);
+    });
+
+    it('reopens inline code', () => {
+      const text = 'normal `code text ' + 'x'.repeat(200) + ' still code`';
+      const result = extractTailWithFormatting(text, 50);
+      expect(result.startsWith('...`')).toBe(true);
+    });
+
+    it('does not reopen formatting inside code block', () => {
+      const text = '```\nconst x = `template`;\n' + 'y'.repeat(200) + '\n```';
+      const result = extractTailWithFormatting(text, 50);
+      // Should NOT have extra backtick for "template" since it's in code block
+      expect(result).not.toMatch(/^\.\.\.`[^`]/);
+      // Should have code block opener
+      expect(result).toMatch(/^\.\.\.[\s\S]*```/);
+    });
+
+    it('prefers newline as break point', () => {
+      const text = 'line1\nline2\n' + 'a'.repeat(80) + '\nline4';
+      const result = extractTailWithFormatting(text, 90);
+      // Should start at a line boundary, not mid-line
+      expect(result).toMatch(/^\.\.\.[^\n]/); // starts after a newline
+    });
+
+    it('handles multiple formatting markers', () => {
+      const text = '*bold* and _italic_ then *bold again ' + 'x'.repeat(200) + ' open*';
+      const result = extractTailWithFormatting(text, 50);
+      // The last asterisk opens a bold section that extends into the tail
+      expect(result.startsWith('...*')).toBe(true);
+    });
+
+    it('handles closed code block before extraction point', () => {
+      const text = '```python\ncode\n```\n' + 'x'.repeat(200);
+      const result = extractTailWithFormatting(text, 50);
+      // Code block is closed, so just "..." prefix
+      expect(result.startsWith('...')).toBe(true);
+      expect(result).not.toContain('```python');
     });
   });
 
