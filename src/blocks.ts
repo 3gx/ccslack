@@ -1288,7 +1288,7 @@ export function buildPathSetupBlocks(): Block[] {
 // Activity entry type (mirrors session-manager.ts)
 export interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted';
   tool?: string;
   durationMs?: number;
   message?: string;
@@ -2026,6 +2026,9 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
           }
         }
         break;
+      case 'aborted':
+        lines.push(':octagonal_sign: *Aborted by user*');
+        break;
     }
   }
 
@@ -2196,6 +2199,9 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
         break;
       case 'error':
         lines.push(`:x: *Error:* ${entry.message || 'Unknown error'}`);
+        break;
+      case 'aborted':
+        lines.push(':octagonal_sign: *Aborted by user*');
         break;
       // Thinking and generating get their own messages, not batched
     }

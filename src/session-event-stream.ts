@@ -470,7 +470,7 @@ const THINKING_TRUNCATE_LENGTH = 500;
  */
 export interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted';
   tool?: string;
   durationMs?: number;
   message?: string;

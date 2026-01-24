@@ -2294,6 +2294,28 @@ describe('blocks', () => {
       const text = buildActivityLogText(entries, true);
       expect(text).toContain('> This is truncated content...');
     });
+
+    it('should show aborted message for aborted entry', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'thinking', thinkingContent: 'test', thinkingInProgress: false },
+        { timestamp: Date.now(), type: 'aborted' },
+      ];
+      const text = buildActivityLogText(entries, false);
+      expect(text).toContain(':octagonal_sign:');
+      expect(text).toContain('Aborted by user');
+    });
+
+    it('should show aborted as last entry in activity log', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Bash', durationMs: 1000 },
+        { timestamp: Date.now(), type: 'aborted' },
+      ];
+      const text = buildActivityLogText(entries, false);
+      const lines = text.split('\n');
+      const lastNonEmptyLine = lines.filter(l => l.trim()).pop();
+      expect(lastNonEmptyLine).toContain('Aborted by user');
+    });
   });
 
   describe('buildLiveActivityBlocks', () => {
@@ -2887,6 +2909,41 @@ describe('blocks', () => {
         const actionsBlock = blocks.find(b => b.type === 'actions');
         expect(actionsBlock).toBeUndefined();
       });
+
+      it('should show aborted entry in activity section above status line', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+          { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
+          { timestamp: Date.now(), type: 'aborted' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'aborted',
+          activityLog: entries,
+          inProgress: false,
+          sessionId: 'session-xyz',
+          inputTokens: 200,
+          outputTokens: 50,
+          elapsedMs: 2000,
+        });
+
+        // Activity section is the section block (2nd block after TOP context)
+        const sectionBlocks = blocks.filter(b => b.type === 'section');
+        expect(sectionBlocks.length).toBeGreaterThan(0);
+        const activitySection = sectionBlocks[0];
+        const activityText = (activitySection as any).text.text;
+
+        // Should contain aborted message in activity section
+        expect(activityText).toContain(':octagonal_sign:');
+        expect(activityText).toContain('Aborted by user');
+
+        // Verify order: activity section comes before bottom stats (context)
+        const activityIndex = blocks.indexOf(activitySection);
+        const contextBlocks = blocks.filter(b => b.type === 'context');
+        const bottomStatsBlock = contextBlocks[contextBlocks.length - 1];
+        const bottomStatsIndex = blocks.indexOf(bottomStatsBlock);
+        expect(activityIndex).toBeLessThan(bottomStatsIndex);
+      });
     });
 
     describe('error state', () => {
@@ -3387,6 +3444,15 @@ describe('blocks', () => {
 
       expect(result).toContain('*custom_tool*');
       expect(result).not.toContain('mcp__');
+    });
+
+    it('should format aborted entry for thread posting', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'aborted' },
+      ];
+      const text = formatThreadActivityBatch(entries);
+      expect(text).toContain(':octagonal_sign:');
+      expect(text).toContain('Aborted by user');
     });
   });
 

@@ -4059,6 +4059,17 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
       console.error('Error interrupting query:', error);
     }
 
+    // Add 'aborted' entry to activity log (with duplicate prevention)
+    const hasAborted = active.processingState.activityLog.some(e => e.type === 'aborted');
+    if (!hasAborted) {
+      const abortedEntry: ActivityEntry = {
+        timestamp: Date.now(),
+        type: 'aborted',
+      };
+      active.processingState.activityLog.push(abortedEntry);
+      active.processingState.activityBatch.push(abortedEntry);
+    }
+
     const bodyWithChannel = body as any;
     const channelId = bodyWithChannel.channel?.id;
 
