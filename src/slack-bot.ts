@@ -5669,3 +5669,6 @@ export async function startBot() {
   await app.start();
   console.log('Bot is running!');
 }
+
+// Exported for testing
+export { getThinkingContentFromSession, updateThinkingMessageWithRetry };
