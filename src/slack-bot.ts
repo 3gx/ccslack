@@ -42,6 +42,7 @@ import {
   buildAnsweredBlocks,
   buildWatchingStatusSection,
   buildForkToChannelModalView,
+  buildAbortConfirmationModalView,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -3949,20 +3950,9 @@ app.action(/^answer_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
   }
 });
 
-// Handle "Abort" button for ask_user questions
-app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
-  try {
-    await ack();
-  } catch (error) {
-    console.error('Error acknowledging abort click:', error);
-    // ack() failed but we should still try to process the abort
-  }
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^abort_(.+)$/);
-  const questionId = match ? match[1] : '';
-
-  console.log(`Abort clicked for question: ${questionId}`);
+// Helper function to execute MCP question abort logic (called from modal submission)
+async function handleQuestionAbort(questionId: string, channelId: string, messageTs: string, client: WebClient): Promise<void> {
+  console.log(`Aborting MCP question: ${questionId}`);
 
   // Write abort answer to file
   const answerFile = `${ANSWER_DIR}/${questionId}.json`;
@@ -3977,17 +3967,51 @@ app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
   pendingSelections.delete(questionId);
 
   // Update message to show aborted
-  const bodyWithChannel = body as any;
-  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
+  if (channelId && messageTs) {
     try {
       await client.chat.update({
-        channel: bodyWithChannel.channel.id,
-        ts: bodyWithChannel.message.ts,
+        channel: channelId,
+        ts: messageTs,
         text: `*Aborted* - Question cancelled by user`,
         blocks: [],
       });
     } catch (error) {
       console.error('Error updating message:', error);
+    }
+  }
+}
+
+// Handle "Abort" button for ask_user questions - opens confirmation modal
+app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging abort click:', error);
+  }
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^abort_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`Abort clicked for question: ${questionId}`);
+
+  const bodyWithTrigger = body as any;
+  const channelId = bodyWithTrigger.channel?.id;
+  const messageTs = bodyWithTrigger.message?.ts;
+
+  if (bodyWithTrigger.trigger_id && channelId) {
+    try {
+      await client.views.open({
+        trigger_id: bodyWithTrigger.trigger_id,
+        view: buildAbortConfirmationModalView({
+          abortType: 'question',
+          key: questionId,
+          channelId,
+          messageTs: messageTs || '',
+        }),
+      });
+    } catch (error) {
+      console.error('Error opening abort confirmation modal:', error);
     }
   }
 });
@@ -4062,21 +4086,8 @@ app.action(/^multiselect_submit_(.+)$/, async ({ action, ack, body, client }) =>
   }
 });
 
-// Handle abort query button (abort during processing)
-app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
-  try {
-    await ack();
-  } catch (error) {
-    console.error('Error acknowledging abort query click:', error);
-    // ack() failed but we should still try to abort the query
-  }
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^abort_query_(.+)$/);
-  const conversationKey = match ? match[1] : '';
-
-  console.log(`Abort query clicked for conversation: ${conversationKey}`);
-
+// Helper function to execute query abort logic (called from modal submission)
+async function handleQueryAbort(conversationKey: string, channelId: string, client: WebClient): Promise<void> {
   const active = activeQueries.get(conversationKey);
   if (active) {
     // Mark as aborted FIRST to prevent race condition with "Done" update
@@ -4100,9 +4111,6 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
       active.processingState.activityLog.push(abortedEntry);
       active.processingState.activityBatch.push(abortedEntry);
     }
-
-    const bodyWithChannel = body as any;
-    const channelId = bodyWithChannel.channel?.id;
 
     if (channelId) {
       // Use mutex to ensure abort update comes after any in-flight status update
@@ -4157,6 +4165,41 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
     busyConversations.delete(conversationKey);
   } else {
     console.log(`No active query found for: ${conversationKey}`);
+  }
+}
+
+// Handle abort query button (abort during processing) - opens confirmation modal
+app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging abort query click:', error);
+  }
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^abort_query_(.+)$/);
+  const conversationKey = match ? match[1] : '';
+
+  console.log(`Abort query clicked for conversation: ${conversationKey}`);
+
+  const bodyWithTrigger = body as any;
+  const channelId = bodyWithTrigger.channel?.id;
+  const messageTs = bodyWithTrigger.message?.ts;
+
+  if (bodyWithTrigger.trigger_id && channelId) {
+    try {
+      await client.views.open({
+        trigger_id: bodyWithTrigger.trigger_id,
+        view: buildAbortConfirmationModalView({
+          abortType: 'query',
+          key: conversationKey,
+          channelId,
+          messageTs: messageTs || '',
+        }),
+      });
+    } catch (error) {
+      console.error('Error opening abort confirmation modal:', error);
+    }
   }
 });
 
@@ -4262,6 +4305,28 @@ app.view('fork_to_channel_modal', async ({ ack, body, view, client }) => {
         text: `❌ Failed to create fork channel: ${result.error}`,
       })
     );
+  }
+});
+
+// Handle abort confirmation modal submission
+app.view('abort_confirmation_modal', async ({ ack, view, client }) => {
+  await ack();
+
+  const metadata = JSON.parse(view.private_metadata || '{}');
+  const { abortType, key, channelId, messageTs } = metadata;
+
+  console.log(`Abort confirmation submitted: type=${abortType}, key=${key}`);
+
+  switch (abortType) {
+    case 'query':
+      await handleQueryAbort(key, channelId, client as WebClient);
+      break;
+    case 'question':
+      await handleQuestionAbort(key, channelId, messageTs, client as WebClient);
+      break;
+    case 'sdk_question':
+      await handleSdkQuestionAbort(key, channelId, messageTs, client as WebClient);
+      break;
   }
 });
 
@@ -4768,20 +4833,9 @@ app.action(/^sdkq_submit_(.+)$/, async ({ action, ack, body, client }) => {
   }
 });
 
-// Handle SDK AskUserQuestion abort button
-app.action(/^sdkq_abort_(.+)$/, async ({ action, ack, body, client }) => {
-  try {
-    await ack();
-  } catch (error) {
-    console.error('Error acknowledging SDK question abort:', error);
-    // ack() failed but we should still try to process the abort
-  }
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^sdkq_abort_(.+)$/);
-  const questionId = match ? match[1] : '';
-
-  console.log(`SDK question abort clicked for: ${questionId}`);
+// Helper function to execute SDK question abort logic (called from modal submission)
+async function handleSdkQuestionAbort(questionId: string, channelId: string, messageTs: string, client: WebClient): Promise<void> {
+  console.log(`Aborting SDK question: ${questionId}`);
 
   const pending = pendingSdkQuestions.get(questionId);
   if (pending) {
@@ -4813,6 +4867,41 @@ app.action(/^sdkq_abort_(.+)$/, async ({ action, ack, body, client }) => {
     pending.resolve('__ABORTED__');
   } else {
     console.log(`No pending SDK question found for: ${questionId}`);
+  }
+}
+
+// Handle SDK AskUserQuestion abort button - opens confirmation modal
+app.action(/^sdkq_abort_(.+)$/, async ({ action, ack, body, client }) => {
+  try {
+    await ack();
+  } catch (error) {
+    console.error('Error acknowledging SDK question abort:', error);
+  }
+
+  const actionId = 'action_id' in action ? action.action_id : '';
+  const match = actionId.match(/^sdkq_abort_(.+)$/);
+  const questionId = match ? match[1] : '';
+
+  console.log(`SDK question abort clicked for: ${questionId}`);
+
+  const bodyWithTrigger = body as any;
+  const channelId = bodyWithTrigger.channel?.id;
+  const messageTs = bodyWithTrigger.message?.ts;
+
+  if (bodyWithTrigger.trigger_id && channelId) {
+    try {
+      await client.views.open({
+        trigger_id: bodyWithTrigger.trigger_id,
+        view: buildAbortConfirmationModalView({
+          abortType: 'sdk_question',
+          key: questionId,
+          channelId,
+          messageTs: messageTs || '',
+        }),
+      });
+    } catch (error) {
+      console.error('Error opening abort confirmation modal:', error);
+    }
   }
 });
 

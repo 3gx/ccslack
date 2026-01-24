@@ -1250,6 +1250,48 @@ export function buildForkToChannelModalView(params: {
 }
 
 // ============================================================================
+// Abort Confirmation Modal
+// ============================================================================
+
+/**
+ * Build modal view for abort confirmation (prevents accidental fat-finger clicks).
+ */
+export function buildAbortConfirmationModalView(params: {
+  abortType: 'query' | 'question' | 'sdk_question';
+  key: string;
+  channelId: string;
+  messageTs: string;
+}): any {
+  let bodyText: string;
+  switch (params.abortType) {
+    case 'query':
+      bodyText = 'This will interrupt Claude\'s current processing.';
+      break;
+    case 'question':
+      bodyText = 'This will abort the current question.';
+      break;
+    case 'sdk_question':
+      bodyText = 'This will abort Claude\'s question.';
+      break;
+  }
+
+  return {
+    type: 'modal',
+    callback_id: 'abort_confirmation_modal',
+    private_metadata: JSON.stringify(params),
+    title: { type: 'plain_text', text: 'Confirm Abort' },
+    submit: { type: 'plain_text', text: 'Abort' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: `:warning: *${bodyText}*` },
+      },
+    ],
+  };
+}
+
+// ============================================================================
 // Path Configuration Blocks
 // ============================================================================
 

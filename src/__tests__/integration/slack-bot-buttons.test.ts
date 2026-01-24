@@ -10,7 +10,10 @@ vi.mock('@slack/bolt', () => {
       event(name: string, handler: any) { registeredHandlers[`event_${name}`] = handler; }
       message(handler: any) { registeredHandlers['message'] = handler; }
       action(pattern: RegExp, handler: any) { registeredHandlers[`action_${pattern.source}`] = handler; }
-      view(pattern: RegExp, handler: any) { registeredHandlers[`view_${pattern.source}`] = handler; }
+      view(pattern: string | RegExp, handler: any) {
+        const key = pattern instanceof RegExp ? pattern.source : pattern;
+        registeredHandlers[`view_${key}`] = handler;
+      }
       async start() { return Promise.resolve(); }
     },
   };
@@ -136,7 +139,7 @@ describe('slack-bot button handlers', () => {
   });
 
   describe('abort button handler', () => {
-    it('should write abort signal to file', async () => {
+    it('should open confirmation modal', async () => {
       const handler = registeredHandlers['action_^abort_(.+)$'];
       expect(handler).toBeDefined();
 
@@ -147,6 +150,7 @@ describe('slack-bot button handlers', () => {
         action: { action_id: 'abort_q_789' },
         ack,
         body: {
+          trigger_id: 'trigger123',
           channel: { id: 'C123' },
           message: { ts: 'msg123' },
         },
@@ -154,9 +158,14 @@ describe('slack-bot button handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        '/tmp/ccslack-answers/q_789.json',
-        expect.stringContaining('__ABORTED__')
+      expect(mockClient.views.open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trigger_id: 'trigger123',
+          view: expect.objectContaining({
+            callback_id: 'abort_confirmation_modal',
+            type: 'modal',
+          }),
+        })
       );
     });
   });
@@ -220,6 +229,40 @@ describe('slack-bot button handlers', () => {
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         '/tmp/ccslack-answers/q_789.json',
         expect.stringContaining('"answer":"My custom answer"')
+      );
+    });
+  });
+
+  describe('abort confirmation modal handler', () => {
+    it('should register abort_confirmation_modal handler', async () => {
+      const handler = registeredHandlers['view_abort_confirmation_modal'];
+      expect(handler).toBeDefined();
+    });
+
+    it('should write abort file for MCP question abort type', async () => {
+      const handler = registeredHandlers['view_abort_confirmation_modal'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      await handler({
+        ack,
+        body: {},
+        view: {
+          callback_id: 'abort_confirmation_modal',
+          private_metadata: JSON.stringify({
+            abortType: 'question',
+            key: 'q_123',
+            channelId: 'C123',
+            messageTs: 'msg456',
+          }),
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/tmp/ccslack-answers/q_123.json',
+        expect.stringContaining('__ABORTED__')
       );
     });
   });
@@ -325,7 +368,7 @@ describe('slack-bot button handlers', () => {
       expect(handler).toBeDefined();
     });
 
-    it('should acknowledge and log abort request', async () => {
+    it('should acknowledge and open confirmation modal', async () => {
       const handler = registeredHandlers['action_^abort_query_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
@@ -334,6 +377,7 @@ describe('slack-bot button handlers', () => {
         action: { action_id: 'abort_query_C123_thread456' },
         ack,
         body: {
+          trigger_id: 'trigger123',
           channel: { id: 'C123' },
           message: { ts: 'msg123' },
         },
@@ -341,6 +385,15 @@ describe('slack-bot button handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
+      expect(mockClient.views.open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trigger_id: 'trigger123',
+          view: expect.objectContaining({
+            callback_id: 'abort_confirmation_modal',
+            type: 'modal',
+          }),
+        })
+      );
     });
   });
 
@@ -671,7 +724,7 @@ describe('slack-bot button handlers', () => {
       );
     });
 
-    it('should still write abort file when ack() throws', async () => {
+    it('should still open modal when abort ack() throws', async () => {
       const handler = registeredHandlers['action_^abort_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn().mockRejectedValue(new Error('Rate limited'));
@@ -680,6 +733,7 @@ describe('slack-bot button handlers', () => {
         action: { action_id: 'abort_q_789' },
         ack,
         body: {
+          trigger_id: 'trigger123',
           channel: { id: 'C123' },
           message: { ts: 'msg123' },
         },
@@ -687,10 +741,7 @@ describe('slack-bot button handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        '/tmp/ccslack-answers/q_789.json',
-        expect.stringContaining('__ABORTED__')
-      );
+      expect(mockClient.views.open).toHaveBeenCalled();
     });
 
     it('should still open modal when freetext ack() throws', async () => {
@@ -779,7 +830,7 @@ describe('slack-bot button handlers', () => {
       );
     });
 
-    it('should still interrupt query when abort_query ack() throws', async () => {
+    it('should still try to open modal when abort_query ack() throws', async () => {
       const handler = registeredHandlers['action_^abort_query_(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn().mockRejectedValue(new Error('Slack API error'));
@@ -789,6 +840,7 @@ describe('slack-bot button handlers', () => {
         action: { action_id: 'abort_query_C123_thread456' },
         ack,
         body: {
+          trigger_id: 'trigger123',
           channel: { id: 'C123' },
           message: { ts: 'msg123' },
         },
@@ -796,7 +848,8 @@ describe('slack-bot button handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
-      // Handler completes without throwing
+      // Handler should still try to open the modal
+      expect(mockClient.views.open).toHaveBeenCalled();
     });
   });
 

@@ -31,6 +31,7 @@ import {
   buildTopStatusLine,
   buildBottomStatsLine,
   buildForkToChannelModalView,
+  buildAbortConfirmationModalView,
   formatThreadActivityBatch,
   formatThreadThinkingMessage,
   formatThreadResponseMessage,
@@ -3379,6 +3380,94 @@ describe('blocks', () => {
 
       expect(view.type).toBe('modal');
       expect(view.title.text).toBe('Fork to New Channel');
+    });
+  });
+
+  describe('buildAbortConfirmationModalView', () => {
+    it('should have callback_id abort_confirmation_modal', () => {
+      const view = buildAbortConfirmationModalView({
+        abortType: 'query',
+        key: 'C123',
+        channelId: 'C123',
+        messageTs: '1234567890.123456',
+      });
+
+      expect(view.callback_id).toBe('abort_confirmation_modal');
+    });
+
+    it('should store params in private_metadata', () => {
+      const view = buildAbortConfirmationModalView({
+        abortType: 'query',
+        key: 'C123',
+        channelId: 'C123',
+        messageTs: '1234567890.123456',
+      });
+
+      const metadata = JSON.parse(view.private_metadata!);
+      expect(metadata.abortType).toBe('query');
+      expect(metadata.key).toBe('C123');
+      expect(metadata.channelId).toBe('C123');
+      expect(metadata.messageTs).toBe('1234567890.123456');
+    });
+
+    it('should have submit Abort and close Cancel buttons', () => {
+      const view = buildAbortConfirmationModalView({
+        abortType: 'query',
+        key: 'C123',
+        channelId: 'C123',
+        messageTs: '1234567890.123456',
+      });
+
+      expect(view.submit!.text).toBe('Abort');
+      expect(view.close!.text).toBe('Cancel');
+    });
+
+    it('should have modal type and Confirm Abort title', () => {
+      const view = buildAbortConfirmationModalView({
+        abortType: 'query',
+        key: 'C123',
+        channelId: 'C123',
+        messageTs: '1234567890.123456',
+      });
+
+      expect(view.type).toBe('modal');
+      expect(view.title.text).toBe('Confirm Abort');
+    });
+
+    it('should show query-specific message for query abort type', () => {
+      const view = buildAbortConfirmationModalView({
+        abortType: 'query',
+        key: 'C123',
+        channelId: 'C123',
+        messageTs: '1234567890.123456',
+      });
+
+      const section = view.blocks[0] as any;
+      expect(section.text.text).toContain('interrupt Claude\'s current processing');
+    });
+
+    it('should show question-specific message for question abort type', () => {
+      const view = buildAbortConfirmationModalView({
+        abortType: 'question',
+        key: 'q123',
+        channelId: 'C123',
+        messageTs: '1234567890.123456',
+      });
+
+      const section = view.blocks[0] as any;
+      expect(section.text.text).toContain('abort the current question');
+    });
+
+    it('should show SDK question-specific message for sdk_question abort type', () => {
+      const view = buildAbortConfirmationModalView({
+        abortType: 'sdk_question',
+        key: 'sdkq123',
+        channelId: 'C123',
+        messageTs: '1234567890.123456',
+      });
+
+      const section = view.blocks[0] as any;
+      expect(section.text.text).toContain('abort Claude\'s question');
     });
   });
 
