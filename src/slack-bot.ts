@@ -146,6 +146,9 @@ interface ProcessingState {
   lastActivityPostTime: number;            // For rate limiting thread posts
   threadParentTs: string | null;           // Status message ts (thread parent for activity entries)
   charLimit: number;                       // Character limit for thread messages
+  // Thinking update race condition protection
+  pendingThinkingUpdate: Promise<void> | null;  // Track in-flight thinking update
+  thinkingDeleteInProgress: boolean;            // Prevent new updates during finalization
 }
 
 /**
@@ -2549,6 +2552,9 @@ async function handleMessage(params: {
     lastActivityPostTime: 0,
     threadParentTs: null,  // Will be set to statusMsgTs after posting
     charLimit: session.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
+    // Thinking update race condition protection
+    pendingThinkingUpdate: null,
+    thinkingDeleteInProgress: false,
   };
 
   // Post single combined message (activity log + status panel)
@@ -2821,17 +2827,33 @@ async function handleMessage(params: {
       }
 
       // Edit thread message in-place (fire-and-forget to avoid blocking)
-      if (processingState.activityThreadMsgTs) {
-        const preview = content.length > processingState.charLimit
-          ? content.substring(0, processingState.charLimit) + '...'
-          : content;
-        client.chat.update({
-          channel: channelId,
-          ts: processingState.activityThreadMsgTs,
-          text: `:bulb: *Thinking...* [${elapsedSec}s] _${content.length} chars_\n> ${preview}`,
-        }).catch((err: unknown) => {
-          console.error('[Activity Thread] Failed to update thinking in-place:', err);
-        });
+      // Throttle to respect updateRateSeconds - timer will catch up anyway
+      // Skip if delete is in progress (finalization started)
+      if (processingState.activityThreadMsgTs && !processingState.thinkingDeleteInProgress) {
+        const now = Date.now();
+        const intervalMs = processingState.updateRateSeconds * 1000;
+
+        // Only update if enough time passed since last update
+        if (now - processingState.lastUpdateTime >= intervalMs) {
+          const preview = content.length > processingState.charLimit
+            ? content.substring(0, processingState.charLimit) + '...'
+            : content;
+          // Store promise so finalization can await it before delete
+          processingState.pendingThinkingUpdate = client.chat.update({
+            channel: channelId,
+            ts: processingState.activityThreadMsgTs,
+            text: `:bulb: *Thinking...* [${elapsedSec}s] _${content.length} chars_\n> ${preview}`,
+          })
+            .then(() => {})  // Convert to Promise<void>
+            .catch((err: unknown) => {
+              console.error('[Activity Thread] Failed to update thinking in-place:', err);
+            })
+            .finally(() => {
+              processingState.pendingThinkingUpdate = null;
+            });
+          processingState.lastUpdateTime = now;
+        }
+        // Otherwise: skip - timer will sync status message anyway
       }
     };
 
@@ -2869,16 +2891,27 @@ async function handleMessage(params: {
         if (content.length > charLimit) {
           // Delete old placeholder to avoid duplicate messages
           if (processingState.activityThreadMsgTs) {
+            // Set flag to prevent any new updates from being dispatched
+            processingState.thinkingDeleteInProgress = true;
+            // Wait for any in-flight update to complete BEFORE delete
+            if (processingState.pendingThinkingUpdate) {
+              await processingState.pendingThinkingUpdate;
+            }
+            // Clear BEFORE delete to prevent new dispatches targeting this message
+            const msgToDelete = processingState.activityThreadMsgTs;
+            processingState.activityThreadMsgTs = null;
             try {
               await client.chat.delete({
                 channel: channelId,
-                ts: processingState.activityThreadMsgTs,
+                ts: msgToDelete,
               });
-              console.log(`[Activity Thread] Deleted thinking placeholder: ${processingState.activityThreadMsgTs}`);
+              console.log(`[Activity Thread] Deleted thinking placeholder: ${msgToDelete}`);
             } catch (err) {
               // Non-fatal: placeholder may already be deleted or we lack permissions
               console.warn('[Activity Thread] Failed to delete thinking placeholder:', err);
             }
+            // Reset flag after delete completes
+            processingState.thinkingDeleteInProgress = false;
           }
           // Post new message with .md attachment
           await postThinkingToThread(
