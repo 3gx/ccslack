@@ -3471,7 +3471,7 @@ describe('blocks', () => {
   });
 
   describe('formatThreadThinkingMessage', () => {
-    it('should format in-progress thinking', () => {
+    it('should format in-progress thinking with rolling tail', () => {
       const entry: ActivityEntry = {
         timestamp: 1000,
         type: 'thinking',
@@ -3485,14 +3485,15 @@ describe('blocks', () => {
       expect(result).toContain(':brain: *Thinking...*');
       expect(result).toContain('[2.0s]');
       expect(result).toContain('_26 chars_');
-      expect(result).toContain('> I am analyzing the code...');
+      // In-progress shows content directly (rolling tail)
+      expect(result).toContain('I am analyzing the code...');
     });
 
-    it('should format completed thinking', () => {
+    it('should format completed thinking with markdownToSlack conversion', () => {
       const entry: ActivityEntry = {
         timestamp: 1000,
         type: 'thinking',
-        thinkingContent: 'Analysis complete.',
+        thinkingContent: '**Analysis** complete.',
         thinkingInProgress: false,
         durationMs: 5000,
       };
@@ -3500,10 +3501,28 @@ describe('blocks', () => {
       const result = formatThreadThinkingMessage(entry, false, 500);
 
       expect(result).toContain(':bulb: *Thinking*');
-      expect(result).toContain('[5.0s]');
+      // No duration stats in completed header (simplified format)
+      expect(result).not.toContain('[5.0s]');
+      // markdownToSlack converts **Analysis** to *Analysis*
+      expect(result).toContain('*Analysis*');
+      expect(result).not.toContain('> ');  // No blockquote
     });
 
-    it('should show truncation notice when truncated', () => {
+    it('should preserve newlines in completed thinking', () => {
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'Line 1\nLine 2\nLine 3',
+        thinkingInProgress: false,
+      };
+
+      const result = formatThreadThinkingMessage(entry, false, 500);
+
+      expect(result).toContain('\n');
+      expect(result).not.toContain('Line 1 Line 2');  // Not collapsed
+    });
+
+    it('should show truncation notice when truncated (completed)', () => {
       const entry: ActivityEntry = {
         timestamp: 1000,
         type: 'thinking',
@@ -3513,7 +3532,7 @@ describe('blocks', () => {
 
       const result = formatThreadThinkingMessage(entry, true, 500);
 
-      expect(result).toContain('_...truncated. Full content attached._');
+      expect(result).toContain('_Full content attached._');
     });
 
     it('should not show truncation notice for in-progress thinking', () => {
@@ -3526,20 +3545,38 @@ describe('blocks', () => {
 
       const result = formatThreadThinkingMessage(entry, true, 500);
 
-      expect(result).not.toContain('truncated');
+      expect(result).not.toContain('attached');
     });
 
-    it('should truncate preview to charLimit chars', () => {
+    it('should show rolling tail (last N chars) for in-progress thinking', () => {
+      const longContent = 'A'.repeat(300) + 'B'.repeat(300);
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: longContent,
+        thinkingInProgress: true,
+      };
+
+      const result = formatThreadThinkingMessage(entry, false, 500);
+
+      // Should show last 500 chars (rolling tail)
+      expect(result).toContain('B'.repeat(300));
+      // Should NOT start with A (first 100 chars are cut off)
+      expect(result).not.toContain('A'.repeat(300));
+    });
+
+    it('should truncate completed thinking at charLimit (from start)', () => {
       const longContent = 'A'.repeat(600);
       const entry: ActivityEntry = {
         timestamp: 1000,
         type: 'thinking',
         thinkingContent: longContent,
+        thinkingInProgress: false,
       };
 
       const result = formatThreadThinkingMessage(entry, false, 500);
 
-      // Should truncate with ... at charLimit
+      // Should truncate with ... at charLimit (from start)
       expect(result).toContain('A'.repeat(500) + '...');
       expect(result).not.toContain('A'.repeat(501));
     });
@@ -3550,6 +3587,7 @@ describe('blocks', () => {
         timestamp: 1000,
         type: 'thinking',
         thinkingContent: content,
+        thinkingInProgress: false,
       };
 
       const result = formatThreadThinkingMessage(entry, false, 500);
@@ -3559,12 +3597,13 @@ describe('blocks', () => {
       expect(result).not.toContain('...');
     });
 
-    it('should respect custom charLimit', () => {
+    it('should respect custom charLimit for completed thinking', () => {
       const content = 'A'.repeat(200);
       const entry: ActivityEntry = {
         timestamp: 1000,
         type: 'thinking',
         thinkingContent: content,
+        thinkingInProgress: false,
       };
 
       // With charLimit 100, content of 200 chars should be truncated
@@ -3576,30 +3615,44 @@ describe('blocks', () => {
   });
 
   describe('formatThreadResponseMessage', () => {
-    it('should format response with stats', () => {
+    it('should format response with speech_balloon emoji (same as main channel)', () => {
       const result = formatThreadResponseMessage(1500, 3000, 'Here is my response...', false, 500);
 
-      expect(result).toContain(':pencil: *Response*');
-      expect(result).toContain('[3.0s]');
-      expect(result).toContain('_1,500 chars_');
-      expect(result).toContain('> Here is my response...');
+      expect(result).toContain(':speech_balloon: *Response*');
+      // No duration/chars in header (simplified format)
+      expect(result).not.toContain('[3.0s]');
+      expect(result).not.toContain('_1,500 chars_');
+      // Content preserved without blockquote
+      expect(result).toContain('Here is my response...');
+      expect(result).not.toContain('> ');  // No blockquote wrapping
     });
 
     it('should show truncation notice when truncated', () => {
       const result = formatThreadResponseMessage(5000, 2000, 'Preview text', true, 500);
 
-      expect(result).toContain('_...truncated. Full content attached._');
+      expect(result).toContain('_Full content attached._');
     });
 
-    it('should handle missing duration', () => {
-      const result = formatThreadResponseMessage(100, undefined, 'Short response', false, 500);
+    it('should apply markdownToSlack conversion', () => {
+      const content = '**bold** and *italic* text';
+      const result = formatThreadResponseMessage(100, undefined, content, false, 500);
 
-      expect(result).toContain(':pencil: *Response*');
-      expect(result).not.toContain('[');  // No duration bracket
-      expect(result).toContain('_100 chars_');
+      expect(result).toContain(':speech_balloon: *Response*');
+      // markdownToSlack converts **bold** to *bold* and *italic* to _italic_
+      expect(result).toContain('*bold*');
+      expect(result).toContain('_italic_');
     });
 
-    it('should truncate preview to charLimit chars', () => {
+    it('should preserve newlines (not collapse to spaces)', () => {
+      const content = 'Line 1\nLine 2\nLine 3';
+      const result = formatThreadResponseMessage(100, 1000, content, false, 500);
+
+      // Newlines should be preserved
+      expect(result).toContain('\n');
+      expect(result).not.toContain('Line 1 Line 2');  // Not collapsed
+    });
+
+    it('should truncate at charLimit (after markdown conversion)', () => {
       const longContent = 'B'.repeat(600);
       const result = formatThreadResponseMessage(600, 1000, longContent, false, 500);
 

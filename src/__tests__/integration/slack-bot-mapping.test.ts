@@ -146,11 +146,11 @@ describe('slack-bot message mapping', () => {
         client: mockClient,
       });
 
-      // With immediate mapping, assistant UUID is linked to real Slack ts when posted
-      // The mapping is saved inside uploadMarkdownAndPngWithResponse
+      // With new behavior, response is posted to activity thread (not main channel)
+      // Mapping is saved with the activity thread post ts for Fork here functionality
       expect(saveMessageMapping).toHaveBeenCalledWith(
         'C123',
-        'response-msg-ts',  // Real Slack ts from postMessage
+        expect.any(String),  // Activity thread post ts (returned from postResponseToThread)
         expect.objectContaining({
           sdkMessageId: 'assistant-uuid-123',
           sessionId: 'session-123',

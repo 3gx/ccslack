@@ -6,6 +6,7 @@
 import { PermissionMode, LastUsage } from './session-manager.js';
 import type { ModelInfo } from './model-cache.js';
 import { MESSAGE_SIZE_DEFAULT } from './commands.js';
+import { markdownToSlack } from './utils.js';
 
 // Slack Block Kit types (simplified for our use case)
 export interface Block {
@@ -2233,24 +2234,30 @@ export function formatThreadThinkingMessage(
   const lines: string[] = [];
 
   if (entry.thinkingInProgress) {
+    // During streaming: keep rolling tail format with markdown preserved
     lines.push(`:brain: *Thinking...*${duration}${charInfo}`);
-  } else {
-    lines.push(`:bulb: *Thinking*${duration}${charInfo}`);
-  }
-
-  // Show preview of thinking content (up to charLimit from /message-size)
-  if (content) {
-    const displayText = content.replace(/\n/g, ' ').trim();
-    const preview = displayText.length > charLimit
-      ? displayText.substring(0, charLimit) + '...'
-      : displayText;
-    if (preview) {
-      lines.push(`> ${preview}`);
+    // Show rolling tail (last N chars) of thinking content
+    if (content) {
+      const preview = content.length > charLimit
+        ? content.substring(content.length - charLimit)  // last N chars
+        : content;
+      lines.push(preview);
     }
-  }
+  } else {
+    // Completed: apply markdownToSlack, preserve newlines
+    lines.push(`:bulb: *Thinking*`);
 
-  if (truncated && !entry.thinkingInProgress) {
-    lines.push('_...truncated. Full content attached._');
+    if (content) {
+      const slackFormatted = markdownToSlack(content);
+      const displayText = slackFormatted.length > charLimit
+        ? slackFormatted.substring(0, charLimit) + '...'
+        : slackFormatted;
+      lines.push(displayText);
+    }
+
+    if (truncated) {
+      lines.push('_Full content attached._');
+    }
   }
 
   return lines.join('\n');
@@ -2273,24 +2280,22 @@ export function formatThreadResponseMessage(
   truncated: boolean,
   charLimit: number
 ): string {
-  const duration = durationMs ? ` [${(durationMs / 1000).toFixed(1)}s]` : '';
-  const charInfo = charCount > 0 ? ` _${charCount.toLocaleString()} chars_` : '';
+  // Convert markdown to Slack format (same as main channel)
+  const slackFormatted = markdownToSlack(content);
 
   const lines: string[] = [];
-  lines.push(`:pencil: *Response*${duration}${charInfo}`);
+  lines.push(':speech_balloon: *Response*');  // Same emoji as main channel
 
-  if (content) {
-    const displayText = content.replace(/\n/g, ' ').trim();
-    const previewText = displayText.length > charLimit
-      ? displayText.substring(0, charLimit) + '...'
-      : displayText;
-    if (previewText) {
-      lines.push(`> ${previewText}`);
-    }
+  // Show content with newlines preserved (up to charLimit)
+  if (slackFormatted) {
+    const displayText = slackFormatted.length > charLimit
+      ? slackFormatted.substring(0, charLimit) + '...'
+      : slackFormatted;
+    lines.push(displayText);
   }
 
   if (truncated) {
-    lines.push('_...truncated. Full content attached._');
+    lines.push('_Full content attached._');
   }
 
   return lines.join('\n');

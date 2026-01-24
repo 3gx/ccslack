@@ -207,7 +207,7 @@ describe('activity-thread', () => {
       expect(client.chat.postMessage).toHaveBeenCalled();
       const call = client.chat.postMessage.mock.calls[0][0];
       expect(call.text).toContain(':bulb: *Thinking*');
-      expect(call.text).toContain('[2.0s]');
+      // No duration in header (simplified format)
     });
 
     it('should upload .md for long thinking content', async () => {
@@ -258,8 +258,8 @@ describe('activity-thread', () => {
       expect(result).toBe('posted-ts-123');
       expect(client.chat.postMessage).toHaveBeenCalled();
       const call = client.chat.postMessage.mock.calls[0][0];
-      expect(call.text).toContain(':pencil: *Response*');
-      expect(call.text).toContain('[3.0s]');
+      expect(call.text).toContain(':speech_balloon: *Response*');
+      // No duration in header (simplified format)
     });
 
     it('should upload .md for long response', async () => {
@@ -280,7 +280,7 @@ describe('activity-thread', () => {
         client,
         'C123',
         longContent,
-        expect.stringContaining('_...truncated. Full content attached._'),
+        expect.stringContaining('_Full content attached._'),
         'parent-ts',
         'U456',
         500

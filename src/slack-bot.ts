@@ -3045,19 +3045,38 @@ async function handleMessage(params: {
           }
         }
 
-        // 2. Activity thread post - ALWAYS when there's content (even with skipPosting)
-        if (processingState.threadParentTs && entry) {
-          await postResponseToThread(
+        // 2. Activity thread post - always post when activity thread exists
+        // This includes both intermediate text (before tools) and final responses
+        // Main channel post is skipped via skipPosting, but thread gets all content
+        if (processingState.threadParentTs) {
+          // Build mapping info for the activity thread post (same as main channel)
+          const threadMappingInfo = (currentAssistantUuid && newSessionId)
+            ? { sdkMessageId: currentAssistantUuid, sessionId: newSessionId }
+            : undefined;
+
+          const threadPostTs = await postResponseToThread(
             client,
             channelId,
             processingState.threadParentTs,
             strippedResponse,
-            entry.durationMs,
+            entry?.durationMs,  // durationMs is optional
             liveConfig.threadCharLimit,
             userId
           ).catch(err => {
             console.error('[Activity Thread] Failed to post response to thread:', err);
+            return null;
           });
+
+          // Save mapping for activity thread post (required for Fork here functionality)
+          if (threadPostTs && threadMappingInfo) {
+            saveMessageMapping(channelId, threadPostTs, {
+              sdkMessageId: threadMappingInfo.sdkMessageId,
+              sessionId: threadMappingInfo.sessionId,
+              type: 'assistant',
+            });
+            mappedAssistantUuids.add(threadMappingInfo.sdkMessageId);
+            console.log(`[Activity Thread] Saved mapping: ${threadMappingInfo.sdkMessageId} -> ${threadPostTs}`);
+          }
         }
 
         // Reset currentResponse for next segment (keep fullResponse for total tracking)
@@ -3516,8 +3535,10 @@ async function handleMessage(params: {
     // Finalize the final segment (posts remaining activity + currentResponse if any)
     // This handles the case where the query ends with a response (not a tool)
     // Pass isQueryComplete to enable Fork button on successful completion
+    // Skip main channel posting when activity thread exists (response appears only in thread)
+    const hasActivityThread = processingState.threadParentTs != null;
     if (generatingChunkCount > 0 || currentResponse.trim()) {
-      await finalizeGeneratingEntry(currentResponse.length, isQueryComplete);
+      await finalizeGeneratingEntry(currentResponse.length, isQueryComplete, hasActivityThread);
     }
 
     // Stop the spinner timer now that processing is complete

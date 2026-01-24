@@ -474,23 +474,33 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // With interleaved posting: 1) combined status message, 2) response text via finalizeGeneratingEntry
-      // Response is posted during finalizeGeneratingEntry (per-segment posting)
+      // With activity thread: response is posted ONLY to thread (not main channel)
+      // Main channel gets status message, activity thread gets response
       const postCalls = mockClient.chat.postMessage.mock.calls;
 
-      // Find the response call (text containing 'Hello from Claude!')
-      const responseCall = postCalls.find((call: any) => call[0].text?.includes('Hello from Claude!'));
+      // Find the response call (text containing 'Hello from Claude!' in activity thread)
+      const responseCall = postCalls.find((call: any) =>
+        call[0].text?.includes('Hello from Claude!') &&
+        call[0].thread_ts  // Activity thread posts have thread_ts
+      );
       expect(responseCall).toBeDefined();
 
       // Verify response has the :speech_balloon: *Response* prefix
       expect(responseCall[0].text).toContain(':speech_balloon: *Response*');
+
+      // Verify NO main channel response (main channel only gets status message)
+      const mainChannelResponse = postCalls.find((call: any) =>
+        call[0].text?.includes('Hello from Claude!') &&
+        !call[0].thread_ts
+      );
+      expect(mainChannelResponse).toBeUndefined();
     });
 
-    it('should post text first then upload .md file as thread reply in main channel', async () => {
+    it('should post response to activity thread and upload .md file when response exceeds charLimit', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
-      // Mock chat.postMessage to return a ts for the response message
-      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'response-ts-123' });
+      // Mock chat.postMessage to return a ts for the status message (used as thread parent)
+      mockClient.chat.postMessage = vi.fn().mockResolvedValue({ ok: true, ts: 'status-ts-123' });
       mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
         ok: true,
         files: [{ id: 'F123' }],
@@ -533,18 +543,13 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // In main channel (no thread_ts), text is posted first
-      const postCalls = mockClient.chat.postMessage.mock.calls;
-      const responseCall = postCalls.find((call: any) => call[0].text?.includes('very long markdown'));
-      expect(responseCall).toBeDefined();
-      // Response should NOT have thread_ts (it's a top-level message)
-      expect(responseCall[0].thread_ts).toBeUndefined();
-
-      // Files are uploaded as thread reply to the response message
+      // For long content, response is uploaded as file with initial_comment (not via chat.postMessage)
+      // Files are uploaded to the activity thread with the response as initial_comment
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
-          thread_ts: 'response-ts-123',  // Files threaded under response
+          thread_ts: expect.any(String),  // Activity thread parent ts
+          initial_comment: expect.stringContaining(':speech_balloon: *Response*'),
           file_uploads: expect.arrayContaining([
             expect.objectContaining({
               file: expect.any(Buffer),  // Markdown as Buffer
@@ -554,12 +559,21 @@ describe('slack-bot mention handlers', () => {
           ]),
         })
       );
-      // No initial_comment for main channel (text already posted separately)
+
+      // Verify NO main channel response post (main channel skipped when activity thread exists)
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const mainChannelResponse = postCalls.find((call: any) =>
+        call[0].text?.includes('very long markdown') &&
+        !call[0].thread_ts
+      );
+      expect(mainChannelResponse).toBeUndefined();
+
+      // Verify file upload has thread_ts (in activity thread)
       const uploadCall = mockClient.files.uploadV2.mock.calls[0][0] as any;
-      expect(uploadCall.initial_comment).toBeUndefined();
+      expect(uploadCall.thread_ts).toBeDefined();
     });
 
-    it('should fall back to chat.postMessage when file upload fails', async () => {
+    it('should fall back to chat.postMessage in activity thread when file upload fails', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
       mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
@@ -599,9 +613,12 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should fall back to posting response via chat.postMessage
+      // Response should be posted to activity thread (not main channel)
       const postCalls = mockClient.chat.postMessage.mock.calls;
-      const responseCall = postCalls.find((call: any) => call[0].text?.includes('Fallback response'));
+      const responseCall = postCalls.find((call: any) =>
+        call[0].text?.includes('Fallback response') &&
+        call[0].thread_ts  // Activity thread posts have thread_ts
+      );
       expect(responseCall).toBeDefined();
       // Verify response has the :speech_balloon: *Response* prefix
       expect(responseCall[0].text).toContain(':speech_balloon: *Response*');
@@ -672,12 +689,13 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // Should upload .md and .png files to the thread WITH initial_comment (text attached to files)
+      // Should upload .md and .png files to the ACTIVITY thread (status message)
+      // WITH initial_comment (text attached to files)
       expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C123',
-          thread_ts: 'thread123',
-          initial_comment: expect.stringContaining('Thread response with lots'),
+          thread_ts: expect.any(String),  // Activity thread (status message ts)
+          initial_comment: expect.stringContaining(':speech_balloon: *Response*'),
           file_uploads: expect.arrayContaining([
             expect.objectContaining({
               file: expect.any(Buffer),  // Markdown as Buffer
@@ -690,14 +708,14 @@ describe('slack-bot mention handlers', () => {
       // Verify initial_comment IS present (text is attached to files, not separate)
       const uploadCall = mockClient.files.uploadV2.mock.calls[0][0] as any;
       expect(uploadCall.initial_comment).toBeDefined();
-      expect(uploadCall.initial_comment).toContain('Thread response with lots');
+      expect(uploadCall.initial_comment).toContain(':speech_balloon: *Response*');
 
       // Text should NOT be posted separately via chat.postMessage when truncated
-      // (it's attached to the file via initial_comment)
+      // (it's attached to the file via initial_comment in activity thread)
       const postCalls = mockClient.chat.postMessage.mock.calls;
       const responseCall = postCalls.find((call: any) =>
         call[0].text?.includes('Thread response with lots') &&
-        call[0].thread_ts === 'thread123'
+        !call[0].thread_ts  // Main channel posts don't have thread_ts
       );
       expect(responseCall).toBeUndefined();
     });
@@ -957,10 +975,11 @@ describe('slack-bot mention handlers', () => {
       const postCalls = mockClient.chat.postMessage.mock.calls;
 
       // Should NOT find a main channel message with intermediate "I'll explore..." text
-      // (activity thread posts with :pencil: prefix are OK)
+      // (activity thread posts are OK - they have thread_ts set)
       const intermediateMainChannelMsg = postCalls.find((call: any) =>
         call[0].text?.includes("I'll explore the codebase") &&
-        call[0].text?.includes(':speech_balloon:')
+        call[0].text?.includes(':speech_balloon:') &&
+        !call[0].thread_ts  // Main channel posts don't have thread_ts
       );
       expect(intermediateMainChannelMsg).toBeUndefined();
 
@@ -1020,20 +1039,22 @@ describe('slack-bot mention handlers', () => {
 
       const postCalls = mockClient.chat.postMessage.mock.calls;
 
-      // Verify intermediate text IS posted to activity thread (with :pencil: prefix)
+      // Verify intermediate text IS posted to activity thread (with :speech_balloon: prefix)
       const intermediateThreadPost = postCalls.find((call: any) =>
         call[0].text?.includes("I'll check the logs") &&
-        call[0].text?.includes(':pencil:')
+        call[0].text?.includes(':speech_balloon:') &&
+        call[0].thread_ts  // Thread posts have thread_ts
       );
       expect(intermediateThreadPost).toBeDefined();
 
       // Verify it has thread_ts (posted as thread reply)
       expect(intermediateThreadPost[0].thread_ts).toBeDefined();
 
-      // Verify intermediate text is NOT in main channel (no :speech_balloon:)
+      // Verify intermediate text is NOT in main channel
       const intermediateMainPost = postCalls.find((call: any) =>
         call[0].text?.includes("I'll check the logs") &&
-        call[0].text?.includes(':speech_balloon:')
+        call[0].text?.includes(':speech_balloon:') &&
+        !call[0].thread_ts  // Main channel posts don't have thread_ts
       );
       expect(intermediateMainPost).toBeUndefined();
     });
@@ -1093,30 +1114,43 @@ describe('slack-bot mention handlers', () => {
 
       const postCalls = mockClient.chat.postMessage.mock.calls;
 
-      // Should NOT find intermediate messages in main channel (activity thread posts with :pencil: are OK)
+      // Should NOT find intermediate messages in main channel (activity thread posts are OK)
       const searchMainChannelMsg = postCalls.find((call: any) =>
         call[0].text?.includes('Let me search') &&
-        call[0].text?.includes(':speech_balloon:')
+        call[0].text?.includes(':speech_balloon:') &&
+        !call[0].thread_ts  // Main channel posts don't have thread_ts
       );
       expect(searchMainChannelMsg).toBeUndefined();
 
       const readingMainChannelMsg = postCalls.find((call: any) =>
         call[0].text?.includes('Now reading the file') &&
-        call[0].text?.includes(':speech_balloon:')
+        call[0].text?.includes(':speech_balloon:') &&
+        !call[0].thread_ts  // Main channel posts don't have thread_ts
       );
       expect(readingMainChannelMsg).toBeUndefined();
 
-      // Should find only the final response
+      // Should find the final response in activity thread
       const finalMsg = postCalls.find((call: any) =>
-        call[0].text?.includes('Summary') && call[0].text?.includes('what I found')
+        call[0].text?.includes('Summary') && call[0].text?.includes('what I found') &&
+        call[0].thread_ts  // Activity thread posts have thread_ts
       );
       expect(finalMsg).toBeDefined();
 
-      // Count main channel response messages (excluding activity thread posts)
-      const responseMessages = postCalls.filter((call: any) =>
-        call[0].text?.includes(':speech_balloon: *Response*')
+      // With new behavior: responses go ONLY to activity thread, NOT main channel
+      // Count main channel response messages (should be 0)
+      const mainChannelResponses = postCalls.filter((call: any) =>
+        call[0].text?.includes(':speech_balloon: *Response*') &&
+        !call[0].thread_ts  // Main channel posts don't have thread_ts
       );
-      expect(responseMessages.length).toBe(1); // Only the final response
+      expect(mainChannelResponses.length).toBe(0); // No main channel responses
+
+      // Activity thread gets intermediate AND final responses
+      // (intermediate text before tools + final response)
+      const threadResponses = postCalls.filter((call: any) =>
+        call[0].text?.includes(':speech_balloon: *Response*') &&
+        call[0].thread_ts  // Activity thread posts have thread_ts
+      );
+      expect(threadResponses.length).toBeGreaterThan(0); // Multiple responses in thread
     });
 
     it('should post response normally when no tools are called', async () => {
@@ -1221,10 +1255,11 @@ describe('slack-bot mention handlers', () => {
       const postCalls = mockClient.chat.postMessage.mock.calls;
 
       // Key verification: Intermediate text is NOT posted to main channel
-      // (activity thread posts with :pencil: prefix are expected and OK)
+      // (activity thread posts are expected and OK - they have thread_ts set)
       const intermediateMainChannelPost = postCalls.find((call: any) =>
         call[0].text?.includes('Let me investigate') &&
-        call[0].text?.includes(':speech_balloon:')
+        call[0].text?.includes(':speech_balloon:') &&
+        !call[0].thread_ts  // Main channel posts don't have thread_ts
       );
       expect(intermediateMainChannelPost).toBeUndefined();
 
