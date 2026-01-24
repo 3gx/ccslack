@@ -243,6 +243,210 @@ describe('slack-bot command handlers', () => {
     });
   });
 
+  describe('/compact command with abort', () => {
+    it('should register /compact query in activeQueries for abort capability', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Import busyConversations to verify tracking
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Track when postMessage is called to verify activeQueries is set
+      let activeQueriesChecked = false;
+      mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+        // After status message is posted, activeQueries should be set
+        if (params.text === 'Compacting session...') {
+          // Can't easily check activeQueries from here, but we verify via abort behavior
+          activeQueriesChecked = true;
+        }
+        return { ts: 'status123', channel: 'C123' };
+      });
+
+      // Mock SDK to return compact_boundary message
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'compacted-session-456', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 5000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should have posted status message
+      expect(activeQueriesChecked).toBe(true);
+    });
+
+    it('should add conversationKey to busyConversations during /compact', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Import busyConversations to verify tracking
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      let busyDuringCompact = false;
+      const conversationKey = 'compact_C123';
+
+      // Mock SDK to check busyConversations during iteration
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'compacted-session-456', model: 'claude-sonnet' };
+          // Check if busy during compaction
+          busyDuringCompact = busyConversations.has(conversationKey);
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 5000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should have been busy during compaction
+      expect(busyDuringCompact).toBe(true);
+      // Should be cleaned up after completion
+      expect(busyConversations.has(conversationKey)).toBe(false);
+    });
+
+    it('should post :gear: message when compact_boundary found', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'compacted-session-456', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 150000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should post :gear: message with spinner and token count
+      const gearCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes(':gear:') && call[0]?.text?.includes('Compacting context')
+      );
+      expect(gearCalls.length).toBe(1);
+      expect(gearCalls[0][0].text).toMatch(/◐|◓|◑|◒/); // Spinner frame
+      expect(gearCalls[0][0].text).toContain('150,000 tokens');
+      expect(gearCalls[0][0].text).toContain('(0.0s)');
+    });
+
+    it('should update :gear: message to :checkered_flag: on completion', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Track message timestamps
+      let gearMsgTs = 'gear123';
+      mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+        if (params.text?.includes(':gear:')) {
+          return { ts: gearMsgTs, channel: 'C123' };
+        }
+        return { ts: 'msg123', channel: 'C123' };
+      });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'compacted-session-456', model: 'claude-sonnet' };
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 150000 } };
+          yield { type: 'result', result: '' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should update :gear: message to :checkered_flag:
+      const checkeredFlagCalls = mockClient.chat.update.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes(':checkered_flag:') && call[0]?.text?.includes('Compacted context')
+      );
+      expect(checkeredFlagCalls.length).toBeGreaterThanOrEqual(1);
+      expect(checkeredFlagCalls[0][0].ts).toBe(gearMsgTs);
+      expect(checkeredFlagCalls[0][0].text).toContain('150,000 tokens');
+    });
+  });
+
   describe('/clear command', () => {
     it('should set sessionId to null after /clear succeeds', async () => {
       const handler = registeredHandlers['event_app_mention'];

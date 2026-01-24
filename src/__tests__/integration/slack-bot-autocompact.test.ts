@@ -225,6 +225,144 @@ describe('auto-compact notification', () => {
     expect(autoCompactCalls.length).toBe(1);
   });
 
+  it('should post auto-compact message with spinner character', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'existing-session',
+      workingDir: '/test/dir',
+      mode: 'default',
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };
+        yield { type: 'result', result: 'Response after compaction' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+      client: mockClient,
+    });
+
+    // Should post auto-compact message with spinner and elapsed time format
+    const autoCompactCalls = mockClient.chat.postMessage.mock.calls.filter(
+      (call: any[]) => call[0]?.text?.includes('Auto-compacting context')
+    );
+    expect(autoCompactCalls.length).toBe(1);
+    // Verify spinner character is present
+    expect(autoCompactCalls[0][0].text).toMatch(/◐|◓|◑|◒/);
+    // Verify elapsed time format
+    expect(autoCompactCalls[0][0].text).toContain('(0.0s)');
+  });
+
+  it('should show completion message with checkered_flag after auto-compact', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'existing-session',
+      workingDir: '/test/dir',
+      mode: 'default',
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    // Track the auto-compact message ts
+    let autoCompactMsgTs = 'autocompact123';
+    mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+      if (params.text?.includes('Auto-compacting context')) {
+        return { ts: autoCompactMsgTs, channel: 'C123' };
+      }
+      return { ts: 'msg123', channel: 'C123' };
+    });
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 187802 } };
+        yield { type: 'result', result: 'Response after compaction' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+      client: mockClient,
+    });
+
+    // Should update auto-compact message with checkered_flag on completion
+    const checkeredFlagCalls = mockClient.chat.update.mock.calls.filter(
+      (call: any[]) => call[0]?.text?.includes(':checkered_flag:') && call[0]?.text?.includes('Auto-compacted')
+    );
+    expect(checkeredFlagCalls.length).toBeGreaterThanOrEqual(1);
+    // Verify it updates the correct message
+    expect(checkeredFlagCalls[0][0].ts).toBe(autoCompactMsgTs);
+    // Verify token count and duration format
+    expect(checkeredFlagCalls[0][0].text).toContain('187,802 tokens');
+    expect(checkeredFlagCalls[0][0].text).toMatch(/\d+\.\d+s/);
+  });
+
+  it('should detect completion only on result message (not stream_event)', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'existing-session',
+      workingDir: '/test/dir',
+      mode: 'default',
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    let autoCompactMsgTs = 'autocompact123';
+    mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+      if (params.text?.includes('Auto-compacting context')) {
+        return { ts: autoCompactMsgTs, channel: 'C123' };
+      }
+      return { ts: 'msg123', channel: 'C123' };
+    });
+
+    // SDK emits: compact_boundary → stream_event → result
+    // Completion should NOT trigger on stream_event
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 100000 } };
+        // stream_event should NOT trigger completion
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } } };
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } } };
+        // Only result should trigger completion
+        yield { type: 'result', result: 'Hello' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+      client: mockClient,
+    });
+
+    // Completion should be called exactly once (on result, not on stream_events)
+    // Filter for completion calls that update the auto-compact message
+    const checkeredFlagCalls = mockClient.chat.update.mock.calls.filter(
+      (call: any[]) => call[0]?.ts === autoCompactMsgTs && call[0]?.text?.includes(':checkered_flag:')
+    );
+    expect(checkeredFlagCalls.length).toBe(1);
+  });
+
   it('should retry auto-compact notification on rate limit', async () => {
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
