@@ -88,7 +88,7 @@ export interface ActivityBatchState {
   activityBatch: ActivityEntry[];          // Entries waiting to post
   activityBatchStartIndex: number;         // First entry index in current batch
   lastActivityPostTime: number;            // For rate limiting thread posts
-  threadParentTs: string | null;           // User input message ts (thread parent)
+  threadParentTs: string | null;           // Status message ts (thread parent for activity entries)
 }
 
 /**

@@ -144,7 +144,7 @@ interface ProcessingState {
   activityBatch: ActivityEntry[];          // Entries waiting to post
   activityBatchStartIndex: number;         // First entry index in current batch
   lastActivityPostTime: number;            // For rate limiting thread posts
-  threadParentTs: string | null;           // User input message ts (thread parent)
+  threadParentTs: string | null;           // Status message ts (thread parent for activity entries)
   charLimit: number;                       // Character limit for thread messages
 }
 
@@ -2547,7 +2547,7 @@ async function handleMessage(params: {
     activityBatch: [],
     activityBatchStartIndex: 0,
     lastActivityPostTime: 0,
-    threadParentTs: originalTs || null,  // User input message as thread parent
+    threadParentTs: null,  // Will be set to statusMsgTs after posting
     charLimit: session.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
   };
 
@@ -2574,8 +2574,14 @@ async function handleMessage(params: {
       })
     );
     statusMsgTs = (combinedResult as { ts?: string }).ts;
+    // Set thread parent to status message for activity thread replies
+    if (statusMsgTs) {
+      processingState.threadParentTs = statusMsgTs;
+    }
   } catch (error) {
     console.error('Error posting combined status message:', error);
+    // Fallback: use original user message as thread parent if status fails
+    processingState.threadParentTs = originalTs || null;
   }
 
   // Post starting entry to thread (activity thread reply)
