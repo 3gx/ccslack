@@ -131,8 +131,6 @@ interface ProcessingState {
   // Rate limit tracking
   rateLimitHits: number;
   rateLimitNotified: boolean;
-  // Auto-compact tracking
-  autoCompactNotified: boolean;
   // ExitPlanMode tool tracking (for CLI-fidelity plan approval)
   exitPlanModeIndex: number | null;
   exitPlanModeInputJson: string;
@@ -151,10 +149,11 @@ interface ProcessingState {
   charLimit: number;                       // Character limit for thread messages
   // Thinking update race condition protection
   pendingThinkingUpdate: Promise<void> | null;  // Track in-flight thinking update
-  // Auto-compact tracking (for completion message)
-  autoCompactMsgTs: string | null;        // Message ts to update on completion
-  autoCompactStartTime: number | null;    // When compaction started
-  autoCompactPreTokens: number | null;    // Tokens before compaction
+  // Compaction tracking (shared by /compact and auto-compact)
+  compactMsgTs: string | null;            // Message ts to update on completion
+  compactStartTime: number | null;        // When compaction started
+  compactPreTokens: number | null;        // Tokens before compaction (from compact_boundary)
+  compactIsManual: boolean;               // true for /compact, false for auto-compact
 }
 
 /**
@@ -583,6 +582,77 @@ async function runWaitTest(
 }
 
 /**
+ * Handle compaction start - posts :gear: message when compaction begins.
+ * Shared by /compact and auto-compact flows.
+ */
+async function handleCompactionStart(
+  client: any,
+  channelId: string,
+  threadTs: string | undefined,
+  processingState: ProcessingState,
+  isManual: boolean,
+  handleRateLimit: () => void
+): Promise<void> {
+  // Skip if already tracking compaction (prevents duplicate messages)
+  if (processingState.compactMsgTs) return;
+
+  processingState.compactStartTime = Date.now();
+  processingState.compactIsManual = isManual;
+
+  const prefix = isManual ? 'Compacting' : 'Auto-compacting';
+  const compactMsg = await withSlackRetry(
+    async () =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: `:gear: ${prefix} context...`,
+      }),
+    { onRateLimit: handleRateLimit }
+  );
+
+  processingState.compactMsgTs = (compactMsg as { ts?: string })?.ts ?? null;
+  console.log(`[Compact] Started (manual=${isManual})`);
+}
+
+/**
+ * Handle compaction end - updates :gear: message to :checkered_flag:.
+ * Shared by /compact and auto-compact flows.
+ */
+async function handleCompactionEnd(
+  client: any,
+  channelId: string,
+  processingState: ProcessingState,
+  handleRateLimit: () => void
+): Promise<void> {
+  if (!processingState.compactMsgTs || !processingState.compactStartTime) return;
+
+  const elapsed = ((Date.now() - processingState.compactStartTime) / 1000).toFixed(1);
+  const prefix = processingState.compactIsManual ? 'Compacted' : 'Auto-compacted';
+  const tokenInfo = processingState.compactPreTokens
+    ? `Was: ${processingState.compactPreTokens.toLocaleString()} tokens`
+    : '';
+
+  try {
+    await withSlackRetry(
+      async () =>
+        client.chat.update({
+          channel: channelId,
+          ts: processingState.compactMsgTs!,
+          text: `:checkered_flag: ${prefix} context | ${tokenInfo} | ${elapsed}s`,
+        }),
+      { onRateLimit: handleRateLimit }
+    );
+  } catch (error) {
+    console.error('[Compact] Failed to update completion message:', error);
+  }
+
+  // Clear tracking
+  processingState.compactMsgTs = null;
+  processingState.compactStartTime = null;
+  processingState.compactPreTokens = null;
+}
+
+/**
  * Compact session - reduces context size by summarizing conversation
  * Sends /compact as prompt to resumed session and tracks progress
  */
@@ -611,7 +681,6 @@ async function runCompactSession(
     spinnerIndex: 0,
     rateLimitHits: 0,
     rateLimitNotified: false,
-    autoCompactNotified: false,
     exitPlanModeIndex: null,
     exitPlanModeInputJson: '',
     exitPlanModeInput: null,
@@ -625,10 +694,11 @@ async function runCompactSession(
     threadParentTs: null,
     charLimit: MESSAGE_SIZE_DEFAULT,
     pendingThinkingUpdate: null,
-    // Tracking for :gear: message during compaction
-    autoCompactMsgTs: null,
-    autoCompactStartTime: null,
-    autoCompactPreTokens: null,
+    // Compaction tracking (shared by /compact and auto-compact)
+    compactMsgTs: null,
+    compactStartTime: null,
+    compactPreTokens: null,
+    compactIsManual: true,  // /compact is manual
   };
 
   // Remove eyes reaction first
@@ -685,15 +755,10 @@ async function runCompactSession(
 
   // Track compaction state
   let compactBoundaryFound = false;
-  let preTokens: number | undefined;
   let newSessionId: string | null = null;
   let modelName: string | undefined;
   let errorOccurred = false;
   let errorMessage = '';
-  // Track :gear: message for spinner updates
-  let compactMsgTs: string | null = null;
-  let compactStartTime: number | null = null;
-  let compactComplete = false;
 
   // Spinner update timer - uses setTimeout pattern to honor updateRateSeconds from session
   let spinnerTimer: NodeJS.Timeout | undefined;
@@ -725,19 +790,6 @@ async function runCompactSession(
         // Ignore update errors
       }
 
-      // Update :gear: message if posted (check compactComplete to prevent race condition)
-      if (compactMsgTs && compactStartTime && !compactComplete) {
-        const compactElapsed = ((Date.now() - compactStartTime) / 1000).toFixed(1);
-        const tokenInfo = preTokens ? ` (was ${preTokens.toLocaleString()} tokens)` : '';
-        try {
-          await client.chat.update({
-            channel: channelId,
-            ts: compactMsgTs,
-            text: `:gear: ${SPINNER_FRAMES[processingState.spinnerIndex]} Compacting context${tokenInfo}... (${compactElapsed}s)`,
-          });
-        } catch { /* ignore */ }
-      }
-
       scheduleSpinnerUpdate();  // Reschedule with current rate
     }, intervalMs);
   };
@@ -759,33 +811,19 @@ async function runCompactSession(
         console.log(`[Compact] New session: ${newSessionId}, model: ${modelName}`);
       }
 
-      // Capture compact_boundary message
+      // Detect compaction START via status:compacting
+      if (msg.type === 'system' &&
+          (msg as any).subtype === 'status' &&
+          (msg as any).status === 'compacting') {
+        await handleCompactionStart(client, channelId, threadTs, processingState, true, () => {});
+      }
+
+      // Capture pre_tokens from compact_boundary (END marker)
       if (msg.type === 'system' && (msg as any).subtype === 'compact_boundary') {
         compactBoundaryFound = true;
         const metadata = (msg as any).compact_metadata;
-        if (metadata) {
-          preTokens = metadata.pre_tokens;
-          console.log(`[Compact] Boundary found - pre_tokens: ${preTokens}`);
-        }
-
-        // Post :gear: message with spinner
-        const tokenInfo = preTokens ? ` (was ${preTokens.toLocaleString()} tokens)` : '';
-        const compactMsg = await withSlackRetry(
-          async () =>
-            client.chat.postMessage({
-              channel: channelId,
-              thread_ts: threadTs,
-              text: `:gear: ${SPINNER_FRAMES[0]} Compacting context${tokenInfo}... (0.0s)`,
-            }),
-          { onRateLimit: () => {} }
-        );
-        compactMsgTs = (compactMsg as { ts?: string })?.ts ?? null;
-        compactStartTime = Date.now();
-      }
-
-      // Check for compacting status
-      if ((msg as any).status === 'compacting') {
-        console.log('[Compact] Compacting status received');
+        processingState.compactPreTokens = metadata?.pre_tokens ?? null;
+        console.log(`[Compact] Boundary - pre_tokens: ${processingState.compactPreTokens}`);
       }
     }
   } catch (err: any) {
@@ -804,21 +842,8 @@ async function runCompactSession(
   const wasAborted = isAborted(conversationKey);
 
   // Update :gear: message with completion (if posted and not aborted)
-  if (compactMsgTs && compactStartTime && !wasAborted && !errorOccurred) {
-    // Set flag before async update to prevent race with timer
-    compactComplete = true;
-
-    const compactElapsed = ((Date.now() - compactStartTime) / 1000).toFixed(1);
-    const tokenInfo = preTokens ? `Was: ${preTokens.toLocaleString()} tokens` : '';
-    await withSlackRetry(
-      async () =>
-        client.chat.update({
-          channel: channelId,
-          ts: compactMsgTs!,
-          text: `:checkered_flag: Compacted context | ${tokenInfo} | ${compactElapsed}s`,
-        }),
-      { onRateLimit: () => {} }
-    );
+  if (!wasAborted && !errorOccurred) {
+    await handleCompactionEnd(client, channelId, processingState, () => {});
   }
 
   // Update final status
@@ -866,8 +891,8 @@ async function runCompactSession(
     }
 
     // Build success message
-    const tokenInfo = preTokens
-      ? `Tokens before: ${preTokens.toLocaleString()}`
+    const tokenInfo = processingState.compactPreTokens
+      ? `Tokens before: ${processingState.compactPreTokens.toLocaleString()}`
       : 'Context compacted';
 
     await withSlackRetry(() =>
@@ -2851,7 +2876,6 @@ async function handleMessage(params: {
     spinnerIndex: 0,
     rateLimitHits: 0,
     rateLimitNotified: false,
-    autoCompactNotified: false,
     exitPlanModeIndex: null,
     exitPlanModeInputJson: '',
     exitPlanModeInput: null,
@@ -2869,10 +2893,11 @@ async function handleMessage(params: {
     charLimit: session.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
     // Thinking update race condition protection
     pendingThinkingUpdate: null,
-    // Auto-compact tracking (for completion message)
-    autoCompactMsgTs: null,
-    autoCompactStartTime: null,
-    autoCompactPreTokens: null,
+    // Compaction tracking (shared by /compact and auto-compact)
+    compactMsgTs: null,
+    compactStartTime: null,
+    compactPreTokens: null,
+    compactIsManual: false,  // auto-compact
   };
 
   // Post single combined message (activity log + status panel)
@@ -3675,33 +3700,19 @@ async function handleMessage(params: {
         // Model name updated in memory - timer will render at next interval
       }
 
-      // Detect auto-compaction during regular queries
+      // Detect compaction START (works for both manual and auto)
+      if (msg.type === 'system' &&
+          (msg as any).subtype === 'status' &&
+          (msg as any).status === 'compacting') {
+        // For regular message handler, this is auto-compact
+        await handleCompactionStart(client, channelId, threadTs, processingState, false, handleRateLimit);
+      }
+
+      // Capture pre_tokens from compact_boundary
       if (msg.type === 'system' && (msg as any).subtype === 'compact_boundary') {
         const metadata = (msg as any).compact_metadata;
-        const trigger = metadata?.trigger;
-
-        // Only notify for auto-triggered compaction (manual has its own flow)
-        if (trigger === 'auto' && !processingState.autoCompactNotified) {
-          processingState.autoCompactNotified = true;
-          const preTokens = metadata?.pre_tokens;
-          processingState.autoCompactPreTokens = preTokens ?? null;
-          processingState.autoCompactStartTime = Date.now();
-          const tokenInfo = preTokens ? `Was: ${preTokens.toLocaleString()} tokens` : '';
-
-          // Post initial message (will be updated to checkered_flag on completion)
-          const compactMsg = await withSlackRetry(
-            async () =>
-              client.chat.postMessage({
-                channel: channelId,
-                thread_ts: threadTs,
-                text: `:gear: Auto-compacting context...${tokenInfo ? ` | ${tokenInfo}` : ''}`,
-              }),
-            { onRateLimit: handleRateLimit }
-          );
-
-          processingState.autoCompactMsgTs = (compactMsg as { ts?: string })?.ts ?? null;
-          console.log(`[AutoCompact] Triggered - pre_tokens: ${preTokens}`);
-        }
+        processingState.compactPreTokens = metadata?.pre_tokens ?? null;
+        console.log(`[AutoCompact] Boundary - pre_tokens: ${processingState.compactPreTokens}`);
       }
 
       // Handle stream_event for real-time activity tracking
@@ -3903,26 +3914,8 @@ async function handleMessage(params: {
     // Stop the spinner timer now that processing is complete
     clearTimeout(spinnerTimer);
 
-    // Send auto-compact completion message (no spinner, so no mutex needed)
-    if (processingState.autoCompactMsgTs) {
-      const elapsed = ((Date.now() - (processingState.autoCompactStartTime ?? Date.now())) / 1000).toFixed(1);
-      const preTokens = processingState.autoCompactPreTokens;
-      const autoCompactTs = processingState.autoCompactMsgTs;
-      processingState.autoCompactMsgTs = null;  // Clear after capturing
-      try {
-        await withSlackRetry(
-          async () =>
-            client.chat.update({
-              channel: channelId,
-              ts: autoCompactTs,
-              text: `:checkered_flag: Auto-compacted context | Was: ${preTokens?.toLocaleString() ?? '?'} tokens | ${elapsed}s`,
-            }),
-          { onRateLimit: handleRateLimit }
-        );
-      } catch (error) {
-        console.error('[AutoCompact] Failed to update completion message:', error);
-      }
-    }
+    // Send auto-compact completion message using shared helper
+    await handleCompactionEnd(client, channelId, processingState, handleRateLimit);
 
     // Flush any remaining activity batch to thread
     if (processingState.activityBatch.length > 0) {

@@ -348,7 +348,7 @@ describe('slack-bot command handlers', () => {
       expect(busyConversations.has(conversationKey)).toBe(false);
     });
 
-    it('should post :gear: message when compact_boundary found', async () => {
+    it('should post :gear: message when status:compacting received', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -367,7 +367,8 @@ describe('slack-bot command handlers', () => {
       vi.mocked(startClaudeQuery).mockReturnValue({
         [Symbol.asyncIterator]: async function* () {
           yield { type: 'system', subtype: 'init', session_id: 'compacted-session-456', model: 'claude-sonnet' };
-          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 150000 } };
+          yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 150000 } };  // END
           yield { type: 'result', result: '' };
         },
         interrupt: vi.fn(),
@@ -383,14 +384,14 @@ describe('slack-bot command handlers', () => {
         client: mockClient,
       });
 
-      // Should post :gear: message with spinner and token count
+      // Should post :gear: message (no spinner, token info only in final message)
       const gearCalls = mockClient.chat.postMessage.mock.calls.filter(
         (call: any[]) => call[0]?.text?.includes(':gear:') && call[0]?.text?.includes('Compacting context')
       );
       expect(gearCalls.length).toBe(1);
-      expect(gearCalls[0][0].text).toMatch(/◐|◓|◑|◒/); // Spinner frame
-      expect(gearCalls[0][0].text).toContain('150,000 tokens');
-      expect(gearCalls[0][0].text).toContain('(0.0s)');
+      // No spinner or token count in initial message (now only in checkered_flag)
+      expect(gearCalls[0][0].text).not.toMatch(/◐|◓|◑|◒/);
+      expect(gearCalls[0][0].text).not.toContain('tokens');
     });
 
     it('should update :gear: message to :checkered_flag: on completion', async () => {
@@ -421,7 +422,8 @@ describe('slack-bot command handlers', () => {
       vi.mocked(startClaudeQuery).mockReturnValue({
         [Symbol.asyncIterator]: async function* () {
           yield { type: 'system', subtype: 'init', session_id: 'compacted-session-456', model: 'claude-sonnet' };
-          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 150000 } };
+          yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+          yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 150000 } };  // END
           yield { type: 'result', result: '' };
         },
         interrupt: vi.fn(),

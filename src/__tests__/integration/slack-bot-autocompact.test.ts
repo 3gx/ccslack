@@ -123,11 +123,12 @@ describe('auto-compact notification', () => {
       configuredAt: Date.now(),
     });
 
-    // Mock SDK to return auto-triggered compact_boundary
+    // Mock SDK to emit status:compacting (START) before compact_boundary (END)
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };  // END
         yield { type: 'result', result: 'Response after compaction' };
       },
       interrupt: vi.fn(),
@@ -138,21 +139,18 @@ describe('auto-compact notification', () => {
       client: mockClient,
     });
 
-    // Should post auto-compact notification
+    // Should post auto-compact notification on status:compacting
     expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('Auto-compacting context'),
       })
     );
-    // Should include token count
-    expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: expect.stringContaining('150,000 tokens'),
-      })
-    );
+    // Token count now appears in final checkered_flag, not initial gear message
   });
 
-  it('should not notify for manual compaction in regular flow', async () => {
+  it('should not notify when status:compacting is not received (backward compat)', async () => {
+    // When SDK only sends compact_boundary without preceding status:compacting,
+    // no gear message should be posted (backward compatibility with older SDK)
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
 
@@ -166,12 +164,13 @@ describe('auto-compact notification', () => {
       configuredAt: Date.now(),
     });
 
-    // Mock SDK to return manual-triggered compact_boundary
+    // Mock SDK to return compact_boundary WITHOUT status:compacting
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+        // No status:compacting message - simulates older SDK behavior
         yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'manual', pre_tokens: 50000 } };
-        yield { type: 'result', result: 'Response after manual compaction' };
+        yield { type: 'result', result: 'Response after compaction' };
       },
       interrupt: vi.fn(),
     } as any);
@@ -181,7 +180,7 @@ describe('auto-compact notification', () => {
       client: mockClient,
     });
 
-    // Should NOT post auto-compact notification for manual trigger
+    // Should NOT post auto-compact notification without status:compacting
     const autoCompactCalls = mockClient.chat.postMessage.mock.calls.filter(
       (call: any[]) => call[0]?.text?.includes('Auto-compacting context')
     );
@@ -202,11 +201,12 @@ describe('auto-compact notification', () => {
       configuredAt: Date.now(),
     });
 
-    // Mock SDK to return multiple compact_boundary messages
+    // Mock SDK to return multiple status:compacting messages (edge case)
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // First
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // Duplicate (should be ignored)
         yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 100000 } };
         yield { type: 'result', result: 'Response after compaction' };
       },
@@ -218,14 +218,16 @@ describe('auto-compact notification', () => {
       client: mockClient,
     });
 
-    // Should only post auto-compact notification once
+    // Should only post auto-compact notification once (duplicates ignored)
     const autoCompactCalls = mockClient.chat.postMessage.mock.calls.filter(
       (call: any[]) => call[0]?.text?.includes('Auto-compacting context')
     );
     expect(autoCompactCalls.length).toBe(1);
   });
 
-  it('should post auto-compact message with token info (no spinner)', async () => {
+  it('should post auto-compact message with gear emoji (no spinner, no token info)', async () => {
+    // Token info now only appears in the final checkered_flag message,
+    // since pre_tokens comes from compact_boundary which arrives AFTER status:compacting
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
 
@@ -242,7 +244,8 @@ describe('auto-compact notification', () => {
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START - posts gear message
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };  // END
         yield { type: 'result', result: 'Response after compaction' };
       },
       interrupt: vi.fn(),
@@ -253,16 +256,16 @@ describe('auto-compact notification', () => {
       client: mockClient,
     });
 
-    // Should post auto-compact message with gear emoji and token info (no spinner)
+    // Should post auto-compact message with gear emoji (no spinner, no token info initially)
     const autoCompactCalls = mockClient.chat.postMessage.mock.calls.filter(
       (call: any[]) => call[0]?.text?.includes('Auto-compacting context')
     );
     expect(autoCompactCalls.length).toBe(1);
     // Verify gear emoji is present
     expect(autoCompactCalls[0][0].text).toContain(':gear:');
-    // Verify token info is present
-    expect(autoCompactCalls[0][0].text).toContain('150,000 tokens');
-    // Verify no spinner character (spinner was removed for simplicity)
+    // Token info now only in checkered_flag, not in initial message
+    expect(autoCompactCalls[0][0].text).not.toContain('tokens');
+    // Verify no spinner character
     expect(autoCompactCalls[0][0].text).not.toMatch(/◐|◓|◑|◒/);
   });
 
@@ -292,7 +295,8 @@ describe('auto-compact notification', () => {
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 187802 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 187802 } };  // END
         yield { type: 'result', result: 'Response after compaction' };
       },
       interrupt: vi.fn(),
@@ -337,12 +341,13 @@ describe('auto-compact notification', () => {
       return { ts: 'msg123', channel: 'C123' };
     });
 
-    // SDK emits: compact_boundary → stream_event → result
+    // SDK emits: status:compacting → compact_boundary → stream_event → result
     // Completion should NOT trigger on stream_event
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 100000 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 100000 } };  // END
         // stream_event should NOT trigger completion
         yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } } };
         yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } } };
@@ -379,11 +384,12 @@ describe('auto-compact notification', () => {
       configuredAt: Date.now(),
     });
 
-    // Mock SDK to return auto-triggered compact_boundary
+    // Mock SDK to emit status:compacting and compact_boundary
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000 } };  // END
         yield { type: 'result', result: 'Response after compaction' };
       },
       interrupt: vi.fn(),
@@ -456,7 +462,8 @@ describe('auto-compact notification', () => {
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 100000 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 100000 } };  // END
         yield { type: 'result', result: 'Response after compaction' };
       },
       interrupt: vi.fn(),
@@ -475,7 +482,6 @@ describe('auto-compact notification', () => {
 
   it('should update checkered_flag with correct ts even when processingState is cleared', async () => {
     // This test ensures the checkered_flag update uses the captured ts value
-    // (autoCompactFinalTs) rather than processingState.autoCompactMsgTs
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
 
@@ -500,7 +506,8 @@ describe('auto-compact notification', () => {
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 50000 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 50000 } };  // END
         yield { type: 'result', result: 'Done' };
       },
       interrupt: vi.fn(),
@@ -560,7 +567,8 @@ describe('auto-compact notification', () => {
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
-        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 200000 } };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 200000 } };  // END
         // Simulate SDK processing time (timer might fire during this)
         await wait(50);
         yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } } };
