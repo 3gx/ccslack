@@ -705,3 +705,100 @@ export async function uploadMarkdownAndPngWithResponse(
     return null;
   }
 }
+
+/**
+ * Upload .md and .png files to a thread without posting a text message.
+ * Used when the text message already exists and just needs file attachment.
+ * Uses withSlackRetry internally (3 attempts with exponential backoff).
+ *
+ * @param client - Slack WebClient
+ * @param channelId - Channel to upload to
+ * @param threadTs - Thread timestamp to upload to
+ * @param markdown - Markdown content to upload
+ * @param initialComment - Optional text for the file message (e.g., link back to thinking)
+ * @param userId - Optional user ID for error messages
+ * @returns { success: boolean, fileMessageTs?: string } - ts of file message if successful
+ */
+export async function uploadFilesToThread(
+  client: WebClient,
+  channelId: string,
+  threadTs: string,
+  markdown: string,
+  initialComment?: string,
+  userId?: string
+): Promise<{ success: boolean; fileMessageTs?: string }> {
+  try {
+    // Generate PNG from markdown (may return null on failure)
+    const pngBuffer = await markdownToPng(markdown);
+
+    // Prepare files array - always include markdown
+    const timestamp = Date.now();
+    const files: Array<{ content: string | Buffer; filename: string; title: string }> = [
+      {
+        content: markdown,
+        filename: `thinking-${timestamp}.md`,
+        title: 'Full Thinking (Markdown)',
+      },
+    ];
+
+    // Add PNG if generation succeeded
+    if (pngBuffer) {
+      files.push({
+        content: pngBuffer,
+        filename: `thinking-${timestamp}.png`,
+        title: 'Thinking Preview',
+      });
+    }
+
+    // Upload files with retry
+    const fileResult = await withSlackRetry(() =>
+      client.files.uploadV2({
+        channel_id: channelId,
+        thread_ts: threadTs,
+        initial_comment: initialComment,
+        file_uploads: files.map((f) => ({
+          file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
+          filename: f.filename,
+          title: f.title,
+        })),
+      } as any)
+    );
+
+    // Get ts from the file message for cross-linking
+    // files.uploadV2 returns files array with shares info
+    const shares = (fileResult as any)?.files?.[0]?.shares;
+    let fileMessageTs = shares?.public?.[channelId]?.[0]?.ts ?? shares?.private?.[channelId]?.[0]?.ts;
+
+    // files.uploadV2 is async - shares may be empty initially
+    // Poll files.info until shares is populated
+    if (!fileMessageTs) {
+      const fileId = (fileResult as any)?.files?.[0]?.files?.[0]?.id;
+      if (fileId) {
+        console.log(`[uploadFilesToThread] shares empty, polling for file ${fileId}`);
+        fileMessageTs = (await pollForFileShares(client, fileId, channelId)) ?? undefined;
+      }
+    }
+
+    if (fileMessageTs) {
+      console.log(`[uploadFilesToThread] File uploaded successfully: ${fileMessageTs}`);
+      return { success: true, fileMessageTs };
+    } else {
+      console.error('[uploadFilesToThread] File uploaded but could not get message ts');
+      return { success: true }; // Upload succeeded, just couldn't get ts
+    }
+  } catch (error) {
+    console.error('[uploadFilesToThread] Failed to upload files:', error);
+    if (userId) {
+      try {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: `Failed to attach thinking files: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        });
+      } catch {
+        // Ignore ephemeral failure
+      }
+    }
+    return { success: false };
+  }
+}

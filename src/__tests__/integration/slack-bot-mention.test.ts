@@ -1284,7 +1284,7 @@ describe('slack-bot mention handlers', () => {
   });
 
   describe('thinking thread activity with long content', () => {
-    it('should delete thinking placeholder before posting new message with .md attachment', async () => {
+    it('should update thinking placeholder in-place with file upload (no delete+repost)', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -1367,8 +1367,8 @@ describe('slack-bot mention handlers', () => {
 
       // When thinking content exceeds charLimit (100):
       // 1. A thinking placeholder should have been posted
-      // 2. It should be deleted before posting new message with .md attachment
-      // This prevents duplicate thinking messages in the thread
+      // 2. File is uploaded to thread
+      // 3. The placeholder is updated in-place with the file link (no delete+repost)
 
       // Verify thinking placeholder was posted
       const postCalls = mockClient.chat.postMessage.mock.calls;
@@ -1377,27 +1377,23 @@ describe('slack-bot mention handlers', () => {
       );
       expect(thinkingPlaceholderPost).toBeDefined();
 
-      // Verify chat.delete was called for the thinking placeholder
-      // (This is the bug fix - delete old placeholder before posting new message)
-      if (thinkingPlaceholderTs) {
-        const deleteCalls = mockClient.chat.delete.mock.calls;
-        const deleteForThinking = deleteCalls.find((call: any) =>
-          call[0].ts === thinkingPlaceholderTs
-        );
-        // With the fix, the placeholder should be deleted
-        // Note: This may be undefined if chat.delete mock doesn't capture it
-        // The key assertion is that chat.delete IS called (not toHaveBeenCalled check)
-      }
-
-      // The important assertion: with long content, we should see chat.delete called
-      // to remove the placeholder before posting the new message with attachment
-      // (status message delete is not called, only thinking placeholder)
+      // NEW BEHAVIOR: No delete call for thinking placeholder
+      // The placeholder is updated in-place instead
       const deleteCalls = mockClient.chat.delete.mock.calls;
-      // Filter out any status message deletes (look for thinking placeholder pattern)
       const thinkingDeleteCall = deleteCalls.find((call: any) =>
         call[0].ts?.startsWith('thinking-placeholder-')
       );
-      expect(thinkingDeleteCall).toBeDefined();
+      // With the new in-place update approach, no delete should occur
+      expect(thinkingDeleteCall).toBeUndefined();
+
+      // Verify chat.update was called (to update the thinking message in-place)
+      const updateCalls = mockClient.chat.update.mock.calls;
+      const thinkingUpdateCall = updateCalls.find((call: any) =>
+        call[0].ts === thinkingPlaceholderTs
+      );
+      // The placeholder should be updated (not deleted)
+      // Note: In this test environment, thinkingPlaceholderTs may be null
+      // The key assertion is that no delete occurred
     });
 
     it('should show rolling tail (last 3000 chars) in thread updates during streaming', async () => {

@@ -43,6 +43,8 @@ import {
   buildWatchingStatusSection,
   buildForkToChannelModalView,
   buildAbortConfirmationModalView,
+  formatThreadThinkingMessage,
+  buildAttachThinkingFileButton,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -50,7 +52,7 @@ import {
   refreshModelCache,
   getModelInfo,
 } from './model-cache.js';
-import { uploadMarkdownAndPngWithResponse, extractTailWithFormatting } from './streaming.js';
+import { uploadMarkdownAndPngWithResponse, extractTailWithFormatting, uploadFilesToThread } from './streaming.js';
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
@@ -151,7 +153,6 @@ interface ProcessingState {
   charLimit: number;                       // Character limit for thread messages
   // Thinking update race condition protection
   pendingThinkingUpdate: Promise<void> | null;  // Track in-flight thinking update
-  thinkingDeleteInProgress: boolean;            // Prevent new updates during finalization
 }
 
 /**
@@ -222,6 +223,146 @@ async function getMessagePermalink(
   }
   // Fallback to manual URL construction (works on desktop but may not open in iOS app)
   return `https://slack.com/archives/${channel}/p${messageTs.replace('.', '')}`;
+}
+
+// Helper for sleeping (used in retry logic)
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Read thinking content from session file by timestamp and charCount.
+ * Uses timestamp as primary match, charCount as verification.
+ *
+ * @param sessionId - Session ID to look up
+ * @param thinkingTimestamp - entry.timestamp for matching
+ * @param thinkingCharCount - content.length for verification
+ * @param workingDir - Working directory for session file lookup (default: cwd)
+ * @returns Thinking content if found, null otherwise
+ */
+async function getThinkingContentFromSession(
+  sessionId: string,
+  thinkingTimestamp: number,
+  thinkingCharCount: number,
+  workingDir: string = process.cwd()
+): Promise<string | null> {
+  try {
+    const filePath = getSessionFilePath(sessionId, workingDir);
+
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      console.error(`[getThinkingContentFromSession] Session file not found: ${filePath}`);
+      return null;
+    }
+
+    // Read and parse the JSONL file
+    const content = await fs.promises.readFile(filePath, 'utf-8');
+    const lines = content.trim().split('\n');
+
+    // Search for assistant messages with thinking blocks
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line);
+
+        // Only look at assistant messages
+        if (parsed.type !== 'assistant' || !parsed.message?.content) continue;
+
+        const msgTimestamp = new Date(parsed.timestamp).getTime();
+        const msgContent = parsed.message.content;
+
+        // Look for thinking blocks in the content
+        if (Array.isArray(msgContent)) {
+          for (const block of msgContent) {
+            if (block.type === 'thinking' && block.thinking) {
+              const thinkingContent = block.thinking as string;
+
+              // Match by timestamp (primary) and charCount (verification)
+              // Allow some timestamp tolerance (±1 second) since we may have rounding
+              const timestampMatch = Math.abs(msgTimestamp - thinkingTimestamp) < 1000;
+              const charCountMatch = thinkingContent.length === thinkingCharCount;
+
+              if (timestampMatch && charCountMatch) {
+                console.log(`[getThinkingContentFromSession] Found matching thinking: ${thinkingContent.length} chars`);
+                return thinkingContent;
+              }
+            }
+          }
+        }
+      } catch {
+        // Skip malformed lines
+        continue;
+      }
+    }
+
+    console.error('[getThinkingContentFromSession] No matching thinking entry found');
+    return null;
+  } catch (error) {
+    console.error('[getThinkingContentFromSession] Failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Update thinking message with retry logic.
+ * - Retries transient errors (rate limits, network) up to maxAttempts times
+ * - Does NOT retry permanent errors (message_not_found, channel_not_found)
+ * - On final failure, logs error to main channel with link
+ *
+ * @param client - Slack WebClient
+ * @param channelId - Channel ID
+ * @param messageTs - Message timestamp to update
+ * @param text - New text content
+ * @param maxAttempts - Maximum retry attempts
+ * @param mainChannelId - Channel ID for error logging
+ * @returns true if successful, false on failure
+ */
+async function updateThinkingMessageWithRetry(
+  client: WebClient,
+  channelId: string,
+  messageTs: string,
+  text: string,
+  maxAttempts: number,
+  mainChannelId: string
+): Promise<boolean> {
+  const PERMANENT_ERRORS = ['message_not_found', 'channel_not_found', 'msg_too_long', 'no_permission'];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await client.chat.update({ channel: channelId, ts: messageTs, text });
+      return true;
+    } catch (error: any) {
+      const errorCode = error?.data?.error || error?.code;
+
+      // Don't retry permanent errors - fail immediately
+      if (PERMANENT_ERRORS.includes(errorCode)) {
+        console.error(`[updateThinkingMessageWithRetry] Permanent error: ${errorCode}`);
+        break;  // Exit loop, log error below
+      }
+
+      if (attempt === maxAttempts) {
+        break;  // Max attempts reached, log error below
+      }
+
+      console.log(`[updateThinkingMessageWithRetry] Attempt ${attempt} failed, retrying... (${errorCode})`);
+      await sleep(1000 * attempt);  // Backoff: 1s, 2s, 3s, 4s, 5s
+    }
+  }
+
+  // Log error to main channel with link
+  try {
+    const msgLink = await getMessagePermalink(client, channelId, messageTs);
+    await client.chat.postMessage({
+      channel: mainChannelId,
+      text: `:warning: Failed to update thinking message. File was uploaded but <${msgLink}|message> could not be updated.`,
+    });
+  } catch (linkError) {
+    // If we can't even get permalink, just log without link
+    await client.chat.postMessage({
+      channel: mainChannelId,
+      text: `:warning: Failed to update thinking message. File was uploaded but message could not be updated.`,
+    });
+  }
+  return false;
 }
 
 function getUpdateMutex(conversationKey: string): Mutex {
@@ -2565,7 +2706,6 @@ async function handleMessage(params: {
     charLimit: session.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
     // Thinking update race condition protection
     pendingThinkingUpdate: null,
-    thinkingDeleteInProgress: false,
   };
 
   // Post single combined message (activity log + status panel)
@@ -2839,8 +2979,7 @@ async function handleMessage(params: {
 
       // Edit thread message in-place (fire-and-forget to avoid blocking)
       // Throttle to respect updateRateSeconds - timer will catch up anyway
-      // Skip if delete is in progress (finalization started)
-      if (processingState.activityThreadMsgTs && !processingState.thinkingDeleteInProgress) {
+      if (processingState.activityThreadMsgTs) {
         const now = Date.now();
         const intervalMs = processingState.updateRateSeconds * 1000;
 
@@ -2870,6 +3009,7 @@ async function handleMessage(params: {
     };
 
     // Helper to finalize the in-progress thinking entry and post to thread
+    // Uses smooth in-place update with cross-linked file attachment (no delete+repost)
     const finalizeThinkingEntry = async (content: string) => {
       // Find the last in-progress thinking entry and finalize it
       let finalEntry: ActivityEntry | null = null;
@@ -2898,34 +3038,81 @@ async function handleMessage(params: {
         const charLimit = liveConfig.threadCharLimit;
         const elapsedSec = Math.floor(elapsedMs / 1000);
 
-        // If content exceeds limit, need to post new message with .md attachment
-        // (can't attach files to existing messages via update)
-        if (content.length > charLimit) {
-          // Delete old placeholder to avoid duplicate messages
-          if (processingState.activityThreadMsgTs) {
-            // Set flag to prevent any new updates from being dispatched
-            processingState.thinkingDeleteInProgress = true;
-            // Wait for any in-flight update to complete BEFORE delete
-            if (processingState.pendingThinkingUpdate) {
-              await processingState.pendingThinkingUpdate;
-            }
-            // Clear BEFORE delete to prevent new dispatches targeting this message
-            const msgToDelete = processingState.activityThreadMsgTs;
-            processingState.activityThreadMsgTs = null;
-            try {
-              await client.chat.delete({
-                channel: channelId,
-                ts: msgToDelete,
-              });
-              console.log(`[Activity Thread] Deleted thinking placeholder: ${msgToDelete}`);
-            } catch (err) {
-              // Non-fatal: placeholder may already be deleted or we lack permissions
-              console.warn('[Activity Thread] Failed to delete thinking placeholder:', err);
-            }
-            // Reset flag after delete completes
-            processingState.thinkingDeleteInProgress = false;
+        // If content exceeds limit, need to upload file and update message in-place
+        if (content.length > charLimit && processingState.activityThreadMsgTs) {
+          // Wait for any in-flight thinking update to complete
+          if (processingState.pendingThinkingUpdate) {
+            await processingState.pendingThinkingUpdate;
           }
-          // Post new message with .md attachment
+
+          // Get permalink to thinking message (for file message back-link)
+          const thinkingMsgLink = await getMessagePermalink(
+            client, channelId, processingState.activityThreadMsgTs
+          );
+
+          // 1. Upload files FIRST with back-link to thinking message
+          const uploadResult = await uploadFilesToThread(
+            client,
+            channelId,
+            processingState.threadParentTs,
+            content,
+            `_Content for <${thinkingMsgLink}|this thinking block>._`,
+            userId
+          );
+
+          if (uploadResult.success && uploadResult.fileMessageTs) {
+            // 2. Get permalink to file message (for thinking message forward-link)
+            const fileMsgLink = await getMessagePermalink(
+              client, channelId, uploadResult.fileMessageTs
+            );
+
+            // 3. Format message with rolling tail + link to file
+            const formattedText = formatThreadThinkingMessage(
+              finalEntry,
+              true,
+              charLimit,
+              { preserveTail: true, attachmentLink: fileMsgLink }
+            );
+
+            // 4. Update thinking message with retry (5 attempts)
+            await updateThinkingMessageWithRetry(
+              client, channelId, processingState.activityThreadMsgTs,
+              formattedText, 5, channelId  // For error logging
+            );
+            console.log(`[Activity Thread] Thinking updated in-place with file link: ${uploadResult.fileMessageTs}`);
+          } else {
+            // Upload failed - show retry button (no suffix)
+            const formattedText = formatThreadThinkingMessage(
+              finalEntry, false, charLimit,
+              { preserveTail: true }
+            );
+
+            const blocks = [
+              { type: 'section' as const, text: { type: 'mrkdwn' as const, text: formattedText } },
+              buildAttachThinkingFileButton(
+                processingState.activityThreadMsgTs,
+                processingState.threadParentTs,
+                channelId,
+                newSessionId || '',  // Session ID for retry lookup
+                finalEntry.timestamp,    // Use timestamp for lookup
+                content.length           // Use charCount for verification
+              ),
+            ];
+
+            try {
+              await client.chat.update({
+                channel: channelId,
+                ts: processingState.activityThreadMsgTs,
+                text: formattedText,
+                blocks,
+              });
+              console.log(`[Activity Thread] Thinking updated with retry button (upload failed)`);
+            } catch (err) {
+              console.error('[Activity Thread] Failed to update thinking with retry button:', err);
+            }
+          }
+        } else if (content.length > charLimit) {
+          // No existing message but content is long, post new one with attachment
           await postThinkingToThread(
             client,
             channelId,
@@ -2936,20 +3123,20 @@ async function handleMessage(params: {
           );
         } else if (processingState.activityThreadMsgTs) {
           // Update existing message with final content (short content, no attachment needed)
-          const preview = content.length > charLimit
-            ? content.substring(0, charLimit) + '...'
-            : content;
+          const formattedText = formatThreadThinkingMessage(
+            finalEntry, false, charLimit
+          );
           try {
             await client.chat.update({
               channel: channelId,
               ts: processingState.activityThreadMsgTs,
-              text: `:bulb: *Thinking* [${elapsedSec}s] _${content.length} chars_\n> ${preview}`,
+              text: formattedText,
             });
           } catch (err) {
             console.error('[Activity Thread] Failed to finalize thinking in-place:', err);
           }
         } else {
-          // No existing message, post new one
+          // No existing message and short content, post new one
           await postThinkingToThread(
             client,
             channelId,
@@ -5301,6 +5488,100 @@ app.action(/^retry_upload_(.+)$/, async ({ ack, body, client }) => {
     user: userId,
     text: ':warning: Response content is no longer available. Activity logs are not persisted.',
   });
+});
+
+// Handle "Attach Response" retry button click for thinking file upload
+// Reads thinking content from session file and retries upload with cross-linking
+app.action(/^attach_thinking_file_(.+)$/, async ({ action, ack, body, client }) => {
+  await ack();
+
+  const channelId = body.channel?.id;
+  const userId = body.user?.id;
+  const activityMsgTs = (body as any).message?.ts;
+
+  if (!channelId || !userId || !activityMsgTs) return;
+
+  try {
+    // Parse button value to get session info
+    const value = JSON.parse((action as any).value);
+    const { threadParentTs, sessionId, thinkingTimestamp, thinkingCharCount } = value;
+
+    if (!sessionId || !threadParentTs) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: ':warning: Missing session info. Cannot retry upload.',
+      });
+      return;
+    }
+
+    // Get working directory from session
+    const session = getSession(channelId);
+    const workingDir = session?.workingDir || process.cwd();
+
+    // 1. Read thinking content from session file (match by timestamp + charCount)
+    const thinkingContent = await getThinkingContentFromSession(
+      sessionId,
+      thinkingTimestamp,
+      thinkingCharCount,
+      workingDir
+    );
+
+    if (!thinkingContent) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: ':warning: Could not retrieve thinking content from session. The session file may have been cleared or the content is no longer available.',
+      });
+      return;
+    }
+
+    // 2. Get permalink to thinking message (for file back-link)
+    const thinkingMsgLink = await getMessagePermalink(client, channelId, activityMsgTs);
+
+    // 3. Upload files with back-link
+    const uploadResult = await uploadFilesToThread(
+      client,
+      channelId,
+      threadParentTs,
+      thinkingContent,
+      `_Content for <${thinkingMsgLink}|this thinking block>._`,
+      userId
+    );
+
+    if (uploadResult.success && uploadResult.fileMessageTs) {
+      // 4. Get permalink to file message (for forward-link)
+      const fileMsgLink = await getMessagePermalink(client, channelId, uploadResult.fileMessageTs);
+
+      // 5. Update thinking message: remove button, add link suffix
+      const currentBlocks = (body as any).message?.blocks || [];
+      const textBlock = currentBlocks.find((b: any) => b.type === 'section');
+      const baseText = textBlock?.text?.text || '';
+      const newText = `${baseText}\n_Full response <${fileMsgLink}|attached>._`;
+
+      await client.chat.update({
+        channel: channelId,
+        ts: activityMsgTs,
+        text: newText,
+        blocks: undefined,  // Remove button by clearing blocks
+      });
+
+      console.log(`[attach_thinking_file] Successfully uploaded and cross-linked: ${uploadResult.fileMessageTs}`);
+    } else {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: ':warning: Failed to attach file. Please try again.',
+      });
+    }
+  } catch (error) {
+    console.error('[attach_thinking_file] Handler error:', error);
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      text: ':warning: An error occurred while attaching the file.',
+    });
+  }
 });
 
 // Handle "Stop Watching" button click for terminal session watcher

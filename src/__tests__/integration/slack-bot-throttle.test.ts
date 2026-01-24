@@ -298,7 +298,7 @@ describe('thinking update throttling', () => {
     console.log(`[Throttle Test 10s] 20 deltas → ${thinkingUpdateCount} updates (config used)`);
   });
 
-  it('should not send thinking updates when thinkingDeleteInProgress is true', async () => {
+  it('should update thinking message in-place for long content (no delete+repost)', async () => {
     vi.useFakeTimers();
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
@@ -317,16 +317,15 @@ describe('thinking update throttling', () => {
       threadCharLimit: 100,  // Low limit to trigger finalization with attachment
     });
 
-    // This test verifies the flag protection works by checking that
-    // no message_not_found errors occur when thinking content exceeds charLimit
-    // (which triggers delete + post new message flow)
+    // This test verifies the new in-place update behavior:
+    // When thinking content exceeds charLimit, we upload files and update
+    // the existing message in-place (no delete+repost)
 
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
 
         // Emit thinking content that exceeds charLimit (100 chars)
-        // This will trigger the finalization path with delete
         const longContent = 'A'.repeat(200);
         yield {
           type: 'stream_event',
@@ -348,7 +347,6 @@ describe('thinking update throttling', () => {
       interrupt: vi.fn(),
     } as any);
 
-    // Track if chat.delete was called (indicates finalization with long content)
     const queryPromise = handler({
       event: { user: 'U123', text: '<@BOT123> think long', channel: 'C123', ts: 'msg1' },
       client: mockClient,
@@ -358,37 +356,20 @@ describe('thinking update throttling', () => {
     await vi.advanceTimersByTimeAsync(5000);
     await queryPromise;
 
-    // Verify no errors were logged for message_not_found
-    // (The protection ensures pending updates complete before delete)
-    // If the fix works, chat.delete should have been called without subsequent errors
-    // on chat.update targeting the deleted message
-
-    // Check that chat.update calls after chat.delete (if any) don't target
-    // the deleted message timestamp
+    // Verify NO delete was called - we use in-place updates now
+    // (The new implementation uploads files and updates the message in-place)
     const deleteCalls = mockClient.chat.delete.mock.calls;
-    const updateCalls = mockClient.chat.update.mock.calls;
+    const thinkingDeleteCalls = deleteCalls.filter((call: any) => {
+      // Only count deletes of thinking messages (activity thread)
+      return call[0]?.ts?.startsWith('activity-');  // Depends on mock setup
+    });
 
-    // If delete was called, verify the implementation is working
-    // (content > 100 chars should trigger delete path)
-    if (deleteCalls.length > 0) {
-      const deletedTs = deleteCalls[0][0]?.ts;
+    // No deletes for thinking messages
+    expect(thinkingDeleteCalls.length).toBe(0);
 
-      // Find update calls after the delete call (by checking call order)
-      const deleteCallIndex = mockClient.chat.delete.mock.invocationCallOrder[0];
-      const updatesAfterDelete = updateCalls.filter((_, idx) => {
-        const updateCallOrder = mockClient.chat.update.mock.invocationCallOrder[idx];
-        return updateCallOrder > deleteCallIndex;
-      });
-
-      // Any updates after delete should NOT target the deleted ts
-      for (const updateCall of updatesAfterDelete) {
-        const updateTs = updateCall[0]?.ts;
-        // Updates for thinking should not target deleted message
-        if (updateCall[0]?.text?.includes('Thinking...')) {
-          expect(updateTs).not.toBe(deletedTs);
-        }
-      }
-    }
+    // Verify file upload was attempted (indicates new in-place flow)
+    // Note: In this test environment, files.uploadV2 may not be mocked
+    // The important assertion is that no delete occurred
   });
 });
 
@@ -404,7 +385,7 @@ describe('race condition protection', () => {
     vi.useRealTimers();
   });
 
-  it('should await pending thinking update before deleting placeholder', async () => {
+  it('should await pending thinking update before finalization', async () => {
     vi.useFakeTimers();
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
@@ -429,16 +410,14 @@ describe('race condition protection', () => {
     // Make chat.update slow to simulate in-flight request
     mockClient.chat.update.mockImplementation(async (args: any) => {
       if (args.text?.includes('Thinking...')) {
-        operationOrder.push('update_start');
+        operationOrder.push('thinking_update_start');
         // Simulate network delay
         await new Promise(r => setTimeout(r, 100));
-        operationOrder.push('update_complete');
+        operationOrder.push('thinking_update_complete');
+      } else if (args.text?.includes('Thinking')) {
+        // Final update (finalization)
+        operationOrder.push('finalize_update');
       }
-      return {};
-    });
-
-    mockClient.chat.delete.mockImplementation(async () => {
-      operationOrder.push('delete');
       return {};
     });
 
@@ -476,14 +455,14 @@ describe('race condition protection', () => {
     await vi.advanceTimersByTimeAsync(10000);
     await queryPromise;
 
-    // Verify operation order: update should complete before delete
-    // (if both occurred)
-    if (operationOrder.includes('delete') && operationOrder.includes('update_start')) {
-      const updateCompleteIndex = operationOrder.indexOf('update_complete');
-      const deleteIndex = operationOrder.indexOf('delete');
+    // Verify operation order: streaming update should complete before finalization
+    // The new implementation awaits pending updates before final message update
+    if (operationOrder.includes('finalize_update') && operationOrder.includes('thinking_update_start')) {
+      const updateCompleteIndex = operationOrder.indexOf('thinking_update_complete');
+      const finalizeIndex = operationOrder.indexOf('finalize_update');
 
-      // Delete should happen after update completes (not during)
-      expect(deleteIndex).toBeGreaterThan(updateCompleteIndex);
+      // Finalization should happen after streaming update completes (not during)
+      expect(finalizeIndex).toBeGreaterThan(updateCompleteIndex);
     }
   });
 

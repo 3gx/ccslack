@@ -2256,17 +2256,30 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
 }
 
 /**
+ * Options for formatting thinking messages.
+ */
+export interface ThinkingMessageOptions {
+  /** If true, show rolling tail (last N chars) instead of head (first N chars) */
+  preserveTail?: boolean;
+  /** Link to file message for cross-linking */
+  attachmentLink?: string;
+}
+
+/**
  * Format thinking message for thread posting.
  * Shows thinking duration, char count, and preview.
  *
  * @param entry - Thinking activity entry
  * @param truncated - Whether the content was truncated (will have .md attachment)
+ * @param charLimit - Character limit for display
+ * @param options - Optional settings for formatting
  * @returns Formatted mrkdwn text for thread message
  */
 export function formatThreadThinkingMessage(
   entry: ActivityEntry,
   truncated: boolean,
-  charLimit: number
+  charLimit: number,
+  options?: ThinkingMessageOptions
 ): string {
   const content = entry.thinkingContent || entry.thinkingTruncated || '';
   const charCount = content.length;
@@ -2287,22 +2300,92 @@ export function formatThreadThinkingMessage(
     }
   } else {
     // Completed: apply markdownToSlack, preserve newlines
-    lines.push(`:bulb: *Thinking*`);
+    lines.push(`:bulb: *Thinking*${duration}${charInfo}`);
 
     if (content) {
       const slackFormatted = markdownToSlack(content);
-      const displayText = slackFormatted.length > charLimit
-        ? slackFormatted.substring(0, charLimit) + '...'
-        : slackFormatted;
+      let displayText: string;
+
+      if (options?.preserveTail && slackFormatted.length > charLimit) {
+        // Preserve tail (rolling window) - shows conclusion
+        displayText = '...' + slackFormatted.substring(slackFormatted.length - charLimit);
+      } else if (slackFormatted.length > charLimit) {
+        // Default: show head (first N chars)
+        displayText = slackFormatted.substring(0, charLimit) + '...';
+      } else {
+        displayText = slackFormatted;
+      }
+
       lines.push(displayText);
     }
 
-    if (truncated) {
+    // Add suffix based on truncation and attachment link
+    if (truncated && options?.attachmentLink) {
+      // Cross-link to file message
+      lines.push(`_Full response <${options.attachmentLink}|attached>._`);
+    } else if (truncated && options && !options.attachmentLink) {
+      // Options provided but no link - waiting for upload or showing retry button
+      // (button will be added separately in blocks)
+    } else if (truncated) {
+      // Legacy fallback (no options provided)
       lines.push('_Full content attached._');
     }
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Metadata stored in retry button value for retrieving thinking content.
+ */
+export interface AttachThinkingButtonValue {
+  threadParentTs: string;
+  channelId: string;
+  sessionId: string;
+  thinkingTimestamp: number;
+  thinkingCharCount: number;
+  activityMsgTs: string;
+}
+
+/**
+ * Build "Attach Response" button for failed file uploads.
+ * Button stores minimal metadata; content is read from session file on click.
+ *
+ * @param activityMsgTs - The thinking message ts to update
+ * @param threadParentTs - Thread parent ts for uploading files
+ * @param channelId - Channel ID
+ * @param sessionId - Session ID for looking up thinking content
+ * @param thinkingTimestamp - entry.timestamp for session file lookup
+ * @param thinkingCharCount - content.length for verification
+ * @returns Actions block with retry button
+ */
+export function buildAttachThinkingFileButton(
+  activityMsgTs: string,
+  threadParentTs: string,
+  channelId: string,
+  sessionId: string,
+  thinkingTimestamp: number,
+  thinkingCharCount: number
+): Block {
+  const value: AttachThinkingButtonValue = {
+    threadParentTs,
+    channelId,
+    sessionId,
+    thinkingTimestamp,
+    thinkingCharCount,
+    activityMsgTs,
+  };
+
+  return {
+    type: 'actions',
+    block_id: `attach_thinking_${activityMsgTs}`,
+    elements: [{
+      type: 'button',
+      text: { type: 'plain_text', text: ':page_facing_up: Attach Response', emoji: true },
+      action_id: `attach_thinking_file_${activityMsgTs}`,
+      value: JSON.stringify(value),
+    }],
+  };
 }
 
 /**

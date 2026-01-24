@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse, uploadMarkdownAndPngWithResponse, truncateWithClosedFormatting, extractTailWithFormatting } from '../../streaming.js';
+import { startStreamingSession, streamToSlack, uploadMarkdownWithResponse, uploadMarkdownAndPngWithResponse, truncateWithClosedFormatting, extractTailWithFormatting, uploadFilesToThread } from '../../streaming.js';
 import { createMockSlackClient } from '../__fixtures__/slack-messages.js';
 import { createMockClaudeStream, mockSystemInit, mockAssistantText, mockAssistantContentBlocks, mockResult } from '../__fixtures__/claude-messages.js';
 
@@ -1244,6 +1244,184 @@ describe('streaming', () => {
           channel: 'C123',
           user: 'U456',
           text: expect.stringContaining('Failed to attach files'),
+        })
+      );
+    });
+  });
+
+  describe('uploadFilesToThread', () => {
+    it('should upload files to thread and return success with file message ts', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { public: { 'C123': [{ ts: 'file-msg-ts' }] } },
+        }],
+      });
+
+      const result = await uploadFilesToThread(
+        mockClient as any,
+        'C123',
+        'thread123',
+        '# Full thinking content',
+        '_Back-link text._',
+        'U456'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.fileMessageTs).toBe('file-msg-ts');
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C123',
+          thread_ts: 'thread123',
+          initial_comment: '_Back-link text._',
+        })
+      );
+    });
+
+    it('should return success=true but no ts when shares structure is missing', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],  // No shares
+      });
+
+      const result = await uploadFilesToThread(
+        mockClient as any,
+        'C123',
+        'thread123',
+        'markdown content'
+      );
+
+      // Upload succeeded but couldn't extract ts
+      expect(result.success).toBe(true);
+      expect(result.fileMessageTs).toBeUndefined();
+    });
+
+    it('should return success=false when upload fails', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+
+      const result = await uploadFilesToThread(
+        mockClient as any,
+        'C123',
+        'thread123',
+        'markdown content',
+        undefined,
+        'U456'
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.fileMessageTs).toBeUndefined();
+      // Should send ephemeral error notification
+      expect(mockClient.chat.postEphemeral).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          user: 'U456',
+          text: expect.stringContaining('Failed to attach thinking files'),
+        })
+      );
+    });
+
+    it('should not send ephemeral notification when userId not provided', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockRejectedValue(new Error('Upload failed'));
+
+      await uploadFilesToThread(
+        mockClient as any,
+        'C123',
+        'thread123',
+        'markdown content'
+        // No userId
+      );
+
+      expect(mockClient.chat.postEphemeral).not.toHaveBeenCalled();
+    });
+
+    it('should extract ts from shares.private for private channels', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: { private: { 'C123': [{ ts: 'private-file-ts' }] } },
+        }],
+      });
+
+      const result = await uploadFilesToThread(
+        mockClient as any,
+        'C123',
+        'thread123',
+        'markdown content'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.fileMessageTs).toBe('private-file-ts');
+    });
+
+    it('should poll files.info when shares is initially empty', async () => {
+      vi.useRealTimers();
+
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{
+          id: 'F123',
+          shares: {},  // Empty initially
+          files: [{ id: 'inner-file-id' }],
+        }],
+      });
+
+      let callCount = 0;
+      mockClient.files.info = vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount < 2) {
+          return { ok: true, file: { shares: {} } };
+        }
+        return {
+          ok: true,
+          file: { shares: { public: { 'C123': [{ ts: 'polled-ts' }] } } },
+        };
+      });
+
+      const result = await uploadFilesToThread(
+        mockClient as any,
+        'C123',
+        'thread123',
+        'markdown content'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.fileMessageTs).toBe('polled-ts');
+      expect(mockClient.files.info).toHaveBeenCalled();
+
+      vi.useFakeTimers();
+    });
+
+    it('should include both .md and .png files in upload', async () => {
+      const mockClient = createMockSlackClient();
+      mockClient.files.uploadV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        files: [{ id: 'F123' }],
+      });
+
+      await uploadFilesToThread(
+        mockClient as any,
+        'C123',
+        'thread123',
+        '# Markdown with **bold**'
+      );
+
+      // Check that file_uploads includes at least the markdown file
+      expect(mockClient.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          file_uploads: expect.arrayContaining([
+            expect.objectContaining({
+              filename: expect.stringMatching(/^thinking-\d+\.md$/),
+              title: 'Full Thinking (Markdown)',
+            }),
+          ]),
         })
       );
     });

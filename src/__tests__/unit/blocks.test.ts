@@ -37,6 +37,7 @@ import {
   formatThreadResponseMessage,
   formatThreadStartingMessage,
   formatThreadErrorMessage,
+  buildAttachThinkingFileButton,
 } from '../../blocks.js';
 import type { ModelInfo } from '../../model-cache.js';
 import type { LastUsage } from '../../session-manager.js';
@@ -3590,8 +3591,9 @@ describe('blocks', () => {
       const result = formatThreadThinkingMessage(entry, false, 500);
 
       expect(result).toContain(':bulb: *Thinking*');
-      // No duration stats in completed header (simplified format)
-      expect(result).not.toContain('[5.0s]');
+      // Duration and char count now included in completed header
+      expect(result).toContain('[5.0s]');
+      expect(result).toContain('_22 chars_');
       // markdownToSlack converts **Analysis** to *Analysis*
       expect(result).toContain('*Analysis*');
       expect(result).not.toContain('> ');  // No blockquote
@@ -3700,6 +3702,109 @@ describe('blocks', () => {
 
       expect(result).toContain('A'.repeat(100) + '...');
       expect(result).not.toContain('A'.repeat(101));
+    });
+
+    it('should preserve tail with preserveTail option for completed thinking', () => {
+      const content = 'A'.repeat(200) + 'B'.repeat(200);
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: content,
+        thinkingInProgress: false,
+        durationMs: 3000,
+      };
+
+      const result = formatThreadThinkingMessage(entry, true, 200, { preserveTail: true });
+
+      // Should show tail (last 200 chars) with ... prefix
+      expect(result).toContain('...' + 'B'.repeat(200));
+      // Should NOT start with A (first 200 chars are cut off)
+      expect(result).not.toContain('A'.repeat(200));
+    });
+
+    it('should include attachment link when provided', () => {
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'Long thinking content',
+        thinkingInProgress: false,
+        durationMs: 5000,
+      };
+
+      const result = formatThreadThinkingMessage(entry, true, 500, {
+        attachmentLink: 'https://slack.com/archives/C123/p1234567890',
+      });
+
+      expect(result).toContain('_Full response <https://slack.com/archives/C123/p1234567890|attached>._');
+    });
+
+    it('should not include attachment suffix when truncated but no link provided', () => {
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'Long thinking content',
+        thinkingInProgress: false,
+      };
+
+      const result = formatThreadThinkingMessage(entry, true, 500, { preserveTail: true });
+
+      // No suffix - waiting for upload or showing retry button
+      expect(result).not.toContain('attached');
+      expect(result).not.toContain('Full response');
+    });
+
+    it('should include duration and char count in header for completed thinking', () => {
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'Short content',
+        thinkingInProgress: false,
+        durationMs: 4500,
+      };
+
+      const result = formatThreadThinkingMessage(entry, false, 500);
+
+      expect(result).toContain(':bulb: *Thinking*');
+      expect(result).toContain('[4.5s]');
+      expect(result).toContain('_13 chars_');
+    });
+  });
+
+  describe('buildAttachThinkingFileButton', () => {
+    it('should create actions block with retry button', () => {
+      const block = buildAttachThinkingFileButton(
+        'activity-ts-123',
+        'thread-parent-ts',
+        'C123',
+        'session-id-abc',
+        1700000000000,  // timestamp
+        5000            // charCount
+      );
+
+      expect(block.type).toBe('actions');
+      expect((block as any).block_id).toBe('attach_thinking_activity-ts-123');
+      expect((block as any).elements).toHaveLength(1);
+      expect((block as any).elements[0].action_id).toBe('attach_thinking_file_activity-ts-123');
+      expect((block as any).elements[0].text.text).toBe(':page_facing_up: Attach Response');
+    });
+
+    it('should store metadata in button value', () => {
+      const block = buildAttachThinkingFileButton(
+        'activity-ts-123',
+        'thread-parent-ts',
+        'C123',
+        'session-id-abc',
+        1700000000000,
+        5000
+      );
+
+      const value = JSON.parse((block as any).elements[0].value);
+      expect(value.threadParentTs).toBe('thread-parent-ts');
+      expect(value.channelId).toBe('C123');
+      expect(value.sessionId).toBe('session-id-abc');
+      expect(value.thinkingTimestamp).toBe(1700000000000);
+      expect(value.thinkingCharCount).toBe(5000);
+      expect(value.activityMsgTs).toBe('activity-ts-123');
     });
   });
 
