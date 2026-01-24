@@ -177,7 +177,7 @@ export async function postThinkingToThread(
 ): Promise<string | null> {
   const content = entry.thinkingContent || entry.thinkingTruncated || '';
   const truncated = content.length > charLimit;
-  const formattedText = formatThreadThinkingMessage(entry, truncated);
+  const formattedText = formatThreadThinkingMessage(entry, truncated, charLimit);
 
   const result = await postActivityToThread(
     client,
@@ -219,12 +219,12 @@ export async function postResponseToThread(
   userId?: string
 ): Promise<string | null> {
   const truncated = content.length > charLimit;
-  const preview = content.substring(0, 300);
   const formattedText = formatThreadResponseMessage(
     content.length,
     durationMs,
-    preview,
-    truncated
+    content,  // Pass full content, let formatter handle truncation
+    truncated,
+    charLimit
   );
 
   const result = await postActivityToThread(

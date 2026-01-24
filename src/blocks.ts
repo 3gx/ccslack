@@ -2214,7 +2214,8 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
  */
 export function formatThreadThinkingMessage(
   entry: ActivityEntry,
-  truncated: boolean
+  truncated: boolean,
+  charLimit: number
 ): string {
   const content = entry.thinkingContent || entry.thinkingTruncated || '';
   const charCount = content.length;
@@ -2229,12 +2230,11 @@ export function formatThreadThinkingMessage(
     lines.push(`:bulb: *Thinking*${duration}${charInfo}`);
   }
 
-  // Show preview of thinking content
+  // Show preview of thinking content (up to charLimit from /message-size)
   if (content) {
     const displayText = content.replace(/\n/g, ' ').trim();
-    // Show up to 300 chars for thread preview
-    const preview = displayText.length > 300
-      ? displayText.substring(0, 300) + '...'
+    const preview = displayText.length > charLimit
+      ? displayText.substring(0, charLimit) + '...'
       : displayText;
     if (preview) {
       lines.push(`> ${preview}`);
@@ -2261,8 +2261,9 @@ export function formatThreadThinkingMessage(
 export function formatThreadResponseMessage(
   charCount: number,
   durationMs: number | undefined,
-  preview: string,
-  truncated: boolean
+  content: string,
+  truncated: boolean,
+  charLimit: number
 ): string {
   const duration = durationMs ? ` [${(durationMs / 1000).toFixed(1)}s]` : '';
   const charInfo = charCount > 0 ? ` _${charCount.toLocaleString()} chars_` : '';
@@ -2270,10 +2271,10 @@ export function formatThreadResponseMessage(
   const lines: string[] = [];
   lines.push(`:pencil: *Response*${duration}${charInfo}`);
 
-  if (preview) {
-    const displayText = preview.replace(/\n/g, ' ').trim();
-    const previewText = displayText.length > 300
-      ? displayText.substring(0, 300) + '...'
+  if (content) {
+    const displayText = content.replace(/\n/g, ' ').trim();
+    const previewText = displayText.length > charLimit
+      ? displayText.substring(0, charLimit) + '...'
       : displayText;
     if (previewText) {
       lines.push(`> ${previewText}`);

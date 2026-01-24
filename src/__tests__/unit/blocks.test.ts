@@ -3400,7 +3400,7 @@ describe('blocks', () => {
         durationMs: 2000,
       };
 
-      const result = formatThreadThinkingMessage(entry, false);
+      const result = formatThreadThinkingMessage(entry, false, 500);
 
       expect(result).toContain(':brain: *Thinking...*');
       expect(result).toContain('[2.0s]');
@@ -3417,7 +3417,7 @@ describe('blocks', () => {
         durationMs: 5000,
       };
 
-      const result = formatThreadThinkingMessage(entry, false);
+      const result = formatThreadThinkingMessage(entry, false, 500);
 
       expect(result).toContain(':bulb: *Thinking*');
       expect(result).toContain('[5.0s]');
@@ -3431,7 +3431,7 @@ describe('blocks', () => {
         thinkingInProgress: false,
       };
 
-      const result = formatThreadThinkingMessage(entry, true);
+      const result = formatThreadThinkingMessage(entry, true, 500);
 
       expect(result).toContain('_...truncated. Full content attached._');
     });
@@ -3444,29 +3444,60 @@ describe('blocks', () => {
         thinkingInProgress: true,
       };
 
-      const result = formatThreadThinkingMessage(entry, true);
+      const result = formatThreadThinkingMessage(entry, true, 500);
 
       expect(result).not.toContain('truncated');
     });
 
-    it('should truncate preview to 300 chars', () => {
-      const longContent = 'A'.repeat(400);
+    it('should truncate preview to charLimit chars', () => {
+      const longContent = 'A'.repeat(600);
       const entry: ActivityEntry = {
         timestamp: 1000,
         type: 'thinking',
         thinkingContent: longContent,
       };
 
-      const result = formatThreadThinkingMessage(entry, false);
+      const result = formatThreadThinkingMessage(entry, false, 500);
 
-      // Should truncate with ...
-      expect(result).toContain('A'.repeat(300) + '...');
+      // Should truncate with ... at charLimit
+      expect(result).toContain('A'.repeat(500) + '...');
+      expect(result).not.toContain('A'.repeat(501));
+    });
+
+    it('should show full content when under charLimit', () => {
+      const content = 'A'.repeat(400);
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: content,
+      };
+
+      const result = formatThreadThinkingMessage(entry, false, 500);
+
+      // Should show full content without truncation
+      expect(result).toContain('A'.repeat(400));
+      expect(result).not.toContain('...');
+    });
+
+    it('should respect custom charLimit', () => {
+      const content = 'A'.repeat(200);
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: content,
+      };
+
+      // With charLimit 100, content of 200 chars should be truncated
+      const result = formatThreadThinkingMessage(entry, false, 100);
+
+      expect(result).toContain('A'.repeat(100) + '...');
+      expect(result).not.toContain('A'.repeat(101));
     });
   });
 
   describe('formatThreadResponseMessage', () => {
     it('should format response with stats', () => {
-      const result = formatThreadResponseMessage(1500, 3000, 'Here is my response...', false);
+      const result = formatThreadResponseMessage(1500, 3000, 'Here is my response...', false, 500);
 
       expect(result).toContain(':pencil: *Response*');
       expect(result).toContain('[3.0s]');
@@ -3475,24 +3506,45 @@ describe('blocks', () => {
     });
 
     it('should show truncation notice when truncated', () => {
-      const result = formatThreadResponseMessage(5000, 2000, 'Preview text', true);
+      const result = formatThreadResponseMessage(5000, 2000, 'Preview text', true, 500);
 
       expect(result).toContain('_...truncated. Full content attached._');
     });
 
     it('should handle missing duration', () => {
-      const result = formatThreadResponseMessage(100, undefined, 'Short response', false);
+      const result = formatThreadResponseMessage(100, undefined, 'Short response', false, 500);
 
       expect(result).toContain(':pencil: *Response*');
       expect(result).not.toContain('[');  // No duration bracket
       expect(result).toContain('_100 chars_');
     });
 
-    it('should truncate preview to 300 chars', () => {
-      const longPreview = 'B'.repeat(400);
-      const result = formatThreadResponseMessage(400, 1000, longPreview, false);
+    it('should truncate preview to charLimit chars', () => {
+      const longContent = 'B'.repeat(600);
+      const result = formatThreadResponseMessage(600, 1000, longContent, false, 500);
 
-      expect(result).toContain('B'.repeat(300) + '...');
+      // Should truncate with ... at charLimit
+      expect(result).toContain('B'.repeat(500) + '...');
+      expect(result).not.toContain('B'.repeat(501));
+    });
+
+    it('should show full content when under charLimit', () => {
+      const content = 'B'.repeat(400);
+      const result = formatThreadResponseMessage(400, 1000, content, false, 500);
+
+      // Should show full content without truncation
+      expect(result).toContain('B'.repeat(400));
+      expect(result).not.toContain('...');
+    });
+
+    it('should respect custom charLimit', () => {
+      const content = 'B'.repeat(200);
+
+      // With charLimit 100, content of 200 chars should be truncated
+      const result = formatThreadResponseMessage(200, 1000, content, false, 100);
+
+      expect(result).toContain('B'.repeat(100) + '...');
+      expect(result).not.toContain('B'.repeat(101));
     });
   });
 

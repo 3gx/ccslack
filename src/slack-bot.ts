@@ -2816,8 +2816,8 @@ async function handleMessage(params: {
 
       // Edit thread message in-place (fire-and-forget to avoid blocking)
       if (processingState.activityThreadMsgTs) {
-        const preview = content.length > 300
-          ? content.substring(0, 300) + '...'
+        const preview = content.length > processingState.charLimit
+          ? content.substring(0, processingState.charLimit) + '...'
           : content;
         client.chat.update({
           channel: channelId,
@@ -2885,8 +2885,8 @@ async function handleMessage(params: {
           );
         } else if (processingState.activityThreadMsgTs) {
           // Update existing message with final content (short content, no attachment needed)
-          const preview = content.length > 300
-            ? content.substring(0, 300) + '...'
+          const preview = content.length > charLimit
+            ? content.substring(0, charLimit) + '...'
             : content;
           try {
             await client.chat.update({
