@@ -1641,52 +1641,37 @@ const MODE_LABELS: Record<PermissionMode, string> = {
 };
 
 /**
- * Build TOP status line - simple: mode | model | [new] session-id
- * NO context % in TOP line - simplified!
+ * Format token count with K suffix for readability.
+ */
+function formatTokenCount(count: number): string {
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return count.toString();
+}
+
+/**
+ * Build unified status line - progressive display as info becomes available.
+ * Always shows mode | model | session, stats appended only at completion.
  *
  * @param mode - Permission mode
  * @param model - Model name (e.g., "claude-sonnet-4") or undefined
  * @param sessionId - Session ID or undefined
  * @param isNewSession - Show [new] prefix if true
- * @returns Formatted string like "_plan | claude-sonnet-4 | [new] abc123_"
- */
-export function buildTopStatusLine(
-  mode: PermissionMode,
-  model?: string,
-  sessionId?: string,
-  isNewSession?: boolean
-): string {
-  const modeLabel = MODE_LABELS[mode] || mode;
-  const modelStr = model || 'n/a';
-
-  let sessionStr = sessionId || 'n/a';
-  if (sessionId && isNewSession) {
-    sessionStr = `[new] ${sessionId}`;
-  }
-
-  return `_${modeLabel} | ${modelStr} | ${sessionStr}_`;
-}
-
-/**
- * Build BOTTOM stats line - only at completion/abort.
- * Always includes mode | model | session-id, stats appended only if available.
- *
- * @param mode - Permission mode
- * @param model - Model name
- * @param sessionId - Session ID
- * @param contextPercent - Context usage percentage
- * @param compactPercent - Percent remaining until auto-compact
- * @param inputTokens - Input token count
- * @param outputTokens - Output token count
- * @param cost - Cost in USD
- * @param durationMs - Duration in milliseconds
+ * @param contextPercent - Context usage percentage (completion only)
+ * @param compactPercent - Percent remaining until auto-compact (completion only)
+ * @param inputTokens - Input token count (completion only)
+ * @param outputTokens - Output token count (completion only)
+ * @param cost - Cost in USD (completion only)
+ * @param durationMs - Duration in milliseconds (completion only)
  * @param rateLimitHits - Number of rate limits encountered
- * @returns Formatted string with mode|model|session + optional stats
+ * @returns Formatted string like "_plan | claude-sonnet-4 | abc123 | 45.0% ctx (30.0% to ⚡) | 1.5k/800 | $0.05 | 5.0s_"
  */
-export function buildBottomStatsLine(
+export function buildUnifiedStatusLine(
   mode: PermissionMode,
   model?: string,
   sessionId?: string,
+  isNewSession?: boolean,
   contextPercent?: number,
   compactPercent?: number,
   inputTokens?: number,
@@ -1698,50 +1683,45 @@ export function buildBottomStatsLine(
   const modeLabel = MODE_LABELS[mode] || mode;
   const parts: string[] = [modeLabel];
 
-  // Model
-  if (model) parts.push(model);
+  // Model - always show, n/a if not available
+  parts.push(model || 'n/a');
 
-  // Session ID
-  if (sessionId) parts.push(sessionId);
+  // Session ID - always show, n/a if not available
+  let sessionStr = sessionId || 'n/a';
+  if (sessionId && isNewSession) {
+    sessionStr = `[new] ${sessionId}`;
+  }
+  parts.push(sessionStr);
 
-  // Check if we have any stats to show
-  const hasStats = contextPercent !== undefined ||
-                   inputTokens !== undefined ||
-                   outputTokens !== undefined ||
-                   cost !== undefined ||
-                   durationMs !== undefined;
-
-  if (hasStats) {
-    // Context % with compact info
-    if (contextPercent !== undefined) {
-      if (compactPercent !== undefined && compactPercent > 0) {
-        parts.push(`${contextPercent}% ctx (${compactPercent}% to ⚡)`);
-      } else if (compactPercent !== undefined && compactPercent <= 0) {
-        parts.push(`${contextPercent}% ctx (⚡ soon)`);
-      } else {
-        parts.push(`${contextPercent}% ctx`);
-      }
-    }
-
-    // Tokens: input/output format
-    if (inputTokens !== undefined || outputTokens !== undefined) {
-      const inStr = formatTokenCount(inputTokens || 0);
-      const outStr = formatTokenCount(outputTokens || 0);
-      parts.push(`${inStr}/${outStr}`);
-    }
-
-    // Cost
-    if (cost !== undefined) {
-      parts.push(`$${cost.toFixed(2)}`);
-    }
-
-    // Duration
-    if (durationMs !== undefined) {
-      parts.push(`${(durationMs / 1000).toFixed(1)}s`);
+  // Stats - only if available (completion state)
+  // Context % with compact info
+  if (contextPercent !== undefined) {
+    if (compactPercent !== undefined) {
+      // Always show z.w% as-is (positive, zero, or negative)
+      parts.push(`${contextPercent.toFixed(1)}% ctx (${compactPercent.toFixed(1)}% to ⚡)`);
+    } else {
+      parts.push(`${contextPercent.toFixed(1)}% ctx`);
     }
   }
 
-  // Rate limit warning suffix (appended at end)
+  // Tokens: input/output format
+  if (inputTokens !== undefined || outputTokens !== undefined) {
+    const inStr = formatTokenCount(inputTokens || 0);
+    const outStr = formatTokenCount(outputTokens || 0);
+    parts.push(`${inStr}/${outStr}`);
+  }
+
+  // Cost
+  if (cost !== undefined) {
+    parts.push(`$${cost.toFixed(2)}`);
+  }
+
+  // Duration
+  if (durationMs !== undefined) {
+    parts.push(`${(durationMs / 1000).toFixed(1)}s`);
+  }
+
+  // Rate limit warning suffix (appended at end when > 0)
   if (rateLimitHits && rateLimitHits > 0) {
     parts.push(`:warning: ${rateLimitHits} limits`);
   }
@@ -1750,25 +1730,13 @@ export function buildBottomStatsLine(
 }
 
 /**
- * Format token count with K suffix for readability.
- */
-function formatTokenCount(count: number): string {
-  if (count >= 1000) {
-    return `${(count / 1000).toFixed(1)}k`;
-  }
-  return count.toString();
-}
-
-/**
  * Build combined status blocks (activity log + status panel in single message).
  *
- * Consolidated layout (no Beginning/Complete headers):
- * - TOP line: mode | model | [new] session-id (context block)
+ * Unified layout:
  * - Activity log section
- * - Rate limit warning (if any, during in-progress) - above buttons
- * - Buttons: [Abort] during in-progress, [Fork here] on final
- * - Spinner BELOW buttons (during in-progress only)
- * - BOTTOM stats line: ONLY at completion with full stats
+ * - Spinner + elapsed (in-progress only)
+ * - Unified status line (always above button)
+ * - Button: [Abort] during in-progress, [Fork here] on completion
  */
 export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[] {
   const {
@@ -1801,16 +1769,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
   // Format elapsed time
   const elapsedSec = (elapsedMs / 1000).toFixed(1);
 
-  // 1. TOP status line (context) - simple: mode | model | [new] session-id
-  blocks.push({
-    type: 'context',
-    elements: [{
-      type: 'mrkdwn',
-      text: buildTopStatusLine(mode, model, sessionId, isNewSession),
-    }],
-  });
-
-  // 2. Activity log section - ALWAYS
+  // 1. Activity log section - ALWAYS first
   const activityText = buildActivityLogText(activityLog, inProgress, ACTIVITY_LOG_MAX_CHARS);
   blocks.push({
     type: 'section',
@@ -1822,18 +1781,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
   const isInProgressStatus = ['starting', 'thinking', 'tool', 'generating'].includes(status);
 
   if (isInProgressStatus) {
-    // 3. Rate limit warning (context) - ABOVE buttons when rate limits hit
-    if (rateLimitHits && rateLimitHits > 0) {
-      blocks.push({
-        type: 'context',
-        elements: [{
-          type: 'mrkdwn',
-          text: `_:warning: ${rateLimitHits} rate limit${rateLimitHits > 1 ? 's' : ''} hit_`,
-        }],
-      });
-    }
-
-    // 4. Spinner (context) - ABOVE buttons
+    // 2. Spinner (context) - in-progress only
     blocks.push({
       type: 'context',
       elements: [{
@@ -1842,7 +1790,28 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
       }],
     });
 
-    // 5. Actions: [Abort]
+    // 3. Unified status line (context) - progressive display, rate limits included
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: buildUnifiedStatusLine(
+          mode,
+          model,
+          sessionId,
+          isNewSession,
+          undefined,  // no contextPercent during in-progress
+          undefined,  // no compactPercent during in-progress
+          undefined,  // no inputTokens during in-progress
+          undefined,  // no outputTokens during in-progress
+          undefined,  // no cost during in-progress
+          undefined,  // no duration during in-progress
+          rateLimitHits
+        ),
+      }],
+    });
+
+    // 4. Actions: [Abort]
     blocks.push({
       type: 'actions',
       block_id: `status_panel_${conversationKey}`,
@@ -1858,22 +1827,23 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
   } else {
     // Terminal states: complete, aborted, error
 
-    // 3. BOTTOM stats line (context) - ONLY at completion/abort/error
-    // Always shows mode|model|session, stats appended only if available
+    // Check if we have stats
     const hasStats = contextPercent !== undefined ||
                      inputTokens !== undefined ||
                      outputTokens !== undefined ||
                      costUsd !== undefined;
 
+    // 2. Unified status line (context) - ALWAYS above button
     if (status === 'complete' || status === 'aborted' || (status === 'error' && hasStats)) {
       blocks.push({
         type: 'context',
         elements: [{
           type: 'mrkdwn',
-          text: buildBottomStatsLine(
+          text: buildUnifiedStatusLine(
             mode,
             model,
             sessionId,
+            isNewSession,
             contextPercent,
             compactPercent,
             inputTokens,
@@ -1895,7 +1865,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
       });
     }
 
-    // 4. Actions: [Fork here] and/or [Generate Output] on completion
+    // 3. Actions: [Fork here] and/or [Generate Output] on completion
     const actionElements: any[] = [];
 
     // Fork button only on final segment (for BOTH thread AND main channel)
@@ -1938,8 +1908,6 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
         elements: actionElements,
       });
     }
-
-    // NO spinner for terminal states
   }
 
   return blocks;

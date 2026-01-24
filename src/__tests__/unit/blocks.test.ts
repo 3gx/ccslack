@@ -28,8 +28,7 @@ import {
   ACTIVITY_LOG_MAX_CHARS,
   buildStopWatchingButton,
   buildWatchingStatusSection,
-  buildTopStatusLine,
-  buildBottomStatsLine,
+  buildUnifiedStatusLine,
   buildForkToChannelModalView,
   buildAbortConfirmationModalView,
   formatThreadActivityBatch,
@@ -2645,7 +2644,7 @@ describe('blocks', () => {
     };
 
     describe('in-progress state', () => {
-      it('should return TOP line + activity + buttons + spinner (no Beginning header)', () => {
+      it('should return activity + spinner + status + buttons', () => {
         const entries: ActivityEntry[] = [
           { timestamp: Date.now(), type: 'starting' },
         ];
@@ -2656,19 +2655,19 @@ describe('blocks', () => {
           sessionId: 'abc123',
         });
 
-        // Should have 4 blocks: TOP line, activity, spinner, buttons (no Beginning header!)
+        // Should have 4 blocks: activity, spinner, status line, buttons
         expect(blocks.length).toBe(4);
-        // First block should be TOP status line (context)
-        expect(blocks[0].type).toBe('context');
-        expect((blocks[0] as any).elements[0].text).toContain('bypass');
-        expect((blocks[0] as any).elements[0].text).toContain('abc123');
-        // Second should be activity log section
-        expect(blocks[1].type).toBe('section');
-        expect((blocks[1] as any).text.text).toContain(':brain:');
-        // Third should be spinner + elapsed (ABOVE buttons)
+        // First block should be activity log section
+        expect(blocks[0].type).toBe('section');
+        expect((blocks[0] as any).text.text).toContain(':brain:');
+        // Second should be spinner + elapsed
+        expect(blocks[1].type).toBe('context');
+        expect((blocks[1] as any).elements[0].text).toContain('◐');
+        // Third should be unified status line
         expect(blocks[2].type).toBe('context');
-        expect((blocks[2] as any).elements[0].text).toContain('◐');
-        // Fourth should be Abort button only (no View Log)
+        expect((blocks[2] as any).elements[0].text).toContain('bypass');
+        expect((blocks[2] as any).elements[0].text).toContain('abc123');
+        // Fourth should be Abort button
         expect(blocks[3].type).toBe('actions');
         expect((blocks[3] as any).elements.length).toBe(1);
         expect((blocks[3] as any).elements[0].text.text).toBe('Abort');
@@ -2685,8 +2684,9 @@ describe('blocks', () => {
           // no model, no sessionId
         });
 
-        const topLine = (blocks[0] as any).elements[0].text;
-        expect(topLine).toContain('n/a');
+        // Status line is blocks[2] (after activity and spinner)
+        const statusLine = (blocks[2] as any).elements[0].text;
+        expect(statusLine).toContain('n/a');
       });
 
       it('should show [new] prefix for new sessions', () => {
@@ -2701,12 +2701,13 @@ describe('blocks', () => {
           isNewSession: true,
         });
 
-        const topLine = (blocks[0] as any).elements[0].text;
-        expect(topLine).toContain('[new]');
-        expect(topLine).toContain('new-session-id');
+        // Status line is blocks[2] (after activity and spinner)
+        const statusLine = (blocks[2] as any).elements[0].text;
+        expect(statusLine).toContain('[new]');
+        expect(statusLine).toContain('new-session-id');
       });
 
-      it('should show rate limit warning above buttons when hit', () => {
+      it('should show rate limits in unified status line (no separate block)', () => {
         const entries: ActivityEntry[] = [
           { timestamp: Date.now(), type: 'starting' },
         ];
@@ -2717,16 +2718,14 @@ describe('blocks', () => {
           rateLimitHits: 3,
         });
 
-        // Should have 5 blocks: TOP line, activity, rate limit warning, spinner, buttons
-        expect(blocks.length).toBe(5);
-        // Rate limit warning should be context block
-        expect(blocks[2].type).toBe('context');
-        expect((blocks[2] as any).elements[0].text).toContain(':warning:');
-        expect((blocks[2] as any).elements[0].text).toContain('3 rate limits');
-        // Spinner should follow
-        expect(blocks[3].type).toBe('context');
+        // Still 4 blocks: activity, spinner, status line (with rate limits), buttons
+        expect(blocks.length).toBe(4);
+        // Status line should contain rate limits
+        const statusLine = (blocks[2] as any).elements[0].text;
+        expect(statusLine).toContain(':warning:');
+        expect(statusLine).toContain('3 limits');
         // Buttons should be last
-        expect(blocks[4].type).toBe('actions');
+        expect(blocks[3].type).toBe('actions');
       });
 
       it('should include abort button during processing', () => {
@@ -2750,7 +2749,7 @@ describe('blocks', () => {
     });
 
     describe('completed state', () => {
-      it('should show BOTTOM stats line on completion (no Complete header)', () => {
+      it('should show unified stats line on completion', () => {
         const entries: ActivityEntry[] = [
           { timestamp: Date.now(), type: 'starting' },
           { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
@@ -2770,24 +2769,21 @@ describe('blocks', () => {
           elapsedMs: 5000,
         });
 
-        // Should have 3 blocks: TOP line, activity, BOTTOM stats (no buttons without Fork)
-        expect(blocks.length).toBe(3);
-        // First is TOP line
-        expect(blocks[0].type).toBe('context');
-        expect((blocks[0] as any).elements[0].text).toContain('claude-sonnet-4');
-        // Second is activity log
-        expect(blocks[1].type).toBe('section');
-        // Third is BOTTOM stats line
-        expect(blocks[2].type).toBe('context');
-        const bottomLine = (blocks[2] as any).elements[0].text;
-        expect(bottomLine).toContain('bypass');
-        expect(bottomLine).toContain('claude-sonnet-4');
-        expect(bottomLine).toContain('session-xyz');
-        expect(bottomLine).toContain('45% ctx');
-        expect(bottomLine).toContain('30% to ⚡');
-        expect(bottomLine).toContain('1.5k/800');
-        expect(bottomLine).toContain('$0.05');
-        expect(bottomLine).toContain('5.0s');
+        // Should have 2 blocks: activity, unified stats (no buttons without Fork)
+        expect(blocks.length).toBe(2);
+        // First is activity log
+        expect(blocks[0].type).toBe('section');
+        // Second is unified stats line
+        expect(blocks[1].type).toBe('context');
+        const statsLine = (blocks[1] as any).elements[0].text;
+        expect(statsLine).toContain('bypass');
+        expect(statsLine).toContain('claude-sonnet-4');
+        expect(statsLine).toContain('session-xyz');
+        expect(statsLine).toContain('45.0% ctx');
+        expect(statsLine).toContain('30.0% to ⚡');
+        expect(statsLine).toContain('1.5k/800');
+        expect(statsLine).toContain('$0.05');
+        expect(statsLine).toContain('5.0s');
         // No actions block when not final segment and no Fork
       });
 
@@ -2831,7 +2827,7 @@ describe('blocks', () => {
         expect(actionsBlock).toBeUndefined();
       });
 
-      it('should include rate limits in BOTTOM stats line at completion', () => {
+      it('should include rate limits in unified stats line at completion', () => {
         const entries: ActivityEntry[] = [
           { timestamp: Date.now(), type: 'starting' },
         ];
@@ -2845,11 +2841,11 @@ describe('blocks', () => {
           elapsedMs: 1000,
         });
 
-        // Find BOTTOM stats line (should be context block after activity)
+        // Find unified stats line (should be context block after activity)
         const contextBlocks = blocks.filter(b => b.type === 'context');
-        const bottomLine = contextBlocks[contextBlocks.length - 1];
-        expect((bottomLine as any).elements[0].text).toContain(':warning:');
-        expect((bottomLine as any).elements[0].text).toContain('2 limits');
+        const statsLine = contextBlocks[contextBlocks.length - 1];
+        expect((statsLine as any).elements[0].text).toContain(':warning:');
+        expect((statsLine as any).elements[0].text).toContain('2 limits');
       });
 
       it('should NOT have spinner after completion', () => {
@@ -2863,13 +2859,13 @@ describe('blocks', () => {
           inProgress: false,
         });
 
-        // Last block should be context (BOTTOM stats line), no spinner
+        // Last block should be context (unified stats line), no spinner
         expect(blocks[blocks.length - 1].type).toBe('context');
       });
     });
 
     describe('aborted state', () => {
-      it('should show BOTTOM stats line with available data on abort', () => {
+      it('should show unified stats line with available data on abort', () => {
         const entries: ActivityEntry[] = [
           { timestamp: Date.now(), type: 'starting' },
         ];
@@ -2886,12 +2882,12 @@ describe('blocks', () => {
           elapsedMs: 3000,
         });
 
-        // Should have BOTTOM stats line
+        // Should have unified stats line
         const contextBlocks = blocks.filter(b => b.type === 'context');
-        expect(contextBlocks.length).toBe(2); // TOP and BOTTOM
-        const bottomLine = contextBlocks[1];
-        expect((bottomLine as any).elements[0].text).toContain('session-abc');
-        expect((bottomLine as any).elements[0].text).toContain('20% ctx');
+        expect(contextBlocks.length).toBe(1); // Just unified stats line
+        const statsLine = contextBlocks[0];
+        expect((statsLine as any).elements[0].text).toContain('session-abc');
+        expect((statsLine as any).elements[0].text).toContain('20.0% ctx');
       });
 
       it('should NOT show Abort or Fork after abort (no buttons)', () => {
@@ -2929,7 +2925,7 @@ describe('blocks', () => {
           elapsedMs: 2000,
         });
 
-        // Activity section is the section block (2nd block after TOP context)
+        // Activity section is the first block (section type)
         const sectionBlocks = blocks.filter(b => b.type === 'section');
         expect(sectionBlocks.length).toBeGreaterThan(0);
         const activitySection = sectionBlocks[0];
@@ -2939,12 +2935,12 @@ describe('blocks', () => {
         expect(activityText).toContain(':octagonal_sign:');
         expect(activityText).toContain('Aborted by user');
 
-        // Verify order: activity section comes before bottom stats (context)
+        // Verify order: activity section comes before unified stats (context)
         const activityIndex = blocks.indexOf(activitySection);
         const contextBlocks = blocks.filter(b => b.type === 'context');
-        const bottomStatsBlock = contextBlocks[contextBlocks.length - 1];
-        const bottomStatsIndex = blocks.indexOf(bottomStatsBlock);
-        expect(activityIndex).toBeLessThan(bottomStatsIndex);
+        const statsBlock = contextBlocks[contextBlocks.length - 1];
+        const statsIndex = blocks.indexOf(statsBlock);
+        expect(activityIndex).toBeLessThan(statsIndex);
       });
     });
 
@@ -2969,6 +2965,36 @@ describe('blocks', () => {
         );
         expect(errorContext).toBeDefined();
       });
+
+      it('should show unified stats line when error has stats available', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+          { timestamp: Date.now(), type: 'error', message: 'API error' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          status: 'error',
+          activityLog: entries,
+          inProgress: false,
+          errorMessage: 'API error',
+          model: 'claude-sonnet-4',
+          sessionId: 'session-abc',
+          inputTokens: 500,
+          outputTokens: 100,
+          contextPercent: 25,
+          costUsd: 0.01,
+          elapsedMs: 2000,
+        });
+
+        const contextBlocks = blocks.filter(b => b.type === 'context');
+        // Should have unified stats line (not error message)
+        const statsLine = contextBlocks[0];
+        expect((statsLine as any).elements[0].text).toContain('session-abc');
+        expect((statsLine as any).elements[0].text).toContain('25.0% ctx');
+        expect((statsLine as any).elements[0].text).toContain('$0.01');
+        // Should NOT contain error icon in the stats line
+        expect((statsLine as any).elements[0].text).not.toContain(':x:');
+      });
     });
 
     it('should truncate activity log to maxChars', () => {
@@ -2988,8 +3014,8 @@ describe('blocks', () => {
         inProgress: true,
       });
 
-      // Activity log section is blocks[1] (after TOP status line)
-      const activitySection = blocks[1];
+      // Activity log section is blocks[0] (first block)
+      const activitySection = blocks[0];
       expect((activitySection as any).text.text.length).toBeLessThanOrEqual(ACTIVITY_LOG_MAX_CHARS + 100); // Allow some margin
     });
 
@@ -3005,9 +3031,9 @@ describe('blocks', () => {
         inProgress: true,
       });
 
-      // Activity section is blocks[1] (after TOP status line)
-      expect((blocks[1] as any).text.text).toContain(':brain:');
-      expect((blocks[1] as any).text.text).toContain('Thinking');
+      // Activity section is blocks[0] (first block)
+      expect((blocks[0] as any).text.text).toContain(':brain:');
+      expect((blocks[0] as any).text.text).toContain('Thinking');
     });
 
     describe('Generate Output button (failed upload retry)', () => {
@@ -3171,69 +3197,109 @@ describe('blocks', () => {
     });
   });
 
-  describe('buildTopStatusLine', () => {
+  describe('buildUnifiedStatusLine', () => {
     it('should format mode | model | sessionId', () => {
-      const line = buildTopStatusLine('plan', 'claude-sonnet-4', 'abc123');
+      const line = buildUnifiedStatusLine('plan', 'claude-sonnet-4', 'abc123');
       expect(line).toBe('_plan | claude-sonnet-4 | abc123_');
     });
 
     it('should show n/a for missing values', () => {
-      const line = buildTopStatusLine('plan');
+      const line = buildUnifiedStatusLine('plan');
       expect(line).toBe('_plan | n/a | n/a_');
     });
 
     it('should show [new] prefix for new sessions', () => {
-      const line = buildTopStatusLine('bypassPermissions', 'claude-opus-4', 'new-session', true);
+      const line = buildUnifiedStatusLine('bypassPermissions', 'claude-opus-4', 'new-session', true);
       expect(line).toBe('_bypass | claude-opus-4 | [new] new-session_');
     });
 
     it('should not show [new] when isNewSession is false', () => {
-      const line = buildTopStatusLine('default', 'claude-sonnet-4', 'existing', false);
+      const line = buildUnifiedStatusLine('default', 'claude-sonnet-4', 'existing', false);
       expect(line).toBe('_default | claude-sonnet-4 | existing_');
     });
-  });
 
-  describe('buildBottomStatsLine', () => {
-    it('should format all stats when available', () => {
-      const line = buildBottomStatsLine(
+    it('should format percentages with one decimal place', () => {
+      const line = buildUnifiedStatusLine(
         'plan',
         'claude-sonnet-4',
         'session123',
-        55,   // contextPercent
-        22,   // compactPercent
-        1200, // inputTokens
-        850,  // outputTokens
-        0.12, // cost
+        false,
+        3,    // contextPercent - should become 3.0%
+        30,   // compactPercent - should become 30.0%
+      );
+      expect(line).toContain('3.0% ctx');
+      expect(line).toContain('30.0% to ⚡');
+    });
+
+    it('should format all stats when available', () => {
+      const line = buildUnifiedStatusLine(
+        'plan',
+        'claude-sonnet-4',
+        'session123',
+        false, // isNewSession
+        55,    // contextPercent
+        22,    // compactPercent
+        1200,  // inputTokens
+        850,   // outputTokens
+        0.12,  // cost
         15000, // durationMs
       );
       expect(line).toContain('plan');
       expect(line).toContain('claude-sonnet-4');
       expect(line).toContain('session123');
-      expect(line).toContain('55% ctx');
-      expect(line).toContain('22% to ⚡');
+      expect(line).toContain('55.0% ctx');
+      expect(line).toContain('22.0% to ⚡');
       expect(line).toContain('1.2k/850');
       expect(line).toContain('$0.12');
       expect(line).toContain('15.0s');
     });
 
     it('should show just mode/model/session when no stats', () => {
-      const line = buildBottomStatsLine('acceptEdits', 'claude-opus-4', 'sess-abc');
+      const line = buildUnifiedStatusLine('acceptEdits', 'claude-opus-4', 'sess-abc');
       expect(line).toBe('_acceptEdits | claude-opus-4 | sess-abc_');
     });
 
     it('should include rate limit warning as suffix', () => {
-      const line = buildBottomStatsLine(
-        'plan', 'claude-sonnet-4', 'session', 45, 30, 1000, 500, 0.05, 5000, 3
+      const line = buildUnifiedStatusLine(
+        'plan', 'claude-sonnet-4', 'session', false, 45, 30, 1000, 500, 0.05, 5000, 3
       );
       expect(line).toContain(':warning: 3 limits');
     });
 
-    it('should show compact soon when compactPercent <= 0', () => {
-      const line = buildBottomStatsLine(
-        'plan', 'claude-sonnet-4', 'session', 80, -5, 1000, 500
+    it('should show rate limits in-progress (no stats, just limits)', () => {
+      const line = buildUnifiedStatusLine(
+        'plan', 'claude-sonnet-4', 'session', false,
+        undefined, undefined, undefined, undefined, undefined, undefined,
+        2
       );
-      expect(line).toContain('80% ctx');
-      expect(line).toContain('⚡ soon');
+      expect(line).toBe('_plan | claude-sonnet-4 | session | :warning: 2 limits_');
+    });
+
+    it('should show completion stats with rate limits', () => {
+      const line = buildUnifiedStatusLine(
+        'plan', 'claude-sonnet-4', 'session', false,
+        45, 30, 1500, 800, 0.05, 5000, 3
+      );
+      expect(line).toContain('45.0% ctx');
+      expect(line).toContain('30.0% to ⚡');
+      expect(line).toContain('1.5k/800');
+      expect(line).toContain('$0.05');
+      expect(line).toContain('5.0s');
+      expect(line).toContain(':warning: 3 limits');
+    });
+
+    it('should display compactPercent as-is for positive, zero, or negative values', () => {
+      // Positive compactPercent
+      const linePos = buildUnifiedStatusLine('plan', 'claude-sonnet-4', 'session', false, 45, 30);
+      expect(linePos).toContain('45.0% ctx (30.0% to ⚡)');
+
+      // Zero compactPercent
+      const lineZero = buildUnifiedStatusLine('plan', 'claude-sonnet-4', 'session', false, 80, 0);
+      expect(lineZero).toContain('80.0% ctx (0.0% to ⚡)');
+
+      // Negative compactPercent
+      const lineNeg = buildUnifiedStatusLine('plan', 'claude-sonnet-4', 'session', false, 80, -5);
+      expect(lineNeg).toContain('80.0% ctx (-5.0% to ⚡)');
     });
   });
 

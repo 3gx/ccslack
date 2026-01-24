@@ -305,21 +305,21 @@ describe('slack-bot mention handlers', () => {
       expect(combinedCall.channel).toBe('C123');
       expect(combinedCall.text).toBe('Claude is starting...');
 
-      // Verify new combined blocks: TOP line + activity + spinner + buttons (no Beginning header!)
+      // Verify unified blocks: activity + spinner + status + buttons
       const blocks = combinedCall.blocks;
       expect(blocks).toBeDefined();
-      expect(blocks.length).toBe(4); // TOP line + activity + spinner + buttons
+      expect(blocks.length).toBe(4); // activity + spinner + status + buttons
 
-      // First block: TOP status line (mode | model | session-id)
-      expect(blocks[0].type).toBe('context');
-      expect(blocks[0].elements[0].text).toContain('plan');
+      // First block: activity log section
+      expect(blocks[0].type).toBe('section');
+      expect(blocks[0].text.text).toContain('Analyzing request');
 
-      // Second block: activity log section
-      expect(blocks[1].type).toBe('section');
-      expect(blocks[1].text.text).toContain('Analyzing request');
+      // Second block: spinner + elapsed
+      expect(blocks[1].type).toBe('context');
 
-      // Third block: spinner + elapsed (ABOVE buttons)
+      // Third block: unified status line (mode | model | session-id)
       expect(blocks[2].type).toBe('context');
+      expect(blocks[2].elements[0].text).toContain('plan');
 
       // Fourth block: Abort button only
       expect(blocks[3].type).toBe('actions');
@@ -389,18 +389,11 @@ describe('slack-bot mention handlers', () => {
       expect(statusPanelComplete).toBeDefined();
 
       // Combined completion blocks structure (buildCombinedStatusBlocks):
-      // 0: _plan | claude-sonnet | session-id_ (context - TOP line)
-      // 1: Activity log (section)
-      // 2: _plan | claude-sonnet | session-id | stats..._ (context - BOTTOM stats line)
+      // 0: Activity log (section)
+      // 1: _plan | claude-sonnet | session-id | stats..._ (context - unified stats line)
       const completeBlocks = statusPanelComplete![0].blocks;
 
-      // Find the TOP status line (first context block with mode)
-      const topLine = completeBlocks.find((b: any) =>
-        b.type === 'context' && b.elements?.[0]?.text?.includes('plan') && !b.elements?.[0]?.text?.includes('100')
-      );
-      expect(topLine).toBeDefined();
-
-      // Find the BOTTOM stats context block (the one with token counts)
+      // Find the unified stats context block (contains mode AND token counts)
       const statsBlock = completeBlocks.find((b: any) =>
         b.type === 'context' && b.elements?.[0]?.text?.includes('100') && b.elements?.[0]?.text?.includes('200')
       );
@@ -926,19 +919,13 @@ describe('slack-bot mention handlers', () => {
       // 4. Actions (buttons)
       const completionBlocks = completionUpdate![0].blocks;
 
-      // TOP line: context with mode
-      const topLine = completionBlocks.find((b: any) =>
-        b.type === 'context' && b.elements?.[0]?.text?.includes('plan') && !b.elements?.[0]?.text?.includes('500')
-      );
-      expect(topLine).toBeDefined();
-
       // Activity section exists
       const activitySection = completionBlocks.find((b: any) => b.type === 'section');
       expect(activitySection).toBeDefined();
 
-      // BOTTOM stats line: context with token counts
+      // Unified stats line: context with mode AND token counts
       const statsLine = completionBlocks.find((b: any) =>
-        b.type === 'context' && b.elements?.[0]?.text?.includes('500')
+        b.type === 'context' && b.elements?.[0]?.text?.includes('500') && b.elements?.[0]?.text?.includes('plan')
       );
       expect(statsLine).toBeDefined();
 
@@ -947,8 +934,8 @@ describe('slack-bot mention handlers', () => {
       // Actions block is optional on completion (only present with Fork or retry buttons)
 
       // No spinner block in completion (spinner only during in-progress)
-      // Completion should have exactly 4 blocks: TOP + activity + BOTTOM + actions
-      expect(completionBlocks.length).toBe(4);
+      // Completion should have exactly 3 blocks: activity + stats + actions
+      expect(completionBlocks.length).toBe(3);
     });
   });
 
