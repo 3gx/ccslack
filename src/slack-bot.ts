@@ -56,7 +56,7 @@ import { uploadMarkdownAndPngWithResponse, extractTailWithFormatting, uploadFile
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
-import { parseCommand, UPDATE_RATE_DEFAULT, MESSAGE_SIZE_DEFAULT } from './commands.js';
+import { parseCommand, UPDATE_RATE_DEFAULT, MESSAGE_SIZE_DEFAULT, THINKING_MESSAGE_SIZE } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { processSlackFiles, SlackFile } from './file-handler.js';
 import { buildMessageContent, ContentBlock } from './content-builder.js';
@@ -96,8 +96,6 @@ const THINKING_TRUNCATE_LENGTH = 500;
 const MAX_LIVE_ENTRIES = 300;  // Switch to rolling window if exceeded
 const ROLLING_WINDOW_SIZE = 20; // Show last N entries when in rolling mode
 const STATUS_UPDATE_INTERVAL = 1000; // TEMP: 1s for testing spinner updates
-// Max chars to show in activity thread during streaming (rolling tail window)
-const ACTIVITY_STREAM_CHAR_LIMIT = 3000;
 
 // Processing state for real-time activity tracking
 interface ProcessingState {
@@ -2986,8 +2984,8 @@ async function handleMessage(params: {
         // Only update if enough time passed since last update
         if (now - processingState.lastUpdateTime >= intervalMs) {
           // Use rolling tail window for thread message during streaming
-          const preview = content.length > ACTIVITY_STREAM_CHAR_LIMIT
-            ? extractTailWithFormatting(content, ACTIVITY_STREAM_CHAR_LIMIT)
+          const preview = content.length > THINKING_MESSAGE_SIZE
+            ? extractTailWithFormatting(content, THINKING_MESSAGE_SIZE)
             : content;
           // Store promise so finalization can await it before delete
           processingState.pendingThinkingUpdate = client.chat.update({
@@ -3034,8 +3032,7 @@ async function handleMessage(params: {
 
       // Update or post thinking to thread
       if (finalEntry && processingState.threadParentTs) {
-        const liveConfig = getLiveSessionConfig(channelId, threadTs);
-        const charLimit = liveConfig.threadCharLimit;
+        const charLimit = THINKING_MESSAGE_SIZE;
         const elapsedSec = Math.floor(elapsedMs / 1000);
 
         // If content exceeds limit, need to upload file and update message in-place

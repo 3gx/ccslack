@@ -1304,7 +1304,7 @@ describe('slack-bot mention handlers', () => {
         sessionId: null,
         workingDir: '/test',
         mode: 'plan',
-        threadCharLimit: 100,  // Low limit to trigger .md attachment
+        // Note: threadCharLimit doesn't affect thinking anymore (uses THINKING_MESSAGE_SIZE=3000)
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
         pathConfigured: true,
@@ -1313,8 +1313,8 @@ describe('slack-bot mention handlers', () => {
         configuredAt: Date.now(),
       });
 
-      // Simulate thinking with long content (exceeds 100 char limit)
-      const longThinking = 'A'.repeat(500);  // 500 chars, way over 100 limit
+      // Simulate thinking with long content (exceeds THINKING_MESSAGE_SIZE=3000)
+      const longThinking = 'A'.repeat(3500);  // 3500 chars, over 3000 limit
       const mockMessages = [
         { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
         // Thinking block start
@@ -1365,7 +1365,7 @@ describe('slack-bot mention handlers', () => {
         client: mockClient,
       });
 
-      // When thinking content exceeds charLimit (100):
+      // When thinking content exceeds THINKING_MESSAGE_SIZE (3000):
       // 1. A thinking placeholder should have been posted
       // 2. File is uploaded to thread
       // 3. The placeholder is updated in-place with the file link (no delete+repost)
@@ -1394,6 +1394,78 @@ describe('slack-bot mention handlers', () => {
       // The placeholder should be updated (not deleted)
       // Note: In this test environment, thinkingPlaceholderTs may be null
       // The key assertion is that no delete occurred
+    });
+
+    it('should NOT trigger file attachment for thinking under THINKING_MESSAGE_SIZE (3000)', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        threadCharLimit: 100,  // Even with low threadCharLimit, thinking uses THINKING_MESSAGE_SIZE
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Simulate thinking with content under THINKING_MESSAGE_SIZE (3000)
+      const shortThinking = 'A'.repeat(2500);  // 2500 chars, under 3000 limit
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' },
+        {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'thinking' },
+          },
+        },
+        {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'thinking_delta', thinking: shortThinking },
+          },
+        },
+        {
+          type: 'stream_event',
+          event: { type: 'content_block_stop', index: 0 },
+        },
+        { type: 'result', result: 'Done!' },
+      ];
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) {
+            yield msg;
+          }
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> think about this',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Thinking content (2500 chars) is under THINKING_MESSAGE_SIZE (3000)
+      // So NO file upload should be triggered, regardless of threadCharLimit setting
+      const uploadCalls = mockClient.files.uploadV2.mock.calls;
+      const thinkingFileUpload = uploadCalls.find((call: any) =>
+        call[0].file_uploads?.some((f: any) => f.filename?.includes('thinking'))
+      );
+      expect(thinkingFileUpload).toBeUndefined();
     });
 
     it('should show rolling tail (last 3000 chars) in thread updates during streaming', async () => {
@@ -1498,7 +1570,7 @@ describe('slack-bot mention handlers', () => {
       const lastUpdate = thinkingThreadUpdates[thinkingThreadUpdates.length - 1][0];
 
       // CRITICAL: The update should show the TAIL marker, not the HEAD marker
-      // This verifies extractTailWithFormatting is being used with ACTIVITY_STREAM_CHAR_LIMIT
+      // This verifies extractTailWithFormatting is being used with THINKING_MESSAGE_SIZE (3000)
       expect(lastUpdate.text).toContain('_TAIL_END_ZZZZ');
       expect(lastUpdate.text).not.toContain('AAAA_HEAD_START_');
 

@@ -30,6 +30,9 @@ const MESSAGE_SIZE_MIN = 100;
 const MESSAGE_SIZE_MAX = 36000;  // 90% of Slack's 40000 char limit
 export const MESSAGE_SIZE_DEFAULT = 500;
 
+// Thinking message size limit (75% of Slack's ~4000 char practical limit for thread messages)
+export const THINKING_MESSAGE_SIZE = 3000;
+
 export interface CommandResult {
   handled: boolean;
   response?: string;
