@@ -1364,6 +1364,121 @@ describe('slack-bot mention handlers', () => {
       );
       expect(thinkingDeleteCall).toBeDefined();
     });
+
+    it('should show rolling tail (last 3000 chars) in thread updates during streaming', async () => {
+      // Use real timers with a wait function for async generator timing
+      const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Track thinking thread message ts
+      let thinkingThreadTs: string | null = null;
+      const originalPostMessage = mockClient.chat.postMessage;
+      mockClient.chat.postMessage = vi.fn().mockImplementation(async (opts: any) => {
+        if (opts.text?.includes('*Thinking...*')) {
+          thinkingThreadTs = 'thinking-thread-msg-ts';
+          return { ok: true, ts: thinkingThreadTs };
+        }
+        return originalPostMessage(opts);
+      });
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        updateRateSeconds: 0.1,  // Use very short update rate for fast test
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Create thinking content > 3000 chars
+      // First 1000 chars are 'A' with HEAD marker, last part has TAIL marker at end
+      // With 4000 total chars and 3000 limit, we should see the TAIL marker but not HEAD
+      const headContent = 'AAAA_HEAD_START_' + 'A'.repeat(1000);
+      const middleContent = 'M'.repeat(2000);
+      const tailContent = 'Z'.repeat(900) + '_TAIL_END_ZZZZ';
+      const longThinking = headContent + middleContent + tailContent;  // ~4000 chars total
+
+      let queryComplete: () => void;
+      const queryDonePromise = new Promise<void>(r => { queryComplete = r; });
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+          // Thinking block start
+          yield {
+            type: 'stream_event',
+            event: {
+              type: 'content_block_start',
+              index: 0,
+              content_block: { type: 'thinking' },
+            },
+          };
+          // Thinking content (very long - over 3000 chars)
+          yield {
+            type: 'stream_event',
+            event: {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'thinking_delta', thinking: longThinking },
+            },
+          };
+          // Wait for test to check updates before completing
+          await queryDonePromise;
+          // Complete thinking block
+          yield {
+            type: 'stream_event',
+            event: { type: 'content_block_stop', index: 0 },
+          };
+          yield { type: 'result', result: 'Done!' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Start the handler (don't await yet)
+      const handlerPromise = handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> think deeply',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Wait for the updates to fire
+      await wait(300);
+
+      // Now check chat.update calls for the thinking thread message
+      const updateCalls = mockClient.chat.update.mock.calls;
+      const thinkingThreadUpdates = updateCalls.filter((call: any) =>
+        call[0].ts === thinkingThreadTs && call[0].text?.includes('*Thinking...*')
+      );
+
+      // Should have at least one update
+      expect(thinkingThreadUpdates.length).toBeGreaterThan(0);
+
+      // Get the last update call (during streaming, before finalization)
+      const lastUpdate = thinkingThreadUpdates[thinkingThreadUpdates.length - 1][0];
+
+      // CRITICAL: The update should show the TAIL marker, not the HEAD marker
+      // This verifies extractTailWithFormatting is being used with ACTIVITY_STREAM_CHAR_LIMIT
+      expect(lastUpdate.text).toContain('_TAIL_END_ZZZZ');
+      expect(lastUpdate.text).not.toContain('AAAA_HEAD_START_');
+
+      // Should have "..." prefix indicating truncation
+      expect(lastUpdate.text).toContain('...');
+
+      // Complete the query
+      queryComplete!();
+      await wait(100);
+      await handlerPromise;
+    });
   });
 
 });
