@@ -140,7 +140,7 @@ describe('slack-bot button handlers', () => {
 
   describe('abort button handler', () => {
     it('should open confirmation modal', async () => {
-      const handler = registeredHandlers['action_^abort_(.+)$'];
+      const handler = registeredHandlers['action_^abort_(?!query_)(.+)$'];
       expect(handler).toBeDefined();
 
       const mockClient = createMockSlackClient();
@@ -170,7 +170,7 @@ describe('slack-bot button handlers', () => {
     });
 
     it('should post ephemeral error when trigger_id is missing', async () => {
-      const handler = registeredHandlers['action_^abort_(.+)$'];
+      const handler = registeredHandlers['action_^abort_(?!query_)(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn();
 
@@ -196,7 +196,7 @@ describe('slack-bot button handlers', () => {
     });
 
     it('should post ephemeral error when views.open fails', async () => {
-      const handler = registeredHandlers['action_^abort_(.+)$'];
+      const handler = registeredHandlers['action_^abort_(?!query_)(.+)$'];
       const mockClient = createMockSlackClient();
       mockClient.views.open = vi.fn().mockRejectedValue(new Error('Slack API error'));
       const ack = vi.fn();
@@ -220,6 +220,19 @@ describe('slack-bot button handlers', () => {
         user: 'U456',
         text: ':warning: Failed to open abort confirmation. Please try again.',
       });
+    });
+
+    it('should NOT match abort_query_* action IDs (handled by separate handler)', () => {
+      // Verify the regex pattern correctly excludes abort_query_* using negative lookahead
+      const pattern = /^abort_(?!query_)(.+)$/;
+
+      // Should match MCP question abort buttons
+      expect('abort_q_123'.match(pattern)).toBeTruthy();
+      expect('abort_askuserq_123_abc'.match(pattern)).toBeTruthy();
+
+      // Should NOT match query abort buttons (these have their own handler)
+      expect('abort_query_C123_thread456'.match(pattern)).toBeNull();
+      expect('abort_query_C123'.match(pattern)).toBeNull();
     });
   });
 
@@ -862,7 +875,7 @@ describe('slack-bot button handlers', () => {
     });
 
     it('should still open modal when abort ack() throws', async () => {
-      const handler = registeredHandlers['action_^abort_(.+)$'];
+      const handler = registeredHandlers['action_^abort_(?!query_)(.+)$'];
       const mockClient = createMockSlackClient();
       const ack = vi.fn().mockRejectedValue(new Error('Rate limited'));
 

@@ -4166,7 +4166,8 @@ async function handleQuestionAbort(questionId: string, channelId: string, messag
 }
 
 // Handle "Abort" button for ask_user questions - opens confirmation modal
-app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
+// Note: (?!query_) prevents matching abort_query_* which has its own handler
+app.action(/^abort_(?!query_)(.+)$/, async ({ action, ack, body, client }) => {
   try {
     await ack();
   } catch (error) {
@@ -4174,7 +4175,7 @@ app.action(/^abort_(.+)$/, async ({ action, ack, body, client }) => {
   }
 
   const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^abort_(.+)$/);
+  const match = actionId.match(/^abort_(?!query_)(.+)$/);
   const questionId = match ? match[1] : '';
 
   console.log(`Abort clicked for question: ${questionId}`);
