@@ -513,7 +513,7 @@ describe('blocks', () => {
         configuredAt: null,
       });
 
-      expect(blocks[1].text?.text).toContain('*Update Rate:* 2s (default)');
+      expect(blocks[1].text?.text).toContain('*Update Rate:* 3s (default)');
     });
 
     it('should show custom update rate value', () => {

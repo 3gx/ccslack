@@ -23,7 +23,7 @@ const THINKING_TOKENS_DEFAULT = 31999;
 // Update rate limits (seconds)
 export const UPDATE_RATE_MIN = 1;
 export const UPDATE_RATE_MAX = 10;
-export const UPDATE_RATE_DEFAULT = 2;
+export const UPDATE_RATE_DEFAULT = 3;
 
 // Message size limit (characters before response is truncated)
 const MESSAGE_SIZE_MIN = 100;
@@ -147,7 +147,7 @@ function handleHelp(): CommandResult {
 \`/show-plan\` - Show current plan file in thread
 \`/model\` - Show model picker
 \`/max-thinking-tokens [n]\` - Set thinking budget (0=disable, 1024-128000, default=31999)
-\`/update-rate [n]\` - Set status update interval (1-10 seconds, default=2)
+\`/update-rate [n]\` - Set status update interval (1-10 seconds, default=3)
 \`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
 \`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
 \`/watch\` - Get command to continue session in terminal and watch for activity
@@ -434,7 +434,7 @@ function handleWatch(session: Session, threadTs?: string): CommandResult {
   }
 
   const command = `cd ${session.workingDir} && claude --dangerously-skip-permissions --resume ${session.sessionId}`;
-  const updateRate = session.updateRateSeconds ?? 2;
+  const updateRate = session.updateRateSeconds ?? UPDATE_RATE_DEFAULT;
 
   return {
     handled: true,

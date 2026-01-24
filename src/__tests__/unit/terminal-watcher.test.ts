@@ -211,11 +211,11 @@ describe('terminal-watcher', () => {
       expect(watcher?.updateRateMs).toBe(5000);
     });
 
-    it('should default to 2 seconds if updateRateSeconds not set', async () => {
+    it('should default to 3 seconds if updateRateSeconds not set', async () => {
       startWatching('channel-1', undefined, mockSession, mockClient, 'status-ts');
 
       const watcher = getWatcher('channel-1');
-      expect(watcher?.updateRateMs).toBe(2000);
+      expect(watcher?.updateRateMs).toBe(3000);
     });
   });
 

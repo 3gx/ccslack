@@ -54,7 +54,7 @@ export interface Session {
   // Extended thinking configuration
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
   // Status update rate configuration
-  updateRateSeconds?: number;  // undefined = 2 (default), range 1-10
+  updateRateSeconds?: number;  // undefined = 3 (default), range 1-10
   // Message size limit configuration
   threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
   // Strip empty code fence tag configuration
@@ -104,7 +104,7 @@ export interface ThreadSession {
   // Extended thinking configuration (inherited from channel)
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
   // Status update rate configuration (inherited from channel)
-  updateRateSeconds?: number;  // undefined = 2 (default), range 1-10
+  updateRateSeconds?: number;  // undefined = 3 (default), range 1-10
   // Message size limit configuration (inherited from channel)
   threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
   // Strip empty code fence tag configuration (inherited from channel)

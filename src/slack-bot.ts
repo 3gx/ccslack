@@ -1040,7 +1040,7 @@ async function handleFastForwardSync(
     return;
   }
 
-  const updateRate = session.updateRateSeconds ?? 2;
+  const updateRate = session.updateRateSeconds ?? UPDATE_RATE_DEFAULT;
   const terminalCommand = `cd ${session.workingDir} && claude --dangerously-skip-permissions --resume ${sessionId}`;
 
   // Helper to build anchor blocks with progress
@@ -1917,13 +1917,13 @@ app.event('app_mention', async ({ event, client }) => {
       return;
     }
 
-    console.log(`Received mention from ${event.user}: ${event.text}`);
-
     // Remove the @mention from the text and normalize spaces
     const userText = event.text
       .replace(/<@[A-Z0-9]+>/g, '')
       .replace(/\s+/g, ' ')  // Normalize multiple spaces to single
       .trim();
+
+    console.log(`Received mention from ${event.user}: ${userText}`);
 
     // Reject empty messages
     if (!userText) {
@@ -2488,7 +2488,7 @@ async function handleMessage(params: {
 
         // Update the anchor with correct blocks that include anchorTs for stop button
         // This is needed because commands.ts doesn't know anchorTs when building blocks
-        const updateRate = session.updateRateSeconds ?? 2;
+        const updateRate = session.updateRateSeconds ?? UPDATE_RATE_DEFAULT;
         const terminalCommand = `cd ${session.workingDir} && claude --dangerously-skip-permissions --resume ${session.sessionId}`;
         await client.chat.update({
           channel: channelId,

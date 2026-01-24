@@ -637,7 +637,7 @@ export interface StatusDisplayParams {
   configuredAt: number | null;
   lastUsage?: LastUsage;
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
-  updateRateSeconds?: number;  // undefined = 2 (default), range 1-10
+  updateRateSeconds?: number;  // undefined = 3 (default), range 1-10
   messageSize?: number;        // undefined = 500 (default), range 100-36000
   stripEmptyTag?: boolean;     // undefined = false (default), true = strip bare ``` wrappers
   planFilePath?: string | null;  // Plan file path for plan mode
@@ -646,7 +646,7 @@ export interface StatusDisplayParams {
 // Default thinking tokens for display
 const THINKING_TOKENS_DEFAULT = 31999;
 // Default update rate for display
-const UPDATE_RATE_DEFAULT = 2;
+const UPDATE_RATE_DEFAULT = 3;
 
 /**
  * Build blocks for /status command response.

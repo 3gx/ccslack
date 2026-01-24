@@ -17,7 +17,7 @@ import { markdownToSlack, stripMarkdownCodeFence } from './utils.js';
 import { withSlackRetry } from './retry.js';
 import { truncateWithClosedFormatting, uploadMarkdownAndPngWithResponse, uploadMarkdownWithResponse } from './streaming.js';
 import { syncMessagesFromOffset, MessageSyncState } from './message-sync.js';
-import { MESSAGE_SIZE_DEFAULT } from './commands.js';
+import { MESSAGE_SIZE_DEFAULT, UPDATE_RATE_DEFAULT } from './commands.js';
 
 /**
  * State for an active terminal watcher.
@@ -91,7 +91,7 @@ export function startWatching(
   }
 
   const filePath = getSessionFilePath(session.sessionId, session.workingDir);
-  const updateRateMs = (session.updateRateSeconds ?? 2) * 1000;
+  const updateRateMs = (session.updateRateSeconds ?? UPDATE_RATE_DEFAULT) * 1000;
   const initialOffset = getFileSize(filePath);
 
   const state: WatchState = {

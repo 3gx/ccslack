@@ -691,7 +691,7 @@ describe('commands', () => {
     it('should show default value when not set', () => {
       const result = parseCommand('/update-rate', mockSession);
       expect(result.handled).toBe(true);
-      expect(result.response).toContain('2s');
+      expect(result.response).toContain('3s');
       expect(result.response).toContain('default');
     });
 
@@ -758,9 +758,9 @@ describe('commands', () => {
       expect(result.response).toContain('1-10');
     });
 
-    it('should show default=2 in help text', () => {
+    it('should show default=3 in help text', () => {
       const result = parseCommand('/help', mockSession);
-      expect(result.response).toContain('default=2');
+      expect(result.response).toContain('default=3');
     });
   });
 
