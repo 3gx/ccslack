@@ -98,9 +98,6 @@ export function parseCommand(
       return handleWatch(session, threadTs);
     case 'stop-watching':
       return handleStopWatching();
-    case 'ff':
-    case 'fast-forward':
-      return handleFastForward(session, threadTs);
     case 'fork':
       return handleFork(session);
     case 'resume':
@@ -152,7 +149,6 @@ function handleHelp(): CommandResult {
 \`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
 \`/watch\` - Get command to continue session in terminal and watch for activity
 \`/stop-watching\` - Stop watching terminal session
-\`/ff\` - Fast-forward: sync missed terminal messages and start watching
 \`/fork\` - Get command to fork session to terminal
 \`/resume <id>\` - Resume a terminal session in Slack
 \`/compact\` - Compact session to reduce context size

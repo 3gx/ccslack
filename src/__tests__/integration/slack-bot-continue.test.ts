@@ -902,7 +902,7 @@ describe('slack-bot /watch command', () => {
     });
   });
 
-  describe('/ff (fast-forward) command', () => {
+  describe.skip('/ff (fast-forward) command', () => {
     it('should return error when no session exists', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
@@ -1682,7 +1682,7 @@ describe('slack-bot /watch command', () => {
     });
   });
 
-  describe('stop_ff_sync button handler', () => {
+  describe.skip('stop_ff_sync button handler', () => {
     it('should register stop_ff_sync action handler', async () => {
       expect(registeredHandlers['action_stop_ff_sync']).toBeDefined();
     });
