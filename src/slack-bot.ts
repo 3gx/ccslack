@@ -45,6 +45,7 @@ import {
   buildAbortConfirmationModalView,
   formatThreadThinkingMessage,
   buildAttachThinkingFileButton,
+  computeAutoCompactThreshold,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -122,6 +123,7 @@ interface ProcessingState {
   outputTokens?: number;
   cacheReadInputTokens?: number;  // For accurate context % calculation
   contextWindow?: number;
+  maxOutputTokens?: number;  // From SDK ModelUsage - for accurate auto-compact threshold
   costUsd?: number;
   durationMs?: number;
   // Session tracking for status display
@@ -3898,6 +3900,9 @@ async function handleMessage(params: {
           if (modelData?.contextWindow) {
             processingState.contextWindow = modelData.contextWindow;
           }
+          if (modelData?.maxOutputTokens) {
+            processingState.maxOutputTokens = modelData.maxOutputTokens;
+          }
         }
       }
     }
@@ -3938,10 +3943,9 @@ async function handleMessage(params: {
       : undefined;
 
     // Calculate % left until auto-compact triggers
-    // Auto-compact threshold is approximately 77.5% of context window (based on CLI behavior)
-    const AUTOCOMPACT_THRESHOLD_PERCENT = 0.775;
+    // Formula from SDK: threshold = contextWindow - maxOutputTokens - 13000
     const compactPercent = processingState.contextWindow && totalContextTokens > 0
-      ? Number((((processingState.contextWindow * AUTOCOMPACT_THRESHOLD_PERCENT - totalContextTokens) / processingState.contextWindow) * 100).toFixed(1))
+      ? Number((((computeAutoCompactThreshold(processingState.contextWindow, processingState.maxOutputTokens) - totalContextTokens) / processingState.contextWindow) * 100).toFixed(1))
       : undefined;
 
     // Store in processingState for abort handler access
@@ -4019,6 +4023,7 @@ async function handleMessage(params: {
           cacheReadInputTokens: processingState.cacheReadInputTokens || 0,
           contextWindow: processingState.contextWindow,
           model: processingState.model,
+          maxOutputTokens: processingState.maxOutputTokens,
         };
         if (threadTs) {
           await saveThreadSession(channelId, threadTs, { lastUsage });

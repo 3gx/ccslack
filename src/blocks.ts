@@ -746,6 +746,18 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
   ];
 }
 
+// SDK auto-compact constants (from cli.js: var fC0=13000, var lP9=32000)
+const COMPACT_BUFFER = 13000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 32000;
+
+/**
+ * Compute auto-compact threshold in tokens.
+ * Formula from SDK: contextWindow - maxOutputTokens - 13000
+ */
+export function computeAutoCompactThreshold(contextWindow: number, maxOutputTokens?: number): number {
+  return contextWindow - (maxOutputTokens || DEFAULT_MAX_OUTPUT_TOKENS) - COMPACT_BUFFER;
+}
+
 /**
  * Build blocks for /context command response.
  * Shows context window usage with a visual progress bar.
@@ -758,10 +770,10 @@ export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
     : 0;
   const remaining = contextWindow - totalTokens;
 
-  // Calculate % left until auto-compact triggers (threshold ~77.5% of context)
-  const AUTOCOMPACT_THRESHOLD_PERCENT = 0.775;
+  // Calculate % left until auto-compact triggers
+  const autoCompactThreshold = computeAutoCompactThreshold(contextWindow, usage.maxOutputTokens);
   const compactPercent = contextWindow > 0
-    ? Number((((contextWindow * AUTOCOMPACT_THRESHOLD_PERCENT - totalTokens) / contextWindow) * 100).toFixed(1))
+    ? Number((((autoCompactThreshold - totalTokens) / contextWindow) * 100).toFixed(1))
     : 0;
 
   // Build visual progress bar using block characters (20 blocks total)

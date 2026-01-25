@@ -34,6 +34,7 @@ export interface LastUsage {
   cacheReadInputTokens: number;
   contextWindow: number;
   model: string;
+  maxOutputTokens?: number;  // From SDK ModelUsage - for accurate auto-compact threshold
 }
 
 export interface Session {

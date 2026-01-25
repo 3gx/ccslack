@@ -10,6 +10,7 @@ import {
   buildApprovalResultBlocks,
   buildStatusDisplayBlocks,
   buildContextDisplayBlocks,
+  computeAutoCompactThreshold,
   buildTerminalCommandBlocks,
   buildModeSelectionBlocks,
   buildModelSelectionBlocks,
@@ -555,6 +556,7 @@ describe('blocks', () => {
       cacheReadInputTokens: 49000,
       contextWindow: 200000,
       model: 'claude-sonnet-4-5',
+      maxOutputTokens: 64000,  // sonnet uses 64k output tokens
     };
 
     it('should show header with Context Usage title', () => {
@@ -613,12 +615,12 @@ describe('blocks', () => {
     });
 
     it('should show warning when compact percent <= 20%', () => {
-      // 200k * 0.775 = 155k threshold. Want ~15% compact left = 30k tokens to threshold
-      // So need 155k - 30k = 125k tokens used
+      // threshold = 200k - 64k - 13k = 123k. Want ~15% compact left = 30k tokens to threshold
+      // So need 123k - 30k = 93k tokens used
       const highUsage: LastUsage = {
         ...baseUsage,
         inputTokens: 25000,
-        cacheReadInputTokens: 100000, // 125000 / 200000 = 62.5% ctx, 15% to compact
+        cacheReadInputTokens: 68000, // 93000 total, compact% = (123k-93k)/200k = 15%
       };
       const blocks = buildContextDisplayBlocks(highUsage);
       const contextBlock = blocks.find((b: any) => b.type === 'context');
@@ -628,12 +630,12 @@ describe('blocks', () => {
     });
 
     it('should show error when compact percent <= 10%', () => {
-      // 200k * 0.775 = 155k threshold. Want ~5% compact left = 10k tokens to threshold
-      // So need 155k - 10k = 145k tokens used
+      // threshold = 200k - 64k - 13k = 123k. Want ~5% compact left = 10k tokens to threshold
+      // So need 123k - 10k = 113k tokens used
       const veryHighUsage: LastUsage = {
         ...baseUsage,
         inputTokens: 45000,
-        cacheReadInputTokens: 100000, // 145000 / 200000 = 72.5% ctx, 5% to compact
+        cacheReadInputTokens: 68000, // 113000 total, compact% = (123k-113k)/200k = 5%
       };
       const blocks = buildContextDisplayBlocks(veryHighUsage);
       const contextBlock = blocks.find((b: any) => b.type === 'context');
@@ -643,11 +645,11 @@ describe('blocks', () => {
     });
 
     it('should show imminent when past threshold', () => {
-      // 200k * 0.775 = 155k threshold. Using 160k is past threshold
+      // threshold = 200k - 64k - 13k = 123k. Using 160k is past threshold
       const pastThreshold: LastUsage = {
         ...baseUsage,
         inputTokens: 60000,
-        cacheReadInputTokens: 100000, // 160000 / 200000 = 80% ctx, -2.5% to compact
+        cacheReadInputTokens: 100000, // 160000 total, past 123k threshold
       };
       const blocks = buildContextDisplayBlocks(pastThreshold);
       const contextBlock = blocks.find((b: any) => b.type === 'context');
@@ -657,19 +659,19 @@ describe('blocks', () => {
     });
 
     it('should show auto-compact remaining percentage', () => {
-      // 200k * 0.775 = 155k threshold. 50k used = 52.5% to compact
+      // threshold = 200k - 64k - 13k = 123k. 50k used = 36.5% to compact
       const blocks = buildContextDisplayBlocks(baseUsage);
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
 
       expect(sectionBlock?.text?.text).toContain('Auto-compact:');
-      expect(sectionBlock?.text?.text).toContain('52.5% remaining'); // (155k - 50k) / 200k * 100 = 52.5%
+      expect(sectionBlock?.text?.text).toContain('36.5% remaining'); // (123k - 50k) / 200k * 100 = 36.5%
     });
 
     it('should show auto-compact imminent when past threshold', () => {
       const pastThreshold: LastUsage = {
         ...baseUsage,
         inputTokens: 60000,
-        cacheReadInputTokens: 100000, // 160k used, past 155k threshold
+        cacheReadInputTokens: 100000, // 160k used, past 123k threshold
       };
       const blocks = buildContextDisplayBlocks(pastThreshold);
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
@@ -687,6 +689,40 @@ describe('blocks', () => {
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
 
       expect(sectionBlock?.text?.text).toContain('0%');
+    });
+
+    it('should use default threshold when maxOutputTokens is not provided', () => {
+      // Without maxOutputTokens, falls back to 32k → threshold = 200k - 32k - 13k = 155k
+      const noMaxOutput: LastUsage = {
+        inputTokens: 1000,
+        outputTokens: 500,
+        cacheReadInputTokens: 49000,
+        contextWindow: 200000,
+        model: 'claude-opus-4',
+        // maxOutputTokens not set — should fall back to 32k default
+      };
+      const blocks = buildContextDisplayBlocks(noMaxOutput);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+
+      // (155k - 50k) / 200k * 100 = 52.5%
+      expect(sectionBlock?.text?.text).toContain('52.5% remaining');
+    });
+  });
+
+  describe('computeAutoCompactThreshold', () => {
+    it('should compute threshold with explicit maxOutputTokens (64k)', () => {
+      // 200000 - 64000 - 13000 = 123000
+      expect(computeAutoCompactThreshold(200000, 64000)).toBe(123000);
+    });
+
+    it('should compute threshold with default maxOutputTokens (32k)', () => {
+      // 200000 - 32000 - 13000 = 155000
+      expect(computeAutoCompactThreshold(200000)).toBe(155000);
+    });
+
+    it('should compute threshold with opus-4 maxOutputTokens (32k)', () => {
+      // 200000 - 32000 - 13000 = 155000
+      expect(computeAutoCompactThreshold(200000, 32000)).toBe(155000);
     });
   });
 
