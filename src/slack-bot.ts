@@ -2220,6 +2220,16 @@ async function showPlanApprovalUI(params: {
     toolsCompleted: number;
     startTime: number;
     activityLog: ActivityEntry[];
+    // Stats for full status line:
+    inputTokens?: number;
+    outputTokens?: number;
+    contextPercent?: number;
+    compactPercent?: number;
+    tokensToCompact?: number;
+    costUsd?: number;
+    durationMs?: number;
+    rateLimitHits?: number;
+    sessionId?: string;
   };
   session: { mode: PermissionMode };
   originalTs?: string;
@@ -2257,8 +2267,17 @@ async function showPlanApprovalUI(params: {
             mode: session.mode,
             model: processingState.model,
             toolsCompleted: processingState.toolsCompleted,
-            elapsedMs: Date.now() - processingState.startTime,
+            elapsedMs: processingState.durationMs ?? (Date.now() - processingState.startTime),
             conversationKey,
+            // Full stats (undefined fields are gracefully omitted by buildUnifiedStatusLine):
+            inputTokens: processingState.inputTokens,
+            outputTokens: processingState.outputTokens,
+            contextPercent: processingState.contextPercent,
+            compactPercent: processingState.compactPercent,
+            tokensToCompact: processingState.tokensToCompact,
+            costUsd: processingState.costUsd,
+            rateLimitHits: processingState.rateLimitHits,
+            sessionId: processingState.sessionId,
           }),
           text: 'Plan ready for review',
         })
@@ -4150,6 +4169,15 @@ async function handleMessage(params: {
           toolsCompleted: processingState.toolsCompleted,
           startTime: processingState.startTime,
           activityLog: processingState.activityLog,
+          inputTokens: processingState.inputTokens,
+          outputTokens: processingState.outputTokens,
+          contextPercent,
+          compactPercent,
+          tokensToCompact,
+          costUsd: processingState.costUsd,
+          durationMs: processingState.durationMs,
+          rateLimitHits: processingState.rateLimitHits,
+          sessionId: newSessionId || session.sessionId || undefined,
         },
         session,
         originalTs,
@@ -4195,6 +4223,25 @@ async function handleMessage(params: {
     if (isExitPlanModeInterrupt) {
       console.log('[ExitPlanMode] Detected interrupt, showing approval buttons');
 
+      // Compute context% from per-turn data + lastUsage contextWindow fallback
+      const catchPerTurnTotal = (processingState.perTurnInputTokens || 0)
+        + (processingState.perTurnCacheCreationInputTokens || 0)
+        + (processingState.perTurnCacheReadInputTokens || 0);
+      const catchContextWindow = processingState.contextWindow || session.lastUsage?.contextWindow;
+      const catchMaxOutput = processingState.maxOutputTokens || session.lastUsage?.maxOutputTokens;
+      const catchContextPercent = catchContextWindow && catchPerTurnTotal > 0
+        ? Math.min(100, Math.max(0, Number((catchPerTurnTotal / catchContextWindow * 100).toFixed(1))))
+        : undefined;
+      const catchAutoCompactThreshold = catchContextWindow
+        ? computeAutoCompactThreshold(catchContextWindow, catchMaxOutput)
+        : undefined;
+      const catchCompactPercent = catchAutoCompactThreshold && catchPerTurnTotal > 0
+        ? Math.max(0, Number(((catchAutoCompactThreshold - catchPerTurnTotal) / catchAutoCompactThreshold * 100).toFixed(1)))
+        : undefined;
+      const catchTokensToCompact = catchAutoCompactThreshold && catchPerTurnTotal > 0
+        ? Math.max(0, catchAutoCompactThreshold - catchPerTurnTotal)
+        : undefined;
+
       await showPlanApprovalUI({
         client,
         channelId,
@@ -4209,6 +4256,15 @@ async function handleMessage(params: {
           toolsCompleted: processingState.toolsCompleted,
           startTime: processingState.startTime,
           activityLog: processingState.activityLog,
+          inputTokens: processingState.inputTokens,
+          outputTokens: processingState.outputTokens,
+          contextPercent: catchContextPercent,
+          compactPercent: catchCompactPercent,
+          tokensToCompact: catchTokensToCompact,
+          costUsd: processingState.costUsd,
+          durationMs: processingState.durationMs,
+          rateLimitHits: processingState.rateLimitHits,
+          sessionId: processingState.sessionId || session.sessionId || undefined,
         },
         session,
         originalTs,

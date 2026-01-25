@@ -690,4 +690,109 @@ describe('ExitPlanMode interrupt handling', () => {
     );
     expect(approvalButtonCall).toBeUndefined();
   });
+
+  it('should include stats in status message after ExitPlanMode interrupt', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    // Setup: plan mode session with lastUsage (from prior query)
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+      lastUsage: {
+        contextWindow: 200000,
+        maxOutputTokens: 16384,
+        inputTokens: 15000,
+        outputTokens: 500,
+        cacheReadInputTokens: 5000,
+        cacheCreationInputTokens: 2000,
+        model: 'claude-sonnet',
+      },
+    });
+
+    const mockInterrupt = vi.fn();
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        // Init message with session_id
+        yield { type: 'system', subtype: 'init', session_id: 'e85b8f09-stats-test', model: 'claude-sonnet' };
+
+        // Assistant message with per-turn usage data
+        yield {
+          type: 'assistant',
+          uuid: 'asst-uuid-stats',
+          message: {
+            usage: {
+              input_tokens: 15000,
+              cache_read_input_tokens: 5000,
+              cache_creation_input_tokens: 2000,
+            },
+          },
+        };
+
+        // ExitPlanMode tool start
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', name: 'ExitPlanMode' },
+          },
+        };
+        // ExitPlanMode input JSON
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '{}' },
+          },
+        };
+        // ExitPlanMode tool end
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_stop', index: 0 },
+        };
+        // Interrupt throws
+        throw new Error('Claude process exited with code 1');
+      },
+      interrupt: mockInterrupt,
+    } as any);
+
+    await handler({
+      event: {
+        user: 'U123',
+        text: '<@BOT123> plan something',
+        channel: 'C123',
+        ts: 'msg123',
+      },
+      client: mockClient,
+    });
+
+    // Verify: status message updated with stats (via chat.update)
+    const updateCalls = mockClient.chat.update.mock.calls;
+    // Serialize all update call blocks to check for stats content
+    const allUpdateBlocks = updateCalls.map(
+      (call: any) => JSON.stringify(call[0].blocks || [])
+    ).join('\n');
+
+    // Session ID should appear in status (not n/a)
+    expect(allUpdateBlocks).toContain('e85b8f09-stats-test');
+
+    // Context % should appear (per-turn total = 15000 + 5000 + 2000 = 22000, contextWindow = 200000 → 11%)
+    expect(allUpdateBlocks).toMatch(/% ctx/);
+
+    // Verify: approval buttons still posted
+    const postCalls = mockClient.chat.postMessage.mock.calls;
+    const approvalButtonCall = postCalls.find(
+      (call: any) => call[0].text?.includes('proceed') || call[0].text?.includes('execute the plan')
+    );
+    expect(approvalButtonCall).toBeDefined();
+  });
 });
