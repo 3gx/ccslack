@@ -2822,6 +2822,44 @@ describe('blocks', () => {
         expect(abortButton).toBeDefined();
         expect(abortButton.style).toBe('danger');
       });
+
+      it('should show context% and tokens-to-compact in in-progress status line when provided', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          activityLog: entries,
+          inProgress: true,
+          sessionId: 'test-session',
+          contextPercent: 11.0,
+          compactPercent: 84.8,
+          tokensToCompact: 131500,
+        });
+
+        // Status line is blocks[2] (after activity and spinner)
+        const statusLine = (blocks[2] as any).elements[0].text;
+        expect(statusLine).toContain('% ctx');
+        expect(statusLine).toContain('11');
+        expect(statusLine).toMatch(/tok to ⚡/);
+      });
+
+      it('should omit context% in in-progress status line when not provided', () => {
+        const entries: ActivityEntry[] = [
+          { timestamp: Date.now(), type: 'starting' },
+        ];
+        const blocks = buildCombinedStatusBlocks({
+          ...baseParams,
+          activityLog: entries,
+          inProgress: true,
+          sessionId: 'test-session',
+          // no contextPercent, compactPercent, tokensToCompact
+        });
+
+        const statusLine = (blocks[2] as any).elements[0].text;
+        expect(statusLine).not.toContain('% ctx');
+        expect(statusLine).not.toMatch(/tok to ⚡/);
+      });
     });
 
     describe('completed state', () => {

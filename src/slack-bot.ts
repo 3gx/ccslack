@@ -3617,6 +3617,25 @@ async function handleMessage(params: {
 
         const elapsedMs = now - processingState.startTime;
 
+        // Compute live context% from per-turn data + session.lastUsage fallback
+        const inProgressPerTurnTotal = (processingState.perTurnInputTokens || 0)
+          + (processingState.perTurnCacheCreationInputTokens || 0)
+          + (processingState.perTurnCacheReadInputTokens || 0);
+        const inProgressContextWindow = processingState.contextWindow || session.lastUsage?.contextWindow;
+        const inProgressMaxOutput = processingState.maxOutputTokens || session.lastUsage?.maxOutputTokens;
+        const inProgressContextPercent = inProgressContextWindow && inProgressPerTurnTotal > 0
+          ? Math.min(100, Math.max(0, Number((inProgressPerTurnTotal / inProgressContextWindow * 100).toFixed(1))))
+          : undefined;
+        const inProgressAutoCompactThreshold = inProgressContextWindow
+          ? computeAutoCompactThreshold(inProgressContextWindow, inProgressMaxOutput)
+          : undefined;
+        const inProgressCompactPercent = inProgressAutoCompactThreshold && inProgressPerTurnTotal > 0
+          ? Math.max(0, Number(((inProgressAutoCompactThreshold - inProgressPerTurnTotal) / inProgressAutoCompactThreshold * 100).toFixed(1)))
+          : undefined;
+        const inProgressTokensToCompact = inProgressAutoCompactThreshold && inProgressPerTurnTotal > 0
+          ? Math.max(0, inProgressAutoCompactThreshold - inProgressPerTurnTotal)
+          : undefined;
+
         // Update combined message with CURRENT segment activity only
         // Completed segments have been posted as separate messages
         if (statusMsgTs) {
@@ -3640,6 +3659,9 @@ async function handleMessage(params: {
                     rateLimitHits: processingState.rateLimitHits,
                     sessionId: newSessionId || session.sessionId || undefined,
                     isNewSession: newSessionId !== null && session.sessionId === null,
+                    contextPercent: inProgressContextPercent,
+                    compactPercent: inProgressCompactPercent,
+                    tokensToCompact: inProgressTokensToCompact,
                   }),
                   text: 'Claude is working...',
                 }),

@@ -1830,9 +1830,9 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
           model,
           sessionId,
           isNewSession,
-          undefined,  // no contextPercent during in-progress
-          undefined,  // no compactPercent during in-progress
-          undefined,  // no tokensToCompact during in-progress
+          contextPercent,    // live context% from per-turn data + session.lastUsage fallback
+          compactPercent,    // live % remaining to auto-compact
+          tokensToCompact,   // live tokens remaining to auto-compact
           undefined,  // no inputTokens during in-progress
           undefined,  // no outputTokens during in-progress
           undefined,  // no cost during in-progress
