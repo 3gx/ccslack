@@ -554,7 +554,7 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
     };
   }
 
-  const { workingDir } = sessionFileResult;
+  const { workingDir, planFilePath } = sessionFileResult;
 
   // Determine path status
   const isNewChannel = !session?.pathConfigured;
@@ -577,6 +577,7 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
     workingDir,
     pathConfigured: true,
     configuredPath: workingDir,
+    planFilePath,
   };
 
   // Set configuredAt only for new channels

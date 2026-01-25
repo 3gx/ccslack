@@ -264,6 +264,118 @@ describe('session-reader', () => {
       expect(result).not.toBeNull();
       expect(result?.workingDir).toBe('/my/path');
     });
+
+    it('should extract planFilePath when present in assistant message', () => {
+      const sessionId = '12345678-1234-1234-1234-123456789012';
+      const userMessage = { type: 'user', uuid: 'user-uuid', cwd: '/my/project', message: { role: 'user', content: 'Hello' } };
+      const assistantMessage = {
+        type: 'assistant',
+        uuid: 'asst-uuid',
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            name: 'Write',
+            input: { file_path: '/Users/test/.claude/plans/my-plan.md', content: '# Plan' },
+          }],
+        },
+      };
+      const content = JSON.stringify(userMessage) + '\n' + JSON.stringify(assistantMessage) + '\n';
+
+      vi.mocked(fs.existsSync).mockImplementation((p: fs.PathLike) => {
+        const pathStr = p.toString();
+        if (pathStr === '/home/testuser/.claude/projects') return true;
+        if (pathStr === `/home/testuser/.claude/projects/-my-project/${sessionId}.jsonl`) return true;
+        return false;
+      });
+      vi.mocked(fs.readdirSync).mockReturnValue([
+        { name: '-my-project', isDirectory: () => true },
+      ] as unknown as fs.Dirent[]);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = findSessionFile(sessionId);
+
+      expect(result).not.toBeNull();
+      expect(result?.workingDir).toBe('/my/project');
+      expect(result?.planFilePath).toBe('/Users/test/.claude/plans/my-plan.md');
+    });
+
+    it('should return last planFilePath when multiple plans exist', () => {
+      const sessionId = '12345678-1234-1234-1234-123456789012';
+      const userMessage = { type: 'user', uuid: 'user-uuid', cwd: '/my/project', message: { role: 'user', content: 'Hello' } };
+      const assistantMessage1 = {
+        type: 'assistant',
+        uuid: 'asst-uuid-1',
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            name: 'Write',
+            input: { file_path: '/Users/test/.claude/plans/first-plan.md', content: '# First' },
+          }],
+        },
+      };
+      const assistantMessage2 = {
+        type: 'assistant',
+        uuid: 'asst-uuid-2',
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            name: 'Write',
+            input: { file_path: '/Users/test/.claude/plans/second-plan.md', content: '# Second' },
+          }],
+        },
+      };
+      const content = [userMessage, assistantMessage1, assistantMessage2].map(m => JSON.stringify(m)).join('\n') + '\n';
+
+      vi.mocked(fs.existsSync).mockImplementation((p: fs.PathLike) => {
+        const pathStr = p.toString();
+        if (pathStr === '/home/testuser/.claude/projects') return true;
+        if (pathStr === `/home/testuser/.claude/projects/-my-project/${sessionId}.jsonl`) return true;
+        return false;
+      });
+      vi.mocked(fs.readdirSync).mockReturnValue([
+        { name: '-my-project', isDirectory: () => true },
+      ] as unknown as fs.Dirent[]);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = findSessionFile(sessionId);
+
+      expect(result).not.toBeNull();
+      expect(result?.planFilePath).toBe('/Users/test/.claude/plans/second-plan.md');
+    });
+
+    it('should return null planFilePath when no plans in session', () => {
+      const sessionId = '12345678-1234-1234-1234-123456789012';
+      const userMessage = { type: 'user', uuid: 'user-uuid', cwd: '/my/project', message: { role: 'user', content: 'Hello' } };
+      const assistantMessage = {
+        type: 'assistant',
+        uuid: 'asst-uuid',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello!' }],
+        },
+      };
+      const content = JSON.stringify(userMessage) + '\n' + JSON.stringify(assistantMessage) + '\n';
+
+      vi.mocked(fs.existsSync).mockImplementation((p: fs.PathLike) => {
+        const pathStr = p.toString();
+        if (pathStr === '/home/testuser/.claude/projects') return true;
+        if (pathStr === `/home/testuser/.claude/projects/-my-project/${sessionId}.jsonl`) return true;
+        return false;
+      });
+      vi.mocked(fs.readdirSync).mockReturnValue([
+        { name: '-my-project', isDirectory: () => true },
+      ] as unknown as fs.Dirent[]);
+      vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+      const result = findSessionFile(sessionId);
+
+      expect(result).not.toBeNull();
+      expect(result?.workingDir).toBe('/my/project');
+      expect(result?.planFilePath).toBeNull();
+    });
   });
 
   describe('getFileSize', () => {

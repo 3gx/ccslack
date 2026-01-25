@@ -493,6 +493,7 @@ describe('commands', () => {
       mockFindSessionFile.mockReturnValue({
         filePath: '/home/user/.claude/projects/-tmp-project/12345678-1234-1234-1234-123456789012.jsonl',
         workingDir: '/tmp/project',
+        planFilePath: null,
       });
 
       const result = parseCommand(`/resume ${validUuid}`, mockSession);
@@ -511,6 +512,7 @@ describe('commands', () => {
       mockFindSessionFile.mockReturnValue({
         filePath: '/home/user/.claude/projects/-tmp-project/ABCDEF12-1234-5678-9ABC-DEF012345678.jsonl',
         workingDir: '/tmp/project',
+        planFilePath: null,
       });
 
       const result = parseCommand(`/resume ${validUuid}`, mockSession);
@@ -536,6 +538,7 @@ describe('commands', () => {
       mockFindSessionFile.mockReturnValue({
         filePath: '/home/user/.claude/projects/-tmp-newproject/test.jsonl',
         workingDir: '/tmp/newproject',
+        planFilePath: null,
       });
 
       const freshSession: Session = {
@@ -557,6 +560,7 @@ describe('commands', () => {
       mockFindSessionFile.mockReturnValue({
         filePath: '/home/user/.claude/projects/-tmp-newpath/test.jsonl',
         workingDir: '/tmp/newpath',
+        planFilePath: null,
       });
 
       const result = parseCommand(`/resume ${validUuid}`, mockSession);
@@ -572,6 +576,7 @@ describe('commands', () => {
       mockFindSessionFile.mockReturnValue({
         filePath: '/home/user/.claude/projects/-Users-testuser-projects-myapp/test.jsonl',
         workingDir: '/Users/testuser/projects/myapp',
+        planFilePath: null,
       });
 
       const result = parseCommand(`/resume ${validUuid}`, mockSession);
@@ -579,6 +584,34 @@ describe('commands', () => {
       expect(result.handled).toBe(true);
       expect(result.response).not.toContain('Path changed');
       expect(result.response).not.toContain('Path locked');
+    });
+
+    it('should include planFilePath in sessionUpdate when present', () => {
+      const validUuid = '12345678-1234-1234-1234-123456789012';
+      mockFindSessionFile.mockReturnValue({
+        filePath: '/home/user/.claude/projects/-tmp-project/test.jsonl',
+        workingDir: '/tmp/project',
+        planFilePath: '/Users/test/.claude/plans/my-plan.md',
+      });
+
+      const result = parseCommand(`/resume ${validUuid}`, mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.planFilePath).toBe('/Users/test/.claude/plans/my-plan.md');
+    });
+
+    it('should set planFilePath to null in sessionUpdate when no plan', () => {
+      const validUuid = '12345678-1234-1234-1234-123456789012';
+      mockFindSessionFile.mockReturnValue({
+        filePath: '/home/user/.claude/projects/-tmp-project/test.jsonl',
+        workingDir: '/tmp/project',
+        planFilePath: null,
+      });
+
+      const result = parseCommand(`/resume ${validUuid}`, mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.sessionUpdate?.planFilePath).toBeNull();
     });
   });
 

@@ -65,15 +65,16 @@ export function sessionFileExists(sessionId: string, workingDir: string): boolea
  * Find a session file by ID across all project directories.
  * Searches ~/.claude/projects/*\/{sessionId}.jsonl
  * Extracts working directory from first user message's `cwd` field.
+ * Also extracts the LAST plan file path from assistant messages.
  *
  * The `cwd` field is 100% reliable and immutable:
  * - Present in every user message entry
  * - Never changes throughout a session (even if user runs `cd` commands)
  * - Always reflects the original working directory at session creation time
  *
- * @returns Object with filePath and workingDir, or null if not found
+ * @returns Object with filePath, workingDir, and planFilePath, or null if not found
  */
-export function findSessionFile(sessionId: string): { filePath: string; workingDir: string } | null {
+export function findSessionFile(sessionId: string): { filePath: string; workingDir: string; planFilePath: string | null } | null {
   const projectsDir = path.join(os.homedir(), '.claude/projects');
 
   // Check if projects directory exists
@@ -95,21 +96,28 @@ export function findSessionFile(sessionId: string): { filePath: string; workingD
     const sessionFilePath = path.join(projectsDir, entry.name, `${sessionId}.jsonl`);
     if (!fs.existsSync(sessionFilePath)) continue;
 
-    // Found the session file - extract cwd from first user message
+    // Found the session file - extract cwd and plan file path
     try {
       const content = fs.readFileSync(sessionFilePath, 'utf-8');
       const lines = content.split('\n');
+
+      let workingDir: string | null = null;
+      let lastPlanFilePath: string | null = null;
 
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const parsed = JSON.parse(line);
-          // Find first user message with cwd field
-          if (parsed.type === 'user' && parsed.cwd) {
-            return {
-              filePath: sessionFilePath,
-              workingDir: parsed.cwd,
-            };
+
+          // Extract cwd from first user message
+          if (parsed.type === 'user' && parsed.cwd && !workingDir) {
+            workingDir = parsed.cwd;
+          }
+
+          // Track last plan file path from assistant messages
+          if (parsed.type === 'assistant') {
+            const planPath = extractPlanFilePathFromMessage(parsed);
+            if (planPath) lastPlanFilePath = planPath;
           }
         } catch {
           // Skip malformed lines
@@ -118,7 +126,13 @@ export function findSessionFile(sessionId: string): { filePath: string; workingD
       }
 
       // Session file exists but no user message with cwd found
-      return null;
+      if (!workingDir) return null;
+
+      return {
+        filePath: sessionFilePath,
+        workingDir,
+        planFilePath: lastPlanFilePath,
+      };
     } catch {
       // File read error
       return null;
