@@ -4001,7 +4001,8 @@ async function handleMessage(params: {
                   matchingEntry.toolErrorMessage = resultContent.slice(0, 500);
                 } else {
                   // Check for binary content (control chars in first 1000 bytes)
-                  const isBinary = /[\x00-\x08\x0E-\x1F]/.test(resultContent.slice(0, 1000));
+                  // Exclude \x1B (ESC) since it's used for ANSI color codes in terminal output
+                  const isBinary = /[\x00-\x08\x0E-\x1A\x1C-\x1F]/.test(resultContent.slice(0, 1000));
                   if (isBinary) {
                     matchingEntry.toolOutputPreview = '[Binary content]';
                   } else {
