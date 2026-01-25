@@ -14,7 +14,7 @@ make clean              # Remove dist/ and coverage/
 
 # Testing
 make test               # Unit + integration tests (mocked, JOBS=n for parallel)
-make sdk-test           # Live SDK tests (requires ANTHROPIC_API_KEY, JOBS=n)
+make sdk-test           # Live SDK tests (may require ANTHROPIC_API_KEY, SDKJOBS=n)
 make all-test           # All tests (unit + integration + SDK live)
 make test-watch         # Watch mode
 make test-coverage      # With coverage report
