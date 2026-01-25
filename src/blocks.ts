@@ -777,7 +777,7 @@ export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
     : 0;
 
   // Build visual progress bar using block characters (20 blocks total)
-  const filled = Math.round(percent / 5);
+  const filled = Math.min(20, Math.max(0, Math.round(percent / 5)));
   const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(20 - filled);
 
   // Determine health status

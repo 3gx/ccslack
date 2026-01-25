@@ -707,6 +707,19 @@ describe('blocks', () => {
       // (155k - 50k) / 200k * 100 = 52.5%
       expect(sectionBlock?.text?.text).toContain('52.5% remaining');
     });
+
+    it('should handle context exceeding 100% without crashing', () => {
+      const overflowUsage: LastUsage = {
+        ...baseUsage,
+        inputTokens: 150000,
+        cacheReadInputTokens: 200000, // 350k total = 175% of 200k window
+        contextWindow: 200000,
+      };
+      const blocks = buildContextDisplayBlocks(overflowUsage);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+      expect(sectionBlock?.text?.text).toContain('175%');
+      expect(sectionBlock?.text?.text).toContain('\u2588'.repeat(20));
+    });
   });
 
   describe('computeAutoCompactThreshold', () => {
