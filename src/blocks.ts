@@ -1387,6 +1387,8 @@ export interface ActivityEntry {
   toolOutputTruncated?: boolean;     // True if output was truncated
   toolIsError?: boolean;             // True if tool returned error
   toolErrorMessage?: string;         // Error message if failed
+  // Bidirectional permalink
+  userInputPermalink?: string;       // Link back to user's original message
 }
 
 // Constants for activity log display
@@ -2204,7 +2206,10 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
   for (const entry of displayEntries) {
     switch (entry.type) {
       case 'starting':
-        lines.push(':brain: *Analyzing request...*');
+        const inputLink = entry.userInputPermalink
+          ? ` <${entry.userInputPermalink}|:leftwards_arrow_with_hook:>`
+          : '';
+        lines.push(`:brain: *Analyzing request...*${inputLink}`);
         break;
       case 'thinking':
         // Show thinking content - rolling window for in-progress, truncated for complete
@@ -2465,7 +2470,10 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
   for (const entry of entries) {
     switch (entry.type) {
       case 'starting':
-        lines.push(':brain: *Analyzing request...*');
+        const startInputLink = entry.userInputPermalink
+          ? ` <${entry.userInputPermalink}|:leftwards_arrow_with_hook:>`
+          : '';
+        lines.push(`:brain: *Analyzing request...*${startInputLink}`);
         break;
       case 'tool_start':
         // Only show tool_start if tool hasn't completed yet

@@ -2986,6 +2986,35 @@ async function handleMessage(params: {
     });
   }
 
+  // Fetch permalink to user's original message for back-navigation in activity log header
+  if (originalTs) {
+    getMessagePermalink(client, channelId, originalTs).then(userInputPermalink => {
+      // Update the 'starting' entry with the permalink
+      const startingEntry = processingState.activityLog.find(e => e.type === 'starting');
+      if (startingEntry) {
+        startingEntry.userInputPermalink = userInputPermalink;
+      }
+    }).catch(error => {
+      console.error('[Permalink] Failed to get user input permalink:', error);
+    });
+  }
+
+  // Post thread reply to user's message with link to bot's response
+  if (statusMsgTs && originalTs) {
+    getMessagePermalink(client, channelId, statusMsgTs).then(async (botResponsePermalink) => {
+      await withSlackRetry(() =>
+        client.chat.postMessage({
+          channel: channelId,
+          thread_ts: originalTs,  // Reply to user's original message
+          text: `_Response: <${botResponsePermalink}|view>_`,
+        })
+      );
+      console.log(`[Permalink] Posted back-link to user message ${originalTs}`);
+    }).catch(error => {
+      console.error('[Permalink] Failed to post back-link:', error);
+    });
+  }
+
   // Spinner timer - declared outside try block so it can be cleaned up in finally
   let spinnerTimer: NodeJS.Timeout | undefined;
 
