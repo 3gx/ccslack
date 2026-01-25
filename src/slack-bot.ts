@@ -3729,6 +3729,8 @@ async function handleMessage(params: {
         const metadata = (msg as any).compact_metadata;
         processingState.compactPreTokens = metadata?.pre_tokens ?? null;
         console.log(`[AutoCompact] Boundary - pre_tokens: ${processingState.compactPreTokens}`);
+        // Update ⚙️ → 🏁 immediately (line 3938 call becomes no-op via guard)
+        await handleCompactionEnd(client, channelId, processingState, handleRateLimit);
       }
 
       // Handle stream_event for real-time activity tracking

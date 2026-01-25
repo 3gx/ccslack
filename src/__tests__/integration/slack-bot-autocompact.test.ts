@@ -319,7 +319,7 @@ describe('auto-compact notification', () => {
     expect(checkeredFlagCalls[0][0].text).toMatch(/\d+\.\d+s/);
   });
 
-  it('should detect completion only on result message (not stream_event)', async () => {
+  it('should detect completion exactly once (not on every stream_event)', async () => {
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
 
@@ -342,7 +342,7 @@ describe('auto-compact notification', () => {
     });
 
     // SDK emits: status:compacting → compact_boundary → stream_event → result
-    // Completion should NOT trigger on stream_event
+    // Completion fires on compact_boundary; stream_events and result do not re-trigger it
     vi.mocked(startClaudeQuery).mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
         yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
@@ -362,7 +362,7 @@ describe('auto-compact notification', () => {
       client: mockClient,
     });
 
-    // Completion should be called exactly once (on result, not on stream_events)
+    // Completion should be called exactly once (on compact_boundary, not on stream_events)
     // Filter for completion calls that update the auto-compact message
     const checkeredFlagCalls = mockClient.chat.update.mock.calls.filter(
       (call: any[]) => call[0]?.ts === autoCompactMsgTs && call[0]?.text?.includes(':checkered_flag:')
@@ -422,9 +422,8 @@ describe('auto-compact notification', () => {
   });
 
   it('should send checkered_flag update after timer is stopped (race-free)', async () => {
-    // This test verifies the robust fix:
-    // The checkered_flag update is sent AFTER the timer is cleared,
-    // so there's no possibility of the timer overwriting it
+    // The checkered_flag update fires on compact_boundary (before timer could interfere),
+    // and the timer only operates on statusMsgTs, never compactMsgTs
     const handler = registeredHandlers['event_app_mention'];
     const mockClient = createMockSlackClient();
 
@@ -588,5 +587,70 @@ describe('auto-compact notification', () => {
     expect(lastUpdate).toBeDefined();
     expect(lastUpdate.text).toContain(':checkered_flag:');
     expect(lastUpdate.text).toContain('200,000 tokens');
+  });
+
+  it('should update checkered_flag immediately on compact_boundary (not wait for result)', async () => {
+    // Verifies that checkered_flag fires at compact_boundary time, not at query end.
+    // The wait(100) gap between compact_boundary and subsequent events proves the
+    // update happened before the rest of the query continued.
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'existing-session',
+      workingDir: '/test/dir',
+      mode: 'default',
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    const autoCompactMsgTs = 'autocompact-immediate';
+    mockClient.chat.postMessage.mockImplementation(async (params: any) => {
+      if (params.text?.includes('Auto-compacting context')) {
+        return { ts: autoCompactMsgTs, channel: 'C123' };
+      }
+      return { ts: 'msg123', channel: 'C123' };
+    });
+
+    // Track all updates to the compact message in order
+    const compactUpdates: { text: string; order: number }[] = [];
+    let updateCounter = 0;
+    mockClient.chat.update.mockImplementation(async (params: any) => {
+      updateCounter++;
+      if (params.ts === autoCompactMsgTs) {
+        compactUpdates.push({ text: params.text, order: updateCounter });
+      }
+      return { ok: true };
+    });
+
+    const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'session-123', model: 'claude-sonnet' };
+        yield { type: 'system', subtype: 'status', status: 'compacting' };  // START
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 120000 } };  // END - should trigger checkered_flag here
+        // Gap to prove checkered_flag happened before these events
+        await wait(100);
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } } };
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } } };
+        yield { type: 'result', result: 'Hello' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg123' },
+      client: mockClient,
+    });
+
+    // checkered_flag should have fired exactly once
+    expect(compactUpdates.length).toBe(1);
+    expect(compactUpdates[0].text).toContain(':checkered_flag:');
+    expect(compactUpdates[0].text).toContain('120,000 tokens');
+    // No further updates to compact message after checkered_flag
+    // (the result-time handleCompactionEnd is a no-op since fields are cleared)
   });
 });
