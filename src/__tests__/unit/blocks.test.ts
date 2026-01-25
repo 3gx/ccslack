@@ -2767,6 +2767,48 @@ describe('blocks', () => {
       const linkCount = (text.match(/:leftwards_arrow_with_hook:/g) || []).length;
       expect(linkCount).toBe(1);
     });
+
+    it('should keep permalink at top even when maxChars truncation kicks in', () => {
+      // Create entries that will exceed maxChars limit
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting', userInputPermalink: 'https://slack.com/archives/C123/p8888' },
+      ];
+      // Add enough tool entries to exceed 300 chars
+      for (let i = 0; i < 20; i++) {
+        entries.push({ timestamp: Date.now(), type: 'tool_complete', tool: `LongToolName${i}`, durationMs: 100 });
+      }
+      // Use a small maxChars to trigger truncation
+      const text = buildActivityLogText(entries, true, 300);
+      // Permalink should STILL be at the very top, even after maxChars truncation
+      expect(text.startsWith('<https://slack.com/archives/C123/p8888|:leftwards_arrow_with_hook:>')).toBe(true);
+      // Should show truncation indicator
+      expect(text).toContain('...');
+      // Should show recent tools
+      expect(text).toContain('LongToolName19');
+    });
+
+    it('should keep permalink at top with ACTIVITY_LOG_MAX_CHARS (1000)', () => {
+      // Simulate realistic scenario with many tool completions
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting', userInputPermalink: 'https://slack.com/archives/C123/p7777' },
+      ];
+      // Add many entries with long output hints to exceed 1000 chars
+      for (let i = 0; i < 30; i++) {
+        entries.push({
+          timestamp: Date.now(),
+          type: 'tool_complete',
+          tool: 'Read',
+          durationMs: 100,
+          toolOutputPreview: 'This is a long output preview that takes up space in the activity log display',
+        });
+      }
+      // Use ACTIVITY_LOG_MAX_CHARS (1000) as the limit
+      const text = buildActivityLogText(entries, true, 1000);
+      // Permalink should STILL be at the very top
+      expect(text.startsWith('<https://slack.com/archives/C123/p7777|:leftwards_arrow_with_hook:>')).toBe(true);
+      // Total length should not exceed maxChars
+      expect(text.length).toBeLessThanOrEqual(1000);
+    });
   });
 
   describe('buildCombinedStatusBlocks', () => {

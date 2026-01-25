@@ -2326,17 +2326,32 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
     lines.push(':brain: Analyzing request...');
   }
 
+  // Extract permalink line (if present) before joining - it must always stay at top
+  let permalinkLine: string | null = null;
+  if (startingEntry?.userInputPermalink && lines.length > 0 && lines[0].includes(':leftwards_arrow_with_hook:')) {
+    permalinkLine = lines.shift() || null;
+  }
+
   let result = lines.join('\n');
 
   // Truncate from start if exceeds maxChars (keep most recent)
-  if (result.length > maxChars) {
-    const excess = result.length - maxChars + 50; // Room for "..." prefix
+  // Account for permalink line length when calculating available space
+  const permalinkLength = permalinkLine ? permalinkLine.length + 1 : 0; // +1 for newline
+  const availableChars = maxChars - permalinkLength;
+
+  if (result.length > availableChars) {
+    const excess = result.length - availableChars + 50; // Room for "..." prefix
     const breakPoint = result.indexOf('\n', excess);
     if (breakPoint > 0) {
       result = '...\n' + result.substring(breakPoint + 1);
     } else {
-      result = '...' + result.substring(result.length - maxChars + 3);
+      result = '...' + result.substring(result.length - availableChars + 3);
     }
+  }
+
+  // Prepend permalink line back at top (always visible)
+  if (permalinkLine) {
+    result = permalinkLine + '\n' + result;
   }
 
   return result;
