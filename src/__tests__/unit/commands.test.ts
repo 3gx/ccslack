@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { parseCommand } from '../../commands.js';
 import { Session } from '../../session-manager.js';
 
+// Mock session-reader for /resume tests
+vi.mock('../../session-reader.js', () => ({
+  findSessionFile: vi.fn(),
+}));
+
+import { findSessionFile } from '../../session-reader.js';
+
 describe('commands', () => {
   // Default test session
   const mockSession: Session = {
@@ -459,6 +466,12 @@ describe('commands', () => {
   });
 
   describe('/resume', () => {
+    const mockFindSessionFile = findSessionFile as ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      mockFindSessionFile.mockReset();
+    });
+
     it('should show usage when no session ID provided', () => {
       const result = parseCommand('/resume', mockSession);
 
@@ -471,24 +484,101 @@ describe('commands', () => {
       const result = parseCommand('/resume invalid-id', mockSession);
 
       expect(result.handled).toBe(true);
+      expect(result.response).toContain(':x:');
       expect(result.response).toContain('Invalid session ID format');
     });
 
-    it('should accept valid UUID session ID', () => {
+    it('should accept valid UUID and sync working directory', () => {
       const validUuid = '12345678-1234-1234-1234-123456789012';
+      mockFindSessionFile.mockReturnValue({
+        filePath: '/home/user/.claude/projects/-tmp-project/12345678-1234-1234-1234-123456789012.jsonl',
+        workingDir: '/tmp/project',
+      });
+
       const result = parseCommand(`/resume ${validUuid}`, mockSession);
 
       expect(result.handled).toBe(true);
       expect(result.response).toContain('Resuming session');
-      expect(result.sessionUpdate).toEqual({ sessionId: validUuid });
+      expect(result.response).toContain('/tmp/project');
+      expect(result.sessionUpdate?.sessionId).toBe(validUuid);
+      expect(result.sessionUpdate?.workingDir).toBe('/tmp/project');
+      expect(result.sessionUpdate?.pathConfigured).toBe(true);
+      expect(result.sessionUpdate?.configuredPath).toBe('/tmp/project');
     });
 
     it('should accept uppercase UUID', () => {
       const validUuid = 'ABCDEF12-1234-5678-9ABC-DEF012345678';
+      mockFindSessionFile.mockReturnValue({
+        filePath: '/home/user/.claude/projects/-tmp-project/ABCDEF12-1234-5678-9ABC-DEF012345678.jsonl',
+        workingDir: '/tmp/project',
+      });
+
       const result = parseCommand(`/resume ${validUuid}`, mockSession);
 
       expect(result.handled).toBe(true);
       expect(result.sessionUpdate?.sessionId).toBe(validUuid);
+    });
+
+    it('should return error when session file not found', () => {
+      const validUuid = '12345678-1234-1234-1234-123456789012';
+      mockFindSessionFile.mockReturnValue(null);
+
+      const result = parseCommand(`/resume ${validUuid}`, mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain(':x:');
+      expect(result.response).toContain('Session file not found');
+      expect(result.sessionUpdate).toBeUndefined();
+    });
+
+    it('should show path locked message for fresh channel', () => {
+      const validUuid = '12345678-1234-1234-1234-123456789012';
+      mockFindSessionFile.mockReturnValue({
+        filePath: '/home/user/.claude/projects/-tmp-newproject/test.jsonl',
+        workingDir: '/tmp/newproject',
+      });
+
+      const freshSession: Session = {
+        ...mockSession,
+        pathConfigured: false,
+        configuredPath: null,
+      };
+
+      const result = parseCommand(`/resume ${validUuid}`, freshSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Path locked to');
+      expect(result.response).toContain('/tmp/newproject');
+      expect(result.sessionUpdate?.configuredAt).toBeDefined();
+    });
+
+    it('should show path changed message when path differs', () => {
+      const validUuid = '12345678-1234-1234-1234-123456789012';
+      mockFindSessionFile.mockReturnValue({
+        filePath: '/home/user/.claude/projects/-tmp-newpath/test.jsonl',
+        workingDir: '/tmp/newpath',
+      });
+
+      const result = parseCommand(`/resume ${validUuid}`, mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).toContain('Path changed from');
+      expect(result.response).toContain(mockSession.configuredPath);
+      expect(result.response).toContain('/tmp/newpath');
+    });
+
+    it('should not show path changed when paths match', () => {
+      const validUuid = '12345678-1234-1234-1234-123456789012';
+      mockFindSessionFile.mockReturnValue({
+        filePath: '/home/user/.claude/projects/-Users-testuser-projects-myapp/test.jsonl',
+        workingDir: '/Users/testuser/projects/myapp',
+      });
+
+      const result = parseCommand(`/resume ${validUuid}`, mockSession);
+
+      expect(result.handled).toBe(true);
+      expect(result.response).not.toContain('Path changed');
+      expect(result.response).not.toContain('Path locked');
     });
   });
 

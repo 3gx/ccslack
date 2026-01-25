@@ -14,6 +14,7 @@ import {
   buildContextDisplayBlocks,
   buildWatchingStatusSection,
 } from './blocks.js';
+import { findSessionFile } from './session-reader.js';
 
 // Extended thinking token limits
 const THINKING_TOKENS_MIN = 1024;
@@ -101,7 +102,7 @@ export function parseCommand(
     case 'fork':
       return handleFork(session);
     case 'resume':
-      return handleResume(argString);
+      return handleResume(argString, session);
     case 'wait':
       return handleWait(argString);
     case 'model':
@@ -524,8 +525,9 @@ function handleFork(session: Session): CommandResult {
 
 /**
  * /resume <session-id> - Resume a terminal session in Slack
+ * Auto-syncs working directory from session file and locks path.
  */
-function handleResume(sessionId: string): CommandResult {
+function handleResume(sessionId: string, session: Session | null): CommandResult {
   if (!sessionId) {
     return {
       handled: true,
@@ -539,14 +541,53 @@ function handleResume(sessionId: string): CommandResult {
   if (!uuidPattern.test(sessionId)) {
     return {
       handled: true,
-      response: `Invalid session ID format: \`${sessionId}\``,
+      response: `:x: Invalid session ID format: \`${sessionId}\``,
     };
+  }
+
+  // Find session file and extract working directory
+  const sessionFileResult = findSessionFile(sessionId);
+  if (!sessionFileResult) {
+    return {
+      handled: true,
+      response: `:x: Session file not found for \`${sessionId}\`\n\nThe session may have been created on a different machine.`,
+    };
+  }
+
+  const { workingDir } = sessionFileResult;
+
+  // Determine path status
+  const isNewChannel = !session?.pathConfigured;
+  const pathChanged = session?.pathConfigured && session.configuredPath !== workingDir;
+
+  // Build response message
+  let response = `Resuming session \`${sessionId}\` in \`${workingDir}\`\n`;
+
+  if (isNewChannel) {
+    response += `Path locked to \`${workingDir}\`\n`;
+  } else if (pathChanged) {
+    response += `Path changed from \`${session.configuredPath}\` to \`${workingDir}\`\n`;
+  }
+
+  response += '\nYour next message will continue this session.';
+
+  // Build session update
+  const sessionUpdate: Partial<Session> = {
+    sessionId,
+    workingDir,
+    pathConfigured: true,
+    configuredPath: workingDir,
+  };
+
+  // Set configuredAt only for new channels
+  if (isNewChannel) {
+    sessionUpdate.configuredAt = Date.now();
   }
 
   return {
     handled: true,
-    response: `Resuming session \`${sessionId}\`\n\nYour next message will continue this session.`,
-    sessionUpdate: { sessionId },
+    response,
+    sessionUpdate,
   };
 }
 
