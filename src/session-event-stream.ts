@@ -484,6 +484,24 @@ export interface ActivityEntry {
   generatingInProgress?: boolean;
   generatingContent?: string;   // Full response text (stored for modal/download)
   generatingTruncated?: string; // First 500 chars (for live display)
+  // Tool input (populated at content_block_stop)
+  toolInput?: Record<string, unknown>;
+  toolUseId?: string;           // For matching with tool_result
+  // Result metrics (populated when user message with tool_result arrives)
+  lineCount?: number;           // Read/Write: lines in result/content
+  matchCount?: number;          // Grep/Glob: number of matches/files
+  linesAdded?: number;          // Edit: lines in new_string
+  linesRemoved?: number;        // Edit: lines in old_string
+  // Execution timing (for accurate duration display)
+  toolCompleteTimestamp?: number;    // When content_block_stop fired
+  toolResultTimestamp?: number;      // When tool_result arrived
+  executionDurationMs?: number;      // Actual execution time
+  // Tool output (populated when tool_result arrives)
+  toolOutput?: string;               // Full output (up to 50KB)
+  toolOutputPreview?: string;        // First 300 chars for display
+  toolOutputTruncated?: boolean;     // True if output was truncated
+  toolIsError?: boolean;             // True if tool returned error
+  toolErrorMessage?: string;         // Error message if failed
 }
 
 /**

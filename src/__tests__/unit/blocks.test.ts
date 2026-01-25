@@ -28,6 +28,7 @@ import {
   formatToolInputSummary,
   formatToolResultSummary,
   formatToolDetails,
+  formatOutputPreview,
   ActivityEntry,
   ACTIVITY_LOG_MAX_CHARS,
   buildStopWatchingButton,
@@ -4275,6 +4276,103 @@ describe('blocks', () => {
       });
       expect(details.length).toBeGreaterThanOrEqual(2);
       expect(details).toContain('Duration: 1.0s');
+    });
+
+    it('should include output preview', () => {
+      const details = formatToolDetails({
+        timestamp: Date.now(),
+        type: 'tool_complete',
+        tool: 'Bash',
+        toolOutputPreview: 'test output',
+        durationMs: 1000,
+      });
+      expect(details.some(d => d.includes('Output:'))).toBe(true);
+    });
+
+    it('should show error for failed tools', () => {
+      const details = formatToolDetails({
+        timestamp: Date.now(),
+        type: 'tool_complete',
+        tool: 'Bash',
+        toolIsError: true,
+        toolErrorMessage: 'Command failed',
+        durationMs: 100,
+      });
+      expect(details.some(d => d.includes('Error:'))).toBe(true);
+      expect(details.some(d => d.includes('Command failed'))).toBe(true);
+    });
+
+    it('should not show output when tool has error', () => {
+      const details = formatToolDetails({
+        timestamp: Date.now(),
+        type: 'tool_complete',
+        tool: 'Bash',
+        toolIsError: true,
+        toolErrorMessage: 'Command failed',
+        toolOutputPreview: 'some output',  // Should not appear
+        durationMs: 100,
+      });
+      expect(details.some(d => d.includes('Error:'))).toBe(true);
+      expect(details.some(d => d.includes('Output:'))).toBe(false);
+    });
+  });
+
+  describe('formatOutputPreview', () => {
+    it('should format bash output', () => {
+      const result = formatOutputPreview('bash', 'test output');
+      expect(result).toBe('`test output`');
+    });
+
+    it('should truncate long bash output', () => {
+      const long = 'x'.repeat(200);
+      const result = formatOutputPreview('bash', long);
+      expect(result).toContain('...');
+      expect(result.length).toBeLessThan(200);
+    });
+
+    it('should format grep matches', () => {
+      const result = formatOutputPreview('grep', 'file1.ts\nfile2.ts');
+      expect(result).toContain('file1.ts');
+      expect(result).toContain('file2.ts');
+    });
+
+    it('should format glob matches', () => {
+      const result = formatOutputPreview('glob', 'src/a.ts\nsrc/b.ts\nsrc/c.ts');
+      expect(result).toContain('src/a.ts');
+      expect(result).toContain('src/b.ts');
+      expect(result).toContain('src/c.ts');
+    });
+
+    it('should format read output', () => {
+      const result = formatOutputPreview('read', 'file content here');
+      expect(result).toBe('`file content here`');
+    });
+
+    it('should truncate long read output', () => {
+      const long = 'x'.repeat(150);
+      const result = formatOutputPreview('read', long);
+      expect(result).toContain('...');
+      expect(result.length).toBeLessThan(150);
+    });
+
+    it('should handle unknown tools with default formatting', () => {
+      const result = formatOutputPreview('unknown', 'some output');
+      expect(result).toBe('some output');
+    });
+
+    it('should return empty string for empty preview', () => {
+      const result = formatOutputPreview('bash', '');
+      expect(result).toBe('');
+    });
+
+    it('should return empty string for whitespace only', () => {
+      const result = formatOutputPreview('bash', '   \n\t  ');
+      expect(result).toBe('');
+    });
+
+    it('should clean control characters', () => {
+      const result = formatOutputPreview('bash', 'hello\x00world');
+      expect(result).not.toContain('\x00');
     });
   });
 

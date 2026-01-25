@@ -1377,6 +1377,16 @@ export interface ActivityEntry {
   matchCount?: number;          // Grep/Glob: number of matches/files
   linesAdded?: number;          // Edit: lines in new_string
   linesRemoved?: number;        // Edit: lines in old_string
+  // Execution timing (for accurate duration display)
+  toolCompleteTimestamp?: number;    // When content_block_stop fired
+  toolResultTimestamp?: number;      // When tool_result arrived
+  executionDurationMs?: number;      // Actual execution time
+  // Tool output (populated when tool_result arrives)
+  toolOutput?: string;               // Full output (up to 50KB)
+  toolOutputPreview?: string;        // First 300 chars for display
+  toolOutputTruncated?: boolean;     // True if output was truncated
+  toolIsError?: boolean;             // True if tool returned error
+  toolErrorMessage?: string;         // Error message if failed
 }
 
 // Constants for activity log display
@@ -1596,11 +1606,43 @@ export function formatToolDetails(entry: ActivityEntry): string[] {
     }
   }
 
+  // Add output preview or error message before duration
+  if (entry.toolIsError) {
+    details.push(`:warning: Error: ${entry.toolErrorMessage?.slice(0, 100) || 'Unknown error'}`);
+  } else if (entry.toolOutputPreview) {
+    const outputPreview = formatOutputPreview(tool, entry.toolOutputPreview);
+    if (outputPreview) {
+      details.push(`Output: ${outputPreview}`);
+    }
+  }
+
   if (entry.durationMs !== undefined) {
     details.push(`Duration: ${(entry.durationMs / 1000).toFixed(1)}s`);
   }
 
   return details;
+}
+
+/**
+ * Format tool output preview for display.
+ * Handles different tool types with appropriate formatting.
+ */
+export function formatOutputPreview(tool: string, preview: string): string {
+  const cleaned = preview.replace(/[\x00-\x1F\x7F]/g, '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+
+  switch (tool) {
+    case 'bash':
+      return `\`${cleaned.slice(0, 150)}\`${cleaned.length > 150 ? '...' : ''}`;
+    case 'grep':
+    case 'glob':
+      const matches = preview.split('\n').filter(l => l.trim()).slice(0, 3);
+      return matches.length ? matches.map(m => `\`${m.slice(0, 50)}\``).join(', ') : 'No matches';
+    case 'read':
+      return `\`${cleaned.slice(0, 100)}\`${cleaned.length > 100 ? '...' : ''}`;
+    default:
+      return cleaned.length > 100 ? cleaned.slice(0, 100) + '...' : cleaned;
+  }
 }
 
 /**
@@ -2216,11 +2258,16 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
         }
         break;
       case 'tool_complete':
-        // Show completed tool with checkmark, input summary, result metrics, and duration
+        // Show completed tool with checkmark, input summary, result metrics, output hint, and duration
         const tcInputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
         const resultSummary = formatToolResultSummary(entry);
         const tcDuration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-        lines.push(`:white_check_mark: *${formatToolName(entry.tool || 'Unknown')}*${tcInputSummary}${resultSummary}${tcDuration}`);
+        const errorFlag = entry.toolIsError ? ' :warning:' : '';
+        // Add compact output hint for main channel (first 50 chars)
+        const outputHint = (!entry.toolIsError && entry.toolOutputPreview)
+          ? ` → \`${entry.toolOutputPreview.replace(/\s+/g, ' ').slice(0, 50)}${entry.toolOutputPreview.length > 50 ? '...' : ''}\``
+          : '';
+        lines.push(`:white_check_mark: *${formatToolName(entry.tool || 'Unknown')}*${tcInputSummary}${resultSummary}${outputHint}${tcDuration}${errorFlag}`);
         break;
       case 'error':
         lines.push(`:x: Error: ${entry.message}`);

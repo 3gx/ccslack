@@ -3593,6 +3593,7 @@ async function handleMessage(params: {
           linesAdded,      // Pre-computed for Edit
           linesRemoved,    // Pre-computed for Edit
           lineCount,       // Pre-computed for Write
+          toolCompleteTimestamp: Date.now(),  // For accurate execution time calculation
         };
 
         // Also update tool_start entry for in-progress display
@@ -3974,9 +3975,11 @@ async function handleMessage(params: {
         const userMsg = msg as any;
         if (Array.isArray(userMsg.message?.content)) {
           for (const block of userMsg.message.content) {
-            if (block.type === 'tool_result' && !block.is_error) {
+            // Process ALL tool_result blocks (both success and error)
+            if (block.type === 'tool_result') {
               const resultContent = typeof block.content === 'string' ? block.content : '';
               const toolUseId = block.tool_use_id;
+              const isError = block.is_error === true;
 
               // Find matching tool_complete entry by tool_use_id
               const matchingEntry = [...processingState.activityLog]
@@ -3984,17 +3987,52 @@ async function handleMessage(params: {
                 .find(e => e.type === 'tool_complete' && e.toolUseId === toolUseId);
 
               if (matchingEntry) {
-                // Extract metrics based on tool type
-                const toolName = (matchingEntry.tool || '').toLowerCase();
-
-                if (toolName === 'read') {
-                  matchingEntry.lineCount = resultContent.split('\n').filter((l: string) => l.length > 0).length;
-                } else if (toolName === 'grep' || toolName === 'glob') {
-                  matchingEntry.matchCount = resultContent.split('\n').filter((l: string) => l.length > 0).length;
+                // Calculate actual execution time (from content_block_stop to tool_result)
+                const resultTimestamp = Date.now();
+                matchingEntry.toolResultTimestamp = resultTimestamp;
+                if (matchingEntry.toolCompleteTimestamp) {
+                  matchingEntry.executionDurationMs = resultTimestamp - matchingEntry.toolCompleteTimestamp;
+                  matchingEntry.durationMs = matchingEntry.executionDurationMs;  // Update displayed duration
                 }
-                // Edit/Write metrics already computed from input in logToolComplete
 
-                console.log(`[Activity] Tool result for ${matchingEntry.tool}: lineCount=${matchingEntry.lineCount}, matchCount=${matchingEntry.matchCount}`);
+                // Handle error vs success cases
+                if (isError) {
+                  matchingEntry.toolIsError = true;
+                  matchingEntry.toolErrorMessage = resultContent.slice(0, 500);
+                } else {
+                  // Check for binary content (control chars in first 1000 bytes)
+                  const isBinary = /[\x00-\x08\x0E-\x1F]/.test(resultContent.slice(0, 1000));
+                  if (isBinary) {
+                    matchingEntry.toolOutputPreview = '[Binary content]';
+                  } else {
+                    const MAX_FULL = 50 * 1024;  // 50KB
+                    const PREVIEW_LEN = 300;
+
+                    matchingEntry.toolOutput = resultContent.slice(0, MAX_FULL);
+                    matchingEntry.toolOutputTruncated = resultContent.length > MAX_FULL;
+
+                    // Handle empty output
+                    if (resultContent.length === 0) {
+                      matchingEntry.toolOutputPreview = '[No output]';
+                    } else {
+                      matchingEntry.toolOutputPreview = resultContent.slice(0, PREVIEW_LEN);
+                      if (resultContent.length > PREVIEW_LEN) {
+                        matchingEntry.toolOutputPreview += '...';
+                      }
+                    }
+                  }
+
+                  // Extract metrics based on tool type (only for successful results)
+                  const toolName = (matchingEntry.tool || '').toLowerCase();
+                  if (toolName === 'read') {
+                    matchingEntry.lineCount = resultContent.split('\n').filter((l: string) => l.length > 0).length;
+                  } else if (toolName === 'grep' || toolName === 'glob') {
+                    matchingEntry.matchCount = resultContent.split('\n').filter((l: string) => l.length > 0).length;
+                  }
+                  // Edit/Write metrics already computed from input in logToolComplete
+                }
+
+                console.log(`[Activity] Tool result for ${matchingEntry.tool}: isError=${isError}, durationMs=${matchingEntry.durationMs}, lineCount=${matchingEntry.lineCount}, matchCount=${matchingEntry.matchCount}`);
 
                 // Update already-posted thread batch if this tool was in it (race condition fix)
                 if (toolUseId && processingState.postedBatchToolUseIds?.has(toolUseId)) {
