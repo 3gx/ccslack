@@ -30,6 +30,7 @@ import {
   buildStopWatchingButton,
   buildWatchingStatusSection,
   buildUnifiedStatusLine,
+  formatTokensK,
   buildForkToChannelModalView,
   buildAbortConfirmationModalView,
   formatThreadActivityBatch,
@@ -617,12 +618,12 @@ describe('blocks', () => {
     });
 
     it('should show warning when compact percent <= 20%', () => {
-      // threshold = 200k - 64k - 13k = 123k. Want ~15% compact left = 30k tokens to threshold
-      // So need 123k - 30k = 93k tokens used
+      // threshold = 200k - 32k(capped) - 13k = 155k. Want ~15% compact left
+      // (155k - 132k) / 155k * 100 = 14.8%
       const highUsage: LastUsage = {
         ...baseUsage,
-        inputTokens: 25000,
-        cacheReadInputTokens: 68000, // 93000 total, compact% = (123k-93k)/200k = 15%
+        inputTokens: 64000,
+        cacheReadInputTokens: 68000, // 132k total, compact% = (155k-132k)/155k = 14.8%
       };
       const blocks = buildContextDisplayBlocks(highUsage);
       const contextBlock = blocks.find((b: any) => b.type === 'context');
@@ -632,12 +633,12 @@ describe('blocks', () => {
     });
 
     it('should show error when compact percent <= 10%', () => {
-      // threshold = 200k - 64k - 13k = 123k. Want ~5% compact left = 10k tokens to threshold
-      // So need 123k - 10k = 113k tokens used
+      // threshold = 200k - 32k(capped) - 13k = 155k. Want ~5% compact left
+      // (155k - 148k) / 155k * 100 = 4.5%
       const veryHighUsage: LastUsage = {
         ...baseUsage,
-        inputTokens: 45000,
-        cacheReadInputTokens: 68000, // 113000 total, compact% = (123k-113k)/200k = 5%
+        inputTokens: 80000,
+        cacheReadInputTokens: 68000, // 148k total, compact% = (155k-148k)/155k = 4.5%
       };
       const blocks = buildContextDisplayBlocks(veryHighUsage);
       const contextBlock = blocks.find((b: any) => b.type === 'context');
@@ -647,11 +648,11 @@ describe('blocks', () => {
     });
 
     it('should show imminent when past threshold', () => {
-      // threshold = 200k - 64k - 13k = 123k. Using 160k is past threshold
+      // threshold = 200k - 32k(capped) - 13k = 155k. Using 160k is past threshold
       const pastThreshold: LastUsage = {
         ...baseUsage,
         inputTokens: 60000,
-        cacheReadInputTokens: 100000, // 160000 total, past 123k threshold
+        cacheReadInputTokens: 100000, // 160k total, past 155k threshold
       };
       const blocks = buildContextDisplayBlocks(pastThreshold);
       const contextBlock = blocks.find((b: any) => b.type === 'context');
@@ -660,20 +661,22 @@ describe('blocks', () => {
       expect(contextBlock?.elements?.[0]?.text).toContain('imminent');
     });
 
-    it('should show auto-compact remaining percentage', () => {
-      // threshold = 200k - 64k - 13k = 123k. 50k used = 36.5% to compact
+    it('should show auto-compact remaining percentage with tokens', () => {
+      // threshold = 200k - 32k(capped) - 13k = 155k. 50k used
+      // CLI formula: (155k - 50k) / 155k * 100 = 67.7%
+      // tokensToCompact = 105k
       const blocks = buildContextDisplayBlocks(baseUsage);
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
 
       expect(sectionBlock?.text?.text).toContain('Auto-compact:');
-      expect(sectionBlock?.text?.text).toContain('36.5% remaining'); // (123k - 50k) / 200k * 100 = 36.5%
+      expect(sectionBlock?.text?.text).toContain('67.7% remaining (105.0k tok)');
     });
 
     it('should show auto-compact imminent when past threshold', () => {
       const pastThreshold: LastUsage = {
         ...baseUsage,
         inputTokens: 60000,
-        cacheReadInputTokens: 100000, // 160k used, past 123k threshold
+        cacheReadInputTokens: 100000, // 160k used, past 155k threshold
       };
       const blocks = buildContextDisplayBlocks(pastThreshold);
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
@@ -693,21 +696,24 @@ describe('blocks', () => {
       expect(sectionBlock?.text?.text).toContain('0%');
     });
 
-    it('should use default threshold when maxOutputTokens is not provided', () => {
-      // Without maxOutputTokens, falls back to 32k → threshold = 200k - 32k - 13k = 155k
-      const noMaxOutput: LastUsage = {
+    it('should not cap maxOutputTokens below 32k (e.g. Claude 3.5 with 8192)', () => {
+      // Claude 3.5 has maxOutputTokens=8192, which is below 32k cap → use 8192 as-is
+      // threshold = 200k - 8192 - 13k = 178808
+      // CLI formula: (178808 - 50000) / 178808 * 100 = 72.0%
+      // tokensToCompact = 128808 → "128.8k tok"
+      const claude35Usage: LastUsage = {
         inputTokens: 1000,
         outputTokens: 500,
         cacheReadInputTokens: 49000,
+        cacheCreationInputTokens: 0,
         contextWindow: 200000,
-        model: 'claude-opus-4',
-        // maxOutputTokens not set — should fall back to 32k default
+        model: 'claude-3-5-sonnet-20241022',
+        maxOutputTokens: 8192,
       };
-      const blocks = buildContextDisplayBlocks(noMaxOutput);
+      const blocks = buildContextDisplayBlocks(claude35Usage);
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
 
-      // (155k - 50k) / 200k * 100 = 52.5%
-      expect(sectionBlock?.text?.text).toContain('52.5% remaining');
+      expect(sectionBlock?.text?.text).toContain('72.0% remaining (128.8k tok)');
     });
 
     it('should handle context exceeding 100% without crashing', () => {
@@ -738,9 +744,10 @@ describe('blocks', () => {
   });
 
   describe('computeAutoCompactThreshold', () => {
-    it('should compute threshold with explicit maxOutputTokens (64k)', () => {
-      // 200000 - 64000 - 13000 = 123000
-      expect(computeAutoCompactThreshold(200000, 64000)).toBe(123000);
+    it('should cap maxOutputTokens at 32k (CLI HV6 behavior)', () => {
+      // Opus 4.5 native max is 64k, but CLI caps at 32k
+      // 200000 - 32000 (capped) - 13000 = 155000
+      expect(computeAutoCompactThreshold(200000, 64000)).toBe(155000);
     });
 
     it('should compute threshold with default maxOutputTokens (32k)', () => {
@@ -751,6 +758,11 @@ describe('blocks', () => {
     it('should compute threshold with opus-4 maxOutputTokens (32k)', () => {
       // 200000 - 32000 - 13000 = 155000
       expect(computeAutoCompactThreshold(200000, 32000)).toBe(155000);
+    });
+
+    it('should not cap maxOutputTokens below 32k (e.g. Claude 3.5 with 8192)', () => {
+      // 200000 - 8192 - 13000 = 178808
+      expect(computeAutoCompactThreshold(200000, 8192)).toBe(178808);
     });
   });
 
@@ -3300,19 +3312,19 @@ describe('blocks', () => {
         'plan',
         'claude-sonnet-4',
         'session123',
-        false, // isNewSession
-        55,    // contextPercent
-        22,    // compactPercent
-        1200,  // inputTokens
-        850,   // outputTokens
-        0.12,  // cost
-        15000, // durationMs
+        false,  // isNewSession
+        55,     // contextPercent
+        22,     // compactPercent
+        34100,  // tokensToCompact (34.1k)
+        1200,   // inputTokens
+        850,    // outputTokens
+        0.12,   // cost
+        15000,  // durationMs
       );
       expect(line).toContain('plan');
       expect(line).toContain('claude-sonnet-4');
       expect(line).toContain('session123');
-      expect(line).toContain('55.0% ctx');
-      expect(line).toContain('22.0% to ⚡');
+      expect(line).toContain('55.0% ctx (22.0% 34.1k tok to ⚡)');
       expect(line).toContain('1.2k/850');
       expect(line).toContain('$0.12');
       expect(line).toContain('15.0s');
@@ -3325,7 +3337,7 @@ describe('blocks', () => {
 
     it('should include rate limit warning as suffix', () => {
       const line = buildUnifiedStatusLine(
-        'plan', 'claude-sonnet-4', 'session', false, 45, 30, 1000, 500, 0.05, 5000, 3
+        'plan', 'claude-sonnet-4', 'session', false, 45, 30, 46500, 1000, 500, 0.05, 5000, 3
       );
       expect(line).toContain(':warning: 3 limits');
     });
@@ -3333,7 +3345,7 @@ describe('blocks', () => {
     it('should show rate limits in-progress (no stats, just limits)', () => {
       const line = buildUnifiedStatusLine(
         'plan', 'claude-sonnet-4', 'session', false,
-        undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         2
       );
       expect(line).toBe('_plan | claude-sonnet-4 | session | :warning: 2 limits_');
@@ -3342,10 +3354,9 @@ describe('blocks', () => {
     it('should show completion stats with rate limits', () => {
       const line = buildUnifiedStatusLine(
         'plan', 'claude-sonnet-4', 'session', false,
-        45, 30, 1500, 800, 0.05, 5000, 3
+        45, 30, 46500, 1500, 800, 0.05, 5000, 3
       );
-      expect(line).toContain('45.0% ctx');
-      expect(line).toContain('30.0% to ⚡');
+      expect(line).toContain('45.0% ctx (30.0% 46.5k tok to ⚡)');
       expect(line).toContain('1.5k/800');
       expect(line).toContain('$0.05');
       expect(line).toContain('5.0s');
@@ -3364,6 +3375,18 @@ describe('blocks', () => {
       // Negative compactPercent
       const lineNeg = buildUnifiedStatusLine('plan', 'claude-sonnet-4', 'session', false, 80, -5);
       expect(lineNeg).toContain('80.0% ctx (-5.0% to ⚡)');
+    });
+  });
+
+  describe('formatTokensK', () => {
+    it('should format tokens with one decimal in k', () => {
+      expect(formatTokensK(67516)).toBe('67.5k');
+      expect(formatTokensK(13000)).toBe('13.0k');
+      expect(formatTokensK(500)).toBe('0.5k');
+      expect(formatTokensK(0)).toBe('0.0k');
+      expect(formatTokensK(128808)).toBe('128.8k');
+      expect(formatTokensK(105000)).toBe('105.0k');
+      expect(formatTokensK(1500)).toBe('1.5k');
     });
   });
 

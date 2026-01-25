@@ -746,16 +746,26 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
   ];
 }
 
-// SDK auto-compact constants (from cli.js: var fC0=13000, var lP9=32000)
+// SDK auto-compact constants (from cli.js: var zV6=13000, HV6 caps at 32000)
 const COMPACT_BUFFER = 13000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 32000;
+const DEFAULT_EFFECTIVE_MAX_OUTPUT_TOKENS = 32000;  // CLI HV6 default cap
 
 /**
  * Compute auto-compact threshold in tokens.
- * Formula from SDK: contextWindow - maxOutputTokens - 13000
+ * CLI formula: contextWindow - effectiveMaxOutput - 13000
+ * CLI caps effectiveMaxOutput at 32k (HV6 function) regardless of model's native max.
  */
 export function computeAutoCompactThreshold(contextWindow: number, maxOutputTokens?: number): number {
-  return contextWindow - (maxOutputTokens || DEFAULT_MAX_OUTPUT_TOKENS) - COMPACT_BUFFER;
+  const effectiveMaxOutput = Math.min(
+    DEFAULT_EFFECTIVE_MAX_OUTPUT_TOKENS,
+    maxOutputTokens || DEFAULT_EFFECTIVE_MAX_OUTPUT_TOKENS
+  );
+  return contextWindow - effectiveMaxOutput - COMPACT_BUFFER;
+}
+
+/** Format token count as "x.yk" with exactly one decimal (e.g., 67516 → "67.5k", 13000 → "13.0k") */
+export function formatTokensK(tokens: number): string {
+  return (tokens / 1000).toFixed(1) + 'k';
 }
 
 /**
@@ -771,11 +781,12 @@ export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
     : 0;
   const remaining = contextWindow - totalTokens;
 
-  // Calculate % left until auto-compact triggers
+  // Calculate % left until auto-compact triggers (CLI formula: denominator = threshold, not contextWindow)
   const autoCompactThreshold = computeAutoCompactThreshold(contextWindow, usage.maxOutputTokens);
-  const compactPercent = contextWindow > 0
-    ? Number((((autoCompactThreshold - totalTokens) / contextWindow) * 100).toFixed(1))
+  const compactPercent = autoCompactThreshold > 0
+    ? Math.max(0, Number(((autoCompactThreshold - totalTokens) / autoCompactThreshold * 100).toFixed(1)))
     : 0;
+  const tokensToCompact = Math.max(0, autoCompactThreshold - totalTokens);
 
   // Build visual progress bar using block characters (20 blocks total)
   const filled = Math.min(20, Math.max(0, Math.round(percent / 5)));
@@ -800,7 +811,7 @@ export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
 
   // Format compact status
   const compactStatus = compactPercent > 0
-    ? `*Auto-compact:* ${compactPercent}% remaining`
+    ? `*Auto-compact:* ${compactPercent.toFixed(1)}% remaining (${formatTokensK(tokensToCompact)} tok)`
     : `*Auto-compact:* imminent`;
 
   return [
@@ -1380,6 +1391,7 @@ export interface StatusPanelParams {
   outputTokens?: number;
   contextPercent?: number;
   compactPercent?: number;  // % left until auto-compact triggers
+  tokensToCompact?: number;  // Tokens remaining before auto-compact
   costUsd?: number;
   conversationKey: string;
   errorMessage?: string;
@@ -1429,6 +1441,7 @@ export function buildStatusPanelBlocks(params: StatusPanelParams): Block[] {
     outputTokens,
     contextPercent,
     compactPercent,
+    tokensToCompact,
     costUsd,
     conversationKey,
     errorMessage,
@@ -1679,7 +1692,7 @@ function formatTokenCount(count: number): string {
  * @param cost - Cost in USD (completion only)
  * @param durationMs - Duration in milliseconds (completion only)
  * @param rateLimitHits - Number of rate limits encountered
- * @returns Formatted string like "_plan | claude-sonnet-4 | abc123 | 45.0% ctx (30.0% to ⚡) | 1.5k/800 | $0.05 | 5.0s_"
+ * @returns Formatted string like "_plan | claude-sonnet-4 | abc123 | 43.7% ctx (43.6% 67.5k tok to ⚡) | 1.5k/800 | $0.05 | 5.0s_"
  */
 export function buildUnifiedStatusLine(
   mode: PermissionMode,
@@ -1688,6 +1701,7 @@ export function buildUnifiedStatusLine(
   isNewSession?: boolean,
   contextPercent?: number,
   compactPercent?: number,
+  tokensToCompact?: number,
   inputTokens?: number,
   outputTokens?: number,
   cost?: number,
@@ -1710,8 +1724,9 @@ export function buildUnifiedStatusLine(
   // Stats - only if available (completion state)
   // Context % with compact info
   if (contextPercent !== undefined) {
-    if (compactPercent !== undefined) {
-      // Always show z.w% as-is (positive, zero, or negative)
+    if (compactPercent !== undefined && tokensToCompact !== undefined) {
+      parts.push(`${contextPercent.toFixed(1)}% ctx (${compactPercent.toFixed(1)}% ${formatTokensK(tokensToCompact)} tok to ⚡)`);
+    } else if (compactPercent !== undefined) {
       parts.push(`${contextPercent.toFixed(1)}% ctx (${compactPercent.toFixed(1)}% to ⚡)`);
     } else {
       parts.push(`${contextPercent.toFixed(1)}% ctx`);
@@ -1764,6 +1779,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     outputTokens,
     contextPercent,
     compactPercent,
+    tokensToCompact,
     costUsd,
     conversationKey,
     errorMessage,
@@ -1816,6 +1832,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
           isNewSession,
           undefined,  // no contextPercent during in-progress
           undefined,  // no compactPercent during in-progress
+          undefined,  // no tokensToCompact during in-progress
           undefined,  // no inputTokens during in-progress
           undefined,  // no outputTokens during in-progress
           undefined,  // no cost during in-progress
@@ -1860,6 +1877,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
             isNewSession,
             contextPercent,
             compactPercent,
+            tokensToCompact,
             inputTokens,
             outputTokens,
             costUsd,

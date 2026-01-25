@@ -135,6 +135,7 @@ interface ProcessingState {
   sessionId?: string;  // Updated when SDK reports session ID
   contextPercent?: number;  // Context usage percentage
   compactPercent?: number;  // Percent remaining until auto-compact
+  tokensToCompact?: number;  // Tokens remaining before auto-compact triggers
   // Rate limit tracking
   rateLimitHits: number;
   rateLimitNotified: boolean;
@@ -3951,23 +3952,29 @@ async function handleMessage(params: {
 
     // Calculate context percentage using per-turn usage from last assistant message
     // CLI formula: total = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
-    // CLI uses Math.round and clamps to [0, 100]
     const perTurnTotal = (processingState.perTurnInputTokens || 0)
       + (processingState.perTurnCacheCreationInputTokens || 0)
       + (processingState.perTurnCacheReadInputTokens || 0);
     const contextPercent = processingState.contextWindow && perTurnTotal > 0
-      ? Math.min(100, Math.max(0, Math.round(perTurnTotal / processingState.contextWindow * 100)))
+      ? Math.min(100, Math.max(0, Number((perTurnTotal / processingState.contextWindow * 100).toFixed(1))))
       : undefined;
 
     // Calculate % left until auto-compact triggers
-    // Formula from SDK: threshold = contextWindow - maxOutputTokens - 13000
-    const compactPercent = processingState.contextWindow && perTurnTotal > 0
-      ? Number((((computeAutoCompactThreshold(processingState.contextWindow, processingState.maxOutputTokens) - perTurnTotal) / processingState.contextWindow) * 100).toFixed(1))
+    // CLI formula: denominator = threshold (not contextWindow), capped maxOutputTokens at 32k
+    const autoCompactThreshold = processingState.contextWindow
+      ? computeAutoCompactThreshold(processingState.contextWindow, processingState.maxOutputTokens)
+      : undefined;
+    const compactPercent = autoCompactThreshold && perTurnTotal > 0
+      ? Math.max(0, Number(((autoCompactThreshold - perTurnTotal) / autoCompactThreshold * 100).toFixed(1)))
+      : undefined;
+    const tokensToCompact = autoCompactThreshold && perTurnTotal > 0
+      ? Math.max(0, autoCompactThreshold - perTurnTotal)
       : undefined;
 
     // Store in processingState for abort handler access
     processingState.contextPercent = contextPercent;
     processingState.compactPercent = compactPercent;
+    processingState.tokensToCompact = tokensToCompact;
 
     // Final elapsed time
     const finalDurationMs = processingState.durationMs ?? (Date.now() - processingState.startTime);
@@ -3995,6 +4002,7 @@ async function handleMessage(params: {
               outputTokens: processingState.outputTokens,
               contextPercent,
               compactPercent,
+              tokensToCompact,
               costUsd: processingState.costUsd,
               conversationKey: activityLogKey,
               rateLimitHits: processingState.rateLimitHits,
@@ -4262,6 +4270,7 @@ async function handleMessage(params: {
                 outputTokens: processingState.outputTokens,
                 contextPercent: processingState.contextPercent,
                 compactPercent: processingState.compactPercent,
+                tokensToCompact: processingState.tokensToCompact,
                 costUsd: processingState.costUsd,
               }),
               text: `Error: ${error.message}`,
@@ -4565,6 +4574,7 @@ async function handleQueryAbort(conversationKey: string, channelId: string, clie
               outputTokens: active.processingState.outputTokens,
               contextPercent: active.processingState.contextPercent,
               compactPercent: active.processingState.compactPercent,
+              tokensToCompact: active.processingState.tokensToCompact,
               costUsd: active.processingState.costUsd,
             }),
             text: `${active.model || 'Claude'} | ${active.mode} | aborted`,
