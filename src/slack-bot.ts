@@ -4622,6 +4622,33 @@ async function handleQueryAbort(conversationKey: string, channelId: string, clie
       await mutex.runExclusive(async () => {
         const elapsedMs = Date.now() - active.processingState.startTime;
 
+        // Parse conversationKey to get session for lastUsage fallback
+        const [abortChannelId, abortThreadTs] = conversationKey.includes('_')
+          ? conversationKey.split('_')
+          : [conversationKey, undefined];
+        const abortSession = abortThreadTs
+          ? getThreadSession(abortChannelId, abortThreadTs)
+          : getSession(abortChannelId);
+
+        // Compute context% on-the-fly (processingState values may not be computed yet on abort)
+        const abortPerTurnTotal = (active.processingState.perTurnInputTokens || 0)
+          + (active.processingState.perTurnCacheCreationInputTokens || 0)
+          + (active.processingState.perTurnCacheReadInputTokens || 0);
+        const abortContextWindow = active.processingState.contextWindow || abortSession?.lastUsage?.contextWindow;
+        const abortMaxOutput = active.processingState.maxOutputTokens || abortSession?.lastUsage?.maxOutputTokens;
+        const abortContextPercent = abortContextWindow && abortPerTurnTotal > 0
+          ? Math.min(100, Math.max(0, Number((abortPerTurnTotal / abortContextWindow * 100).toFixed(1))))
+          : undefined;
+        const abortAutoCompactThreshold = abortContextWindow
+          ? computeAutoCompactThreshold(abortContextWindow, abortMaxOutput)
+          : undefined;
+        const abortCompactPercent = abortAutoCompactThreshold && abortPerTurnTotal > 0
+          ? Math.max(0, Number(((abortAutoCompactThreshold - abortPerTurnTotal) / abortAutoCompactThreshold * 100).toFixed(1)))
+          : undefined;
+        const abortTokensToCompact = abortAutoCompactThreshold && abortPerTurnTotal > 0
+          ? Math.max(0, abortAutoCompactThreshold - abortPerTurnTotal)
+          : undefined;
+
         // Flush any pending activity batch before showing aborted state
         if (active.processingState.activityBatch.length > 0 && active.processingState.threadParentTs) {
           const charLimit = active.processingState.charLimit || 500;
@@ -4652,9 +4679,9 @@ async function handleQueryAbort(conversationKey: string, channelId: string, clie
               // Include stats if available (SDK may have reported them before abort)
               inputTokens: active.processingState.inputTokens,
               outputTokens: active.processingState.outputTokens,
-              contextPercent: active.processingState.contextPercent,
-              compactPercent: active.processingState.compactPercent,
-              tokensToCompact: active.processingState.tokensToCompact,
+              contextPercent: abortContextPercent,
+              compactPercent: abortCompactPercent,
+              tokensToCompact: abortTokensToCompact,
               costUsd: active.processingState.costUsd,
             }),
             text: `${active.model || 'Claude'} | ${active.mode} | aborted`,
