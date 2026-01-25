@@ -626,6 +626,19 @@ describe('slack-bot mention handlers', () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
+      // Set up session so the message gets processed
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
       // When a main channel message is edited after it has replies,
       // Slack sets thread_ts = ts (the message IS the thread parent)
       await handler({
@@ -653,8 +666,16 @@ describe('slack-bot mention handlers', () => {
         name: 'eyes',
       });
 
-      // Should start Claude query
-      expect(startClaudeQuery).toHaveBeenCalled();
+      // Should start Claude query with threadTs undefined (creates NEW response thread)
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'revised message',
+        expect.objectContaining({
+          slackContext: expect.objectContaining({
+            channel: 'C123',
+            threadTs: undefined, // NOT 'parent123' - should create new thread
+          }),
+        })
+      );
     });
 
     it('should reject @bot mentions with no message content', async () => {

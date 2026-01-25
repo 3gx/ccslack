@@ -2120,12 +2120,16 @@ app.event('app_mention', async ({ event, client }) => {
     // Extract files from event (if any)
     const eventFiles = (event as any).files as SlackFile[] | undefined;
 
+    // When ts === thread_ts, message is thread parent being edited - treat as new message
+    // Don't pass threadTs so handleMessage creates a fresh response thread
+    const isEditedThreadParent = event.thread_ts && event.thread_ts === event.ts;
+
     await handleMessage({
       channelId: event.channel,
       userId: event.user,
       userText,
       originalTs: event.ts,
-      threadTs: event.thread_ts, // Only set if already in a thread
+      threadTs: isEditedThreadParent ? undefined : event.thread_ts,
       client,
       files: eventFiles,
     });
