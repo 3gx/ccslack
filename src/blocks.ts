@@ -1369,6 +1369,14 @@ export interface ActivityEntry {
   generatingInProgress?: boolean; // True while text is streaming
   generatingContent?: string;   // Full response text (stored for modal/download)
   generatingTruncated?: string; // First 500 chars (for live display)
+  // Tool input (populated at content_block_stop)
+  toolInput?: Record<string, unknown>;
+  toolUseId?: string;           // For matching with tool_result
+  // Result metrics (populated when user message with tool_result arrives)
+  lineCount?: number;           // Read/Write: lines in result/content
+  matchCount?: number;          // Grep/Glob: number of matches/files
+  linesAdded?: number;          // Edit: lines in new_string
+  linesRemoved?: number;        // Edit: lines in old_string
 }
 
 // Constants for activity log display
@@ -1422,6 +1430,177 @@ export function getToolEmoji(toolName?: string): string {
 export function formatToolName(sdkToolName: string): string {
   if (!sdkToolName.includes('__')) return sdkToolName;
   return sdkToolName.split('__').pop()!;
+}
+
+// Helper functions for tool display formatting
+function truncatePath(path: string, maxLen: number): string {
+  if (path.length <= maxLen) return path;
+  const parts = path.split('/');
+  if (parts.length <= 2) return path.slice(-maxLen);
+  // Keep last 2 segments
+  const lastTwo = parts.slice(-2).join('/');
+  return lastTwo.length <= maxLen ? lastTwo : '...' + path.slice(-(maxLen - 3));
+}
+
+function truncateText(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen - 3) + '...';
+}
+
+function truncateUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.length > 20 ? u.pathname.slice(0, 17) + '...' : u.pathname;
+    return u.hostname + path;
+  } catch {
+    return truncateText(url, 35);
+  }
+}
+
+/**
+ * Format tool input as compact inline summary for main channel display.
+ * Returns a short string with the key parameter for each tool type.
+ */
+export function formatToolInputSummary(toolName: string, input?: Record<string, unknown>): string {
+  if (!input) return '';
+  const tool = formatToolName(toolName).toLowerCase();
+
+  switch (tool) {
+    // Tools with special UI - show tool name only (no input details)
+    case 'askuserquestion':
+      return '';  // Has its own button UI, keep existing behavior
+
+    case 'read':
+    case 'edit':
+    case 'write':
+      return input.file_path ? ` \`${truncatePath(input.file_path as string, 40)}\`` : '';
+    case 'grep':
+      return input.pattern ? ` \`"${truncateText(input.pattern as string, 25)}"\`` : '';
+    case 'glob':
+      return input.pattern ? ` \`${truncateText(input.pattern as string, 30)}\`` : '';
+    case 'bash':
+      return input.command ? ` \`${truncateText(input.command as string, 35)}\`` : '';
+    case 'task':
+      const subtype = input.subagent_type ? `:${input.subagent_type}` : '';
+      const desc = input.description ? ` "${truncateText(input.description as string, 25)}"` : '';
+      return `${subtype}${desc}`;
+    case 'webfetch':
+      return input.url ? ` \`${truncateUrl(input.url as string)}\`` : '';
+    case 'websearch':
+      return input.query ? ` "${truncateText(input.query as string, 30)}"` : '';
+    case 'lsp':
+      const op = input.operation || '';
+      const file = input.filePath ? truncatePath(input.filePath as string, 25) : '';
+      return op ? ` \`${op}\` \`${file}\`` : '';
+    case 'todowrite':
+      const count = Array.isArray(input.todos) ? input.todos.length : 0;
+      return count > 0 ? ` ${count} items` : '';
+    case 'notebookedit':
+      return input.notebook_path ? ` \`${truncatePath(input.notebook_path as string, 35)}\`` : '';
+    case 'skill':
+      return input.skill ? ` \`${input.skill}\`` : '';
+    default:
+      // Generic fallback: show first meaningful string parameter
+      if (input) {
+        const firstParam = Object.entries(input)
+          .find(([k, v]) => typeof v === 'string' && v.length > 0 && v.length < 50 && !k.startsWith('_'));
+        if (firstParam) {
+          return ` \`${truncateText(String(firstParam[1]), 30)}\``;
+        }
+      }
+      return '';
+  }
+}
+
+/**
+ * Format result metrics as inline summary for main channel display.
+ * Shows line counts, match counts, or edit diff depending on tool type.
+ */
+export function formatToolResultSummary(entry: ActivityEntry): string {
+  if (entry.matchCount !== undefined) {
+    return ` → ${entry.matchCount} ${entry.matchCount === 1 ? 'match' : 'matches'}`;
+  }
+  if (entry.lineCount !== undefined) {
+    return ` (${entry.lineCount} lines)`;
+  }
+  if (entry.linesAdded !== undefined || entry.linesRemoved !== undefined) {
+    return ` (+${entry.linesAdded || 0}/-${entry.linesRemoved || 0})`;
+  }
+  return '';
+}
+
+/**
+ * Format tool details as bullet points for thread display.
+ * Returns an array of detail lines to be prefixed with "• ".
+ */
+export function formatToolDetails(entry: ActivityEntry): string[] {
+  const details: string[] = [];
+  const tool = formatToolName(entry.tool || '').toLowerCase();
+  const input = entry.toolInput;
+
+  // Tools with special UI - show duration only
+  if (tool === 'askuserquestion') {
+    // Has its own button UI, just show duration (added at end)
+    if (entry.durationMs !== undefined) {
+      details.push(`Duration: ${(entry.durationMs / 1000).toFixed(1)}s`);
+    }
+    return details;
+  }
+
+  if (tool === 'read' && entry.lineCount !== undefined) {
+    details.push(`Read: ${entry.lineCount} lines`);
+  }
+  if (tool === 'edit' && (entry.linesAdded !== undefined || entry.linesRemoved !== undefined)) {
+    details.push(`Changed: +${entry.linesAdded || 0}/-${entry.linesRemoved || 0} lines`);
+  }
+  if (tool === 'write' && entry.lineCount !== undefined) {
+    details.push(`Wrote: ${entry.lineCount} lines`);
+  }
+  if (tool === 'grep') {
+    if (input?.path) details.push(`Path: \`${input.path}\``);
+    if (entry.matchCount !== undefined) details.push(`Found: ${entry.matchCount} matches`);
+  }
+  if (tool === 'glob' && entry.matchCount !== undefined) {
+    details.push(`Found: ${entry.matchCount} files`);
+  }
+  if (tool === 'bash' && input?.command) {
+    details.push(`Command: \`${input.command}\``);
+  }
+  if (tool === 'task') {
+    if (input?.subagent_type) details.push(`Type: ${input.subagent_type}`);
+    if (input?.description) details.push(`Task: ${input.description}`);
+  }
+  if (tool === 'lsp') {
+    if (input?.operation) details.push(`Operation: ${input.operation}`);
+    if (input?.filePath) details.push(`File: \`${input.filePath}\``);
+    if (input?.line) details.push(`Line: ${input.line}`);
+  }
+  if (tool === 'websearch') {
+    if (input?.query) details.push(`Query: "${input.query}"`);
+  }
+  if (tool === 'todowrite') {
+    const count = Array.isArray(input?.todos) ? input.todos.length : 0;
+    if (count > 0) details.push(`Items: ${count} todos`);
+  }
+
+  // Generic fallback for unknown tools: show first 2 params
+  if (details.length === 0 && input) {
+    const params = Object.entries(input)
+      .filter(([k, v]) => !k.startsWith('_') && v !== undefined && v !== null)
+      .slice(0, 2);
+    for (const [key, value] of params) {
+      const displayValue = typeof value === 'string'
+        ? truncateText(value, 40)
+        : JSON.stringify(value).slice(0, 40);
+      details.push(`${key}: \`${displayValue}\``);
+    }
+  }
+
+  if (entry.durationMs !== undefined) {
+    details.push(`Duration: ${(entry.durationMs / 1000).toFixed(1)}s`);
+  }
+
+  return details;
 }
 
 /**
@@ -2032,13 +2211,16 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
         // Only show tool_start if tool hasn't completed yet (in progress)
         if (!completedTools.has(entry.tool || '')) {
           const startEmoji = getToolEmoji(entry.tool);
-          lines.push(`${startEmoji} *${entry.tool}* [in progress]`);
+          const startInputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
+          lines.push(`${startEmoji} *${formatToolName(entry.tool || 'Unknown')}*${startInputSummary} [in progress]`);
         }
         break;
       case 'tool_complete':
-        // Show completed tool with checkmark and duration
-        const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-        lines.push(`:white_check_mark: *${entry.tool}*${duration}`);
+        // Show completed tool with checkmark, input summary, result metrics, and duration
+        const tcInputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
+        const resultSummary = formatToolResultSummary(entry);
+        const tcDuration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+        lines.push(`:white_check_mark: *${formatToolName(entry.tool || 'Unknown')}*${tcInputSummary}${resultSummary}${tcDuration}`);
         break;
       case 'error':
         lines.push(`:x: Error: ${entry.message}`);
@@ -2242,12 +2424,21 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
         // Only show tool_start if tool hasn't completed yet
         if (!completedTools.has(entry.tool || '')) {
           const emoji = getToolEmoji(entry.tool);
-          lines.push(`${emoji} *${formatToolName(entry.tool || 'Unknown')}* [in progress]`);
+          const inputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
+          lines.push(`${emoji} *${formatToolName(entry.tool || 'Unknown')}*${inputSummary} [in progress]`);
         }
         break;
       case 'tool_complete':
-        const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-        lines.push(`:white_check_mark: *${formatToolName(entry.tool || 'Unknown')}*${duration}`);
+        const tcEmoji = getToolEmoji(entry.tool);
+        const tcInputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
+        lines.push(`${tcEmoji} *${formatToolName(entry.tool || 'Unknown')}*${tcInputSummary}`);
+
+        // Add detail bullet points
+        const details = formatToolDetails(entry);
+        for (const detail of details) {
+          lines.push(`• ${detail}`);
+        }
+        lines.push('');  // Empty line between tools
         break;
       case 'error':
         lines.push(`:x: *Error:* ${entry.message || 'Unknown error'}`);
@@ -2259,7 +2450,7 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
     }
   }
 
-  return lines.join('\n');
+  return lines.join('\n').trim();
 }
 
 /**

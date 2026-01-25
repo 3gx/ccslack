@@ -25,6 +25,9 @@ import {
   buildLiveActivityBlocks,
   getToolEmoji,
   formatToolName,
+  formatToolInputSummary,
+  formatToolResultSummary,
+  formatToolDetails,
   ActivityEntry,
   ACTIVITY_LOG_MAX_CHARS,
   buildStopWatchingButton,
@@ -3669,7 +3672,7 @@ describe('blocks', () => {
   // ============================================================================
 
   describe('formatThreadActivityBatch', () => {
-    it('should format completed tools with checkmark and duration', () => {
+    it('should format completed tools with emoji and bullet point details', () => {
       const entries: ActivityEntry[] = [
         { timestamp: 1000, type: 'tool_complete', tool: 'Read', durationMs: 500 },
         { timestamp: 2000, type: 'tool_complete', tool: 'Edit', durationMs: 1200 },
@@ -3677,8 +3680,11 @@ describe('blocks', () => {
 
       const result = formatThreadActivityBatch(entries);
 
-      expect(result).toContain(':white_check_mark: *Read* [0.5s]');
-      expect(result).toContain(':white_check_mark: *Edit* [1.2s]');
+      // Thread format uses tool emoji (not checkmark) and bullet point details
+      expect(result).toContain(':mag: *Read*');
+      expect(result).toContain('• Duration: 0.5s');
+      expect(result).toContain(':memo: *Edit*');
+      expect(result).toContain('• Duration: 1.2s');
     });
 
     it('should show in-progress tools with emoji', () => {
@@ -3699,11 +3705,11 @@ describe('blocks', () => {
 
       const result = formatThreadActivityBatch(entries);
 
-      // Should only show completed version
-      expect(result).toContain(':white_check_mark: *Read* [0.5s]');
+      // Should show completed version with emoji and duration in bullet
+      expect(result).toContain(':mag: *Read*');
+      expect(result).toContain('• Duration: 0.5s');
       // Should NOT show the in-progress version
-      const lines = result.split('\n');
-      expect(lines.length).toBe(1);
+      expect(result).not.toContain('[in progress]');
     });
 
     it('should format starting entry', () => {
@@ -4078,6 +4084,197 @@ describe('blocks', () => {
     it('should format error message', () => {
       const result = formatThreadErrorMessage('Connection refused');
       expect(result).toBe(':x: *Error:* Connection refused');
+    });
+  });
+
+  describe('formatToolInputSummary', () => {
+    it('should format Read tool with file path', () => {
+      expect(formatToolInputSummary('Read', { file_path: 'src/slack-bot.ts' }))
+        .toBe(' `src/slack-bot.ts`');
+    });
+
+    it('should format Edit tool with file path', () => {
+      expect(formatToolInputSummary('Edit', { file_path: 'src/blocks.ts' }))
+        .toBe(' `src/blocks.ts`');
+    });
+
+    it('should format Grep tool with pattern', () => {
+      expect(formatToolInputSummary('Grep', { pattern: 'ActivityEntry' }))
+        .toBe(' `"ActivityEntry"`');
+    });
+
+    it('should format Glob tool with pattern', () => {
+      expect(formatToolInputSummary('Glob', { pattern: '**/*.test.ts' }))
+        .toBe(' `**/*.test.ts`');
+    });
+
+    it('should format Bash tool with command', () => {
+      expect(formatToolInputSummary('Bash', { command: 'npm test' }))
+        .toBe(' `npm test`');
+    });
+
+    it('should truncate long commands', () => {
+      const result = formatToolInputSummary('Bash', { command: 'npm test -- src/__tests__/unit/blocks.test.ts --reporter=verbose' });
+      expect(result.length).toBeLessThanOrEqual(40);
+      expect(result).toContain('...');
+    });
+
+    it('should format Task tool with subagent and description', () => {
+      expect(formatToolInputSummary('Task', { subagent_type: 'Explore', description: 'Find auth code' }))
+        .toBe(':Explore "Find auth code"');
+    });
+
+    it('should format WebSearch with query', () => {
+      expect(formatToolInputSummary('WebSearch', { query: 'Claude API docs' }))
+        .toBe(' "Claude API docs"');
+    });
+
+    it('should format TodoWrite with count', () => {
+      expect(formatToolInputSummary('TodoWrite', { todos: [{}, {}, {}] }))
+        .toBe(' 3 items');
+    });
+
+    it('should return empty for AskUserQuestion', () => {
+      expect(formatToolInputSummary('AskUserQuestion', { questions: [] }))
+        .toBe('');
+    });
+
+    it('should return empty when no input', () => {
+      expect(formatToolInputSummary('Read', undefined))
+        .toBe('');
+    });
+
+    it('should handle MCP-style tool names', () => {
+      expect(formatToolInputSummary('mcp__server__Read', { file_path: 'test.ts' }))
+        .toBe(' `test.ts`');
+    });
+
+    it('should truncate long paths keeping last segments', () => {
+      const result = formatToolInputSummary('Read', {
+        file_path: '/very/long/path/to/some/deeply/nested/directory/file.ts'
+      });
+      expect(result).toContain('file.ts');
+      expect(result.length).toBeLessThanOrEqual(45);
+    });
+  });
+
+  describe('formatToolResultSummary', () => {
+    it('should format lineCount', () => {
+      expect(formatToolResultSummary({ lineCount: 141 } as ActivityEntry))
+        .toBe(' (141 lines)');
+    });
+
+    it('should format matchCount singular', () => {
+      expect(formatToolResultSummary({ matchCount: 1 } as ActivityEntry))
+        .toBe(' → 1 match');
+    });
+
+    it('should format matchCount plural', () => {
+      expect(formatToolResultSummary({ matchCount: 12 } as ActivityEntry))
+        .toBe(' → 12 matches');
+    });
+
+    it('should format linesAdded and linesRemoved', () => {
+      expect(formatToolResultSummary({ linesAdded: 5, linesRemoved: 2 } as ActivityEntry))
+        .toBe(' (+5/-2)');
+    });
+
+    it('should handle only linesAdded', () => {
+      expect(formatToolResultSummary({ linesAdded: 10 } as ActivityEntry))
+        .toBe(' (+10/-0)');
+    });
+
+    it('should return empty when no metrics', () => {
+      expect(formatToolResultSummary({} as ActivityEntry))
+        .toBe('');
+    });
+  });
+
+  describe('formatToolDetails', () => {
+    it('should format Read tool with lineCount', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'Read',
+        lineCount: 100,
+        durationMs: 500,
+      });
+      expect(details).toContain('Read: 100 lines');
+      expect(details).toContain('Duration: 0.5s');
+    });
+
+    it('should format Edit tool with changes', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'Edit',
+        linesAdded: 5,
+        linesRemoved: 3,
+        durationMs: 1200,
+      });
+      expect(details).toContain('Changed: +5/-3 lines');
+      expect(details).toContain('Duration: 1.2s');
+    });
+
+    it('should format Grep tool with path and matches', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'Grep',
+        toolInput: { path: 'src/', pattern: 'test' },
+        matchCount: 25,
+        durationMs: 300,
+      });
+      expect(details).toContain('Path: `src/`');
+      expect(details).toContain('Found: 25 matches');
+    });
+
+    it('should format Bash tool with command', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'Bash',
+        toolInput: { command: 'npm test -- blocks.test.ts' },
+        durationMs: 8200,
+      });
+      expect(details).toContain('Command: `npm test -- blocks.test.ts`');
+      expect(details).toContain('Duration: 8.2s');
+    });
+
+    it('should format Task tool with subagent details', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'Task',
+        toolInput: { subagent_type: 'Explore', description: 'Find error handlers' },
+        durationMs: 35200,
+      });
+      expect(details).toContain('Type: Explore');
+      expect(details).toContain('Task: Find error handlers');
+    });
+
+    it('should only show duration for AskUserQuestion', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'AskUserQuestion',
+        toolInput: { questions: [] },
+        durationMs: 5000,
+      });
+      expect(details).toHaveLength(1);
+      expect(details[0]).toBe('Duration: 5.0s');
+    });
+
+    it('should use generic fallback for unknown tools', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'CustomTool',
+        toolInput: { option1: 'value1', option2: 'value2' },
+        durationMs: 1000,
+      });
+      expect(details.length).toBeGreaterThanOrEqual(2);
+      expect(details).toContain('Duration: 1.0s');
     });
   });
 

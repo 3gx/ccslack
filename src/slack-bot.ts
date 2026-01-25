@@ -143,8 +143,9 @@ interface ProcessingState {
   exitPlanModeIndex: number | null;
   exitPlanModeInputJson: string;
   exitPlanModeInput: ExitPlanModeInput | null;
-  // File tool tracking (Write, Edit, Read) to capture plan file path
-  fileToolInputs: Map<number, string>;  // Tracks by tool index
+  // Tool input tracking for all tools (for activity display + plan file path extraction)
+  toolInputs: Map<number, string>;      // Accumulated JSON by tool index
+  toolUseIds: Map<number, string>;      // Tool use ID by tool index (for matching with tool_result)
   planFilePath: string | null;
   // Upload failure tracking for retry button
   uploadFailed?: boolean;
@@ -155,6 +156,9 @@ interface ProcessingState {
   lastActivityPostTime: number;            // For rate limiting thread posts
   threadParentTs: string | null;           // Status message ts (thread parent for activity entries)
   charLimit: number;                       // Character limit for thread messages
+  // Track posted batch for updates when tool_result arrives
+  postedBatchTs: string | null;            // Ts of most recently posted batch
+  postedBatchToolUseIds: Set<string>;      // tool_use_ids in the posted batch
   // Thinking update race condition protection
   pendingThinkingUpdate: Promise<void> | null;  // Track in-flight thinking update
   // Compaction tracking (shared by /compact and auto-compact)
@@ -692,7 +696,8 @@ async function runCompactSession(
     exitPlanModeIndex: null,
     exitPlanModeInputJson: '',
     exitPlanModeInput: null,
-    fileToolInputs: new Map(),
+    toolInputs: new Map(),
+    toolUseIds: new Map(),
     planFilePath: null,
     uploadFailed: false,
     activityThreadMsgTs: null,
@@ -701,6 +706,8 @@ async function runCompactSession(
     lastActivityPostTime: 0,
     threadParentTs: null,
     charLimit: MESSAGE_SIZE_DEFAULT,
+    postedBatchTs: null,
+    postedBatchToolUseIds: new Set(),
     pendingThinkingUpdate: null,
     // Compaction tracking (shared by /compact and auto-compact)
     compactMsgTs: null,
@@ -2906,7 +2913,8 @@ async function handleMessage(params: {
     exitPlanModeIndex: null,
     exitPlanModeInputJson: '',
     exitPlanModeInput: null,
-    fileToolInputs: new Map(),
+    toolInputs: new Map(),
+    toolUseIds: new Map(),
     // Initialize from session (falls back to null if not set)
     planFilePath: session.planFilePath || null,
     // Upload failure tracking for retry button
@@ -2918,6 +2926,8 @@ async function handleMessage(params: {
     lastActivityPostTime: 0,
     threadParentTs: null,  // Will be set to statusMsgTs after posting
     charLimit: session.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
+    postedBatchTs: null,
+    postedBatchToolUseIds: new Set(),
     // Thinking update race condition protection
     pendingThinkingUpdate: null,
     // Compaction tracking (shared by /compact and auto-compact)
@@ -3548,7 +3558,7 @@ async function handleMessage(params: {
     };
 
     // Helper to add tool complete to activity log and batch
-    const logToolComplete = async () => {
+    const logToolComplete = async (toolInput?: Record<string, unknown>, toolUseId?: string) => {
       // Finalize with skipPosting - text during tool execution is rare
       // but should be captured for activity log, not posted separately
       await finalizeGeneratingEntry(currentResponse.length, false, true);  // skipPosting=true
@@ -3558,12 +3568,37 @@ async function handleMessage(params: {
       if (lastToolStart) {
         // Calculate duration from tool start to now
         const durationMs = Date.now() - lastToolStart.timestamp;
+
+        // Pre-compute metrics from input for Edit/Write (don't need tool_result)
+        let linesAdded: number | undefined;
+        let linesRemoved: number | undefined;
+        let lineCount: number | undefined;
+        const toolLower = (lastToolStart.tool || '').toLowerCase();
+
+        if (toolLower === 'edit' && toolInput) {
+          linesRemoved = ((toolInput.old_string as string) || '').split('\n').length;
+          linesAdded = ((toolInput.new_string as string) || '').split('\n').length;
+        }
+        if (toolLower === 'write' && toolInput) {
+          lineCount = ((toolInput.content as string) || '').split('\n').length;
+        }
+
         const toolCompleteEntry: ActivityEntry = {
           timestamp: Date.now(),
           type: 'tool_complete',
           tool: lastToolStart.tool,
           durationMs,
+          toolInput,       // Store parsed input for activity display
+          toolUseId,       // For matching with tool_result
+          linesAdded,      // Pre-computed for Edit
+          linesRemoved,    // Pre-computed for Edit
+          lineCount,       // Pre-computed for Write
         };
+
+        // Also update tool_start entry for in-progress display
+        lastToolStart.toolInput = toolInput;
+        lastToolStart.toolUseId = toolUseId;
+
         processingState.activityLog.push(toolCompleteEntry);
 
         // In batch, replace tool_start with tool_complete
@@ -3834,10 +3869,12 @@ async function handleMessage(params: {
             console.log('[ExitPlanMode] Tool started at index:', event.index);
           }
 
-          // Track ALL tool_use blocks for plan file path capture
-          // Write/Edit/Read use file_path param, Grep/Glob use path param
+          // Track ALL tool_use blocks for activity display and plan file path capture
           if (event.content_block?.type === 'tool_use') {
-            processingState.fileToolInputs.set(event.index, '');
+            processingState.toolInputs.set(event.index, '');
+            if (event.content_block.id) {
+              processingState.toolUseIds.set(event.index, event.content_block.id);
+            }
           }
 
           // Timer will render updated status at next interval
@@ -3851,19 +3888,30 @@ async function handleMessage(params: {
           processingState.exitPlanModeInputJson += event.delta.partial_json || '';
         }
 
-        // Accumulate JSON input for file tools (Write/Edit/Read for plan file capture)
+        // Accumulate JSON input for all tools (activity display + plan file capture)
         if (event?.type === 'content_block_delta' &&
             event.delta?.type === 'input_json_delta' &&
-            processingState.fileToolInputs.has(event.index)) {
-          const current = processingState.fileToolInputs.get(event.index) || '';
-          processingState.fileToolInputs.set(event.index, current + (event.delta.partial_json || ''));
+            processingState.toolInputs.has(event.index)) {
+          const current = processingState.toolInputs.get(event.index) || '';
+          processingState.toolInputs.set(event.index, current + (event.delta.partial_json || ''));
         }
 
         // Tool use completed (content_block_stop for tool_use block)
         if (event?.type === 'content_block_stop' &&
             processingState.currentToolUseIndex === event.index &&
             processingState.currentTool) {
-          await logToolComplete();
+
+          // Parse tool input for activity display and plan file capture
+          const inputJson = processingState.toolInputs.get(event.index) || '{}';
+          const toolUseId = processingState.toolUseIds.get(event.index);
+          let toolInput: Record<string, unknown> = {};
+          try {
+            toolInput = JSON.parse(inputJson);
+          } catch (e) {
+            console.error('[Tool] Failed to parse input JSON:', e);
+          }
+
+          await logToolComplete(toolInput, toolUseId);
 
           // Parse ExitPlanMode input when tool completes
           if (processingState.exitPlanModeIndex === event.index) {
@@ -3886,28 +3934,23 @@ async function handleMessage(params: {
             }
           }
 
-          // Parse file tool input to capture plan file path
+          // Capture plan file path from file tools (Write/Edit/Read)
           // Uses shared function to filter out directory paths (must end with .md)
-          if (processingState.fileToolInputs.has(event.index)) {
-            try {
-              const inputJson = processingState.fileToolInputs.get(event.index) || '{}';
-              const input = JSON.parse(inputJson);
-              const planPath = extractPlanFilePathFromInput(input);
-              if (planPath) {
-                processingState.planFilePath = planPath;
-                // Persist to session for cross-turn access
-                if (threadTs) {
-                  await saveThreadSession(channelId, threadTs, { planFilePath: planPath });
-                } else {
-                  await saveSession(channelId, { planFilePath: planPath });
-                }
-                console.log('[PlanFile] Detected and persisted plan file:', planPath);
-              }
-            } catch (e) {
-              console.error('[PlanFile] JSON parse failed:', e);
+          const planPath = extractPlanFilePathFromInput(toolInput);
+          if (planPath) {
+            processingState.planFilePath = planPath;
+            // Persist to session for cross-turn access
+            if (threadTs) {
+              await saveThreadSession(channelId, threadTs, { planFilePath: planPath });
+            } else {
+              await saveSession(channelId, { planFilePath: planPath });
             }
-            processingState.fileToolInputs.delete(event.index);
+            console.log('[PlanFile] Detected and persisted plan file:', planPath);
           }
+
+          // Cleanup tool tracking
+          processingState.toolInputs.delete(event.index);
+          processingState.toolUseIds.delete(event.index);
 
           processingState.currentToolUseIndex = null;
           // Timer will render updated status at next interval
@@ -3924,6 +3967,51 @@ async function handleMessage(params: {
 
       // Note: Text accumulation moved to text_delta handler in stream_event section
       // This ensures currentResponse has content BEFORE tool events trigger segment posting
+
+      // Handle tool results from user messages (arrives mid-query)
+      // SDK sends tool_result via msg.type === 'user' messages, not result messages
+      if (msg.type === 'user') {
+        const userMsg = msg as any;
+        if (Array.isArray(userMsg.message?.content)) {
+          for (const block of userMsg.message.content) {
+            if (block.type === 'tool_result' && !block.is_error) {
+              const resultContent = typeof block.content === 'string' ? block.content : '';
+              const toolUseId = block.tool_use_id;
+
+              // Find matching tool_complete entry by tool_use_id
+              const matchingEntry = [...processingState.activityLog]
+                .reverse()
+                .find(e => e.type === 'tool_complete' && e.toolUseId === toolUseId);
+
+              if (matchingEntry) {
+                // Extract metrics based on tool type
+                const toolName = (matchingEntry.tool || '').toLowerCase();
+
+                if (toolName === 'read') {
+                  matchingEntry.lineCount = resultContent.split('\n').filter((l: string) => l.length > 0).length;
+                } else if (toolName === 'grep' || toolName === 'glob') {
+                  matchingEntry.matchCount = resultContent.split('\n').filter((l: string) => l.length > 0).length;
+                }
+                // Edit/Write metrics already computed from input in logToolComplete
+
+                console.log(`[Activity] Tool result for ${matchingEntry.tool}: lineCount=${matchingEntry.lineCount}, matchCount=${matchingEntry.matchCount}`);
+
+                // Update already-posted thread batch if this tool was in it (race condition fix)
+                if (toolUseId && processingState.postedBatchToolUseIds?.has(toolUseId)) {
+                  const { updatePostedBatch } = await import('./activity-thread.js');
+                  await updatePostedBatch(
+                    processingState,
+                    client,
+                    channelId,
+                    processingState.activityLog,
+                    toolUseId
+                  );
+                }
+              }
+            }
+          }
+        }
+      }
 
       // Handle result messages (final response with stats)
       if (msg.type === 'result') {

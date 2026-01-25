@@ -132,6 +132,8 @@ describe('activity-thread', () => {
         activityBatchStartIndex: 0,
         lastActivityPostTime: 0,
         threadParentTs: 'parent-ts',
+        postedBatchTs: null,
+        postedBatchToolUseIds: new Set(),
       };
 
       await flushActivityBatch(state, client, 'C123', 500, 'timer');
@@ -139,8 +141,11 @@ describe('activity-thread', () => {
       expect(client.chat.postMessage).toHaveBeenCalled();
       const call = client.chat.postMessage.mock.calls[0][0];
       expect(call.thread_ts).toBe('parent-ts');
-      expect(call.text).toContain(':white_check_mark: *Read* [0.5s]');
-      expect(call.text).toContain(':white_check_mark: *Edit* [0.8s]');
+      // Thread format uses tool emoji and bullet point details (not checkmark)
+      expect(call.text).toContain(':mag: *Read*');
+      expect(call.text).toContain('• Duration: 0.5s');
+      expect(call.text).toContain(':memo: *Edit*');
+      expect(call.text).toContain('• Duration: 0.8s');
 
       // Batch should be cleared
       expect(state.activityBatch).toEqual([]);
@@ -156,6 +161,8 @@ describe('activity-thread', () => {
         activityBatchStartIndex: 0,
         lastActivityPostTime: 0,
         threadParentTs: 'parent-ts',
+        postedBatchTs: null,
+        postedBatchToolUseIds: new Set(),
       };
 
       await flushActivityBatch(state, client, 'C123', 500, 'timer');
@@ -174,6 +181,8 @@ describe('activity-thread', () => {
         activityBatchStartIndex: 0,
         lastActivityPostTime: 0,
         threadParentTs: null, // No parent!
+        postedBatchTs: null,
+        postedBatchToolUseIds: new Set(),
       };
 
       await flushActivityBatch(state, client, 'C123', 500, 'timer');

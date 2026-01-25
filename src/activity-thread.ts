@@ -89,6 +89,9 @@ export interface ActivityBatchState {
   activityBatchStartIndex: number;         // First entry index in current batch
   lastActivityPostTime: number;            // For rate limiting thread posts
   threadParentTs: string | null;           // Status message ts (thread parent for activity entries)
+  // Track posted batch for updates when tool_result arrives (race condition fix)
+  postedBatchTs: string | null;            // Ts of most recently posted batch
+  postedBatchToolUseIds: Set<string>;      // tool_use_ids in the posted batch
 }
 
 /**
@@ -142,6 +145,13 @@ export async function flushActivityBatch(
     );
 
     if (result?.ts) {
+      // Store for potential updates when tool_result arrives
+      state.postedBatchTs = result.ts;
+      state.postedBatchToolUseIds = new Set(
+        state.activityBatch
+          .filter(e => e.type === 'tool_complete' && e.toolUseId)
+          .map(e => e.toolUseId!)
+      );
       // Update last post time for rate limiting
       state.lastActivityPostTime = Date.now();
     }
@@ -151,6 +161,49 @@ export async function flushActivityBatch(
 
   // Clear batch after posting (success or failure)
   state.activityBatch = [];
+}
+
+/**
+ * Update the most recently posted batch message with new metrics.
+ * Called when tool_result arrives after batch was already flushed.
+ *
+ * @param state - Activity batch state
+ * @param client - Slack WebClient
+ * @param channelId - Channel ID
+ * @param activityLog - Full activity log (to re-render entries)
+ * @param toolUseId - tool_use_id that just received results
+ */
+export async function updatePostedBatch(
+  state: ActivityBatchState,
+  client: WebClient,
+  channelId: string,
+  activityLog: ActivityEntry[],
+  toolUseId: string
+): Promise<void> {
+  // Only update if this tool was in the posted batch
+  if (!state.postedBatchTs || !state.postedBatchToolUseIds?.has(toolUseId)) {
+    return;
+  }
+
+  // Re-render entries that were in the posted batch
+  const batchEntries = activityLog.filter(
+    e => e.type === 'tool_complete' && e.toolUseId && state.postedBatchToolUseIds.has(e.toolUseId)
+  );
+
+  const content = formatThreadActivityBatch(batchEntries);
+  if (!content) return;
+
+  try {
+    await client.chat.update({
+      channel: channelId,
+      ts: state.postedBatchTs,
+      text: content,
+    });
+    console.log(`[activity-thread] Updated posted batch with tool result metrics for ${toolUseId}`);
+  } catch (error) {
+    // Message may have been deleted or too old - ignore
+    console.warn('[activity-thread] Failed to update posted batch:', error);
+  }
 }
 
 /**

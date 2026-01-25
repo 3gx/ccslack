@@ -138,6 +138,14 @@ export interface ActivityEntry {
   generatingInProgress?: boolean; // True while text is streaming
   generatingContent?: string;   // Full response text (stored for modal/download)
   generatingTruncated?: string; // First 500 chars (for live display)
+  // Tool input (populated at content_block_stop)
+  toolInput?: Record<string, unknown>;
+  toolUseId?: string;           // For matching with tool_result
+  // Result metrics (populated when user message with tool_result arrives)
+  lineCount?: number;           // Read/Write: lines in result/content
+  matchCount?: number;          // Grep/Glob: number of matches/files
+  linesAdded?: number;          // Edit: lines in new_string
+  linesRemoved?: number;        // Edit: lines in old_string
 }
 
 /**
