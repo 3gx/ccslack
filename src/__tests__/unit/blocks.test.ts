@@ -3386,7 +3386,8 @@ describe('blocks', () => {
         undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         2
       );
-      expect(line).toBe('_plan | claude-sonnet-4 | session | :warning: 2 limits_');
+      // Rate limits go on second line since they're part of stats
+      expect(line).toBe('_plan | claude-sonnet-4 | session_\n_:warning: 2 limits_');
     });
 
     it('should show completion stats with rate limits', () => {

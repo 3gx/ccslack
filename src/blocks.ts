@@ -1755,7 +1755,14 @@ export function buildUnifiedStatusLine(
     parts.push(`:warning: ${rateLimitHits} limits`);
   }
 
-  return `_${parts.join(' | ')}_`;
+  // Split into two lines: line 1 = mode | model | session, line 2 = stats
+  const line1Parts = parts.slice(0, 3);  // mode, model, session
+  const line2Parts = parts.slice(3);     // stats (context, tokens, cost, duration, rate limits)
+
+  if (line2Parts.length === 0) {
+    return `_${line1Parts.join(' | ')}_`;
+  }
+  return `_${line1Parts.join(' | ')}_\n_${line2Parts.join(' | ')}_`;
 }
 
 /**
