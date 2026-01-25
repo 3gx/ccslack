@@ -622,6 +622,41 @@ describe('slack-bot mention handlers', () => {
       expect(mockClient.reactions.add).not.toHaveBeenCalled();
     });
 
+    it('should allow edited main channel message that is thread parent (ts === thread_ts)', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // When a main channel message is edited after it has replies,
+      // Slack sets thread_ts = ts (the message IS the thread parent)
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> revised message',
+          channel: 'C123',
+          ts: 'parent123',
+          thread_ts: 'parent123', // Same as ts = thread parent being edited
+        },
+        client: mockClient,
+      });
+
+      // Should NOT post rejection message
+      expect(mockClient.chat.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('@bot can only be mentioned in the main channel'),
+        })
+      );
+
+      // Should proceed with processing - eyes reaction added
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'parent123',
+        name: 'eyes',
+      });
+
+      // Should start Claude query
+      expect(startClaudeQuery).toHaveBeenCalled();
+    });
+
     it('should reject @bot mentions with no message content', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();

@@ -2090,7 +2090,8 @@ app.event('app_mention', async ({ event, client }) => {
     }
 
     // Reject @bot mentions in threads - only main channel allowed
-    if (event.thread_ts) {
+    // Allow if ts === thread_ts (message is thread parent being edited, not a reply)
+    if (event.thread_ts && event.thread_ts !== event.ts) {
       await client.chat.postMessage({
         channel: event.channel,
         thread_ts: event.thread_ts,
