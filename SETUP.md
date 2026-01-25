@@ -310,6 +310,24 @@ Your tokens may be incorrect or expired.
 2. Check the App-Level Token has `connections:write` scope
 3. Ensure Socket Mode is enabled in app settings
 
+### Puppeteer/Chrome Errors on Linux
+
+The bot uses Puppeteer for markdown-to-image conversion. On Linux, you need to install Chrome dependencies:
+
+**Debian/Ubuntu:**
+```bash
+sudo apt-get install -y \
+  libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 libxi6 libxtst6 \
+  libnss3 libnspr4 libcups2 libxss1 libxrandr2 libasound2 libatk1.0-0 \
+  libatk-bridge2.0-0 libgtk-3-0 libgbm1 libpango-1.0-0 libpangocairo-1.0-0 \
+  libcairo2 libfontconfig1 libdbus-1-3 libexpat1 libglib2.0-0
+```
+
+**Check for missing dependencies:**
+```bash
+ldd ~/.cache/puppeteer/chrome/*/chrome-linux64/chrome | grep "not found"
+```
+
 ---
 
 ## Updating Permissions
