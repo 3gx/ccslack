@@ -121,6 +121,8 @@ export function parseCommand(
       return handleStripEmptyTag(argString, session);
     case 'show-plan':
       return handleShowPlan(session);
+    case 'ff':
+      return handleFastForward(session, threadTs);
     default:
       // Unknown command - return error
       return {
@@ -150,6 +152,7 @@ function handleHelp(): CommandResult {
 \`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
 \`/watch\` - Get command to continue session in terminal and watch for activity
 \`/stop-watching\` - Stop watching terminal session
+\`/ff\` - Sync missed terminal messages and start watching (main channel only)
 \`/fork\` - Get command to fork session to terminal
 \`/resume <id>\` - Resume a terminal session in Slack
 \`/compact\` - Compact session to reduce context size
