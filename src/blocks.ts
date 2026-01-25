@@ -678,9 +678,9 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
   // Add model and context info if available
   if (lastUsage) {
     statusLines.push(`*Model:* ${lastUsage.model}`);
-    const totalTokens = lastUsage.inputTokens + lastUsage.cacheReadInputTokens;
+    const totalTokens = lastUsage.inputTokens + (lastUsage.cacheCreationInputTokens ?? 0) + lastUsage.cacheReadInputTokens;
     const contextPercent = lastUsage.contextWindow > 0
-      ? Math.round((totalTokens / lastUsage.contextWindow) * 100)
+      ? Math.min(100, Math.max(0, Math.round((totalTokens / lastUsage.contextWindow) * 100)))
       : 0;
     statusLines.push(`*Context:* ${contextPercent}% (${totalTokens.toLocaleString()} / ${lastUsage.contextWindow.toLocaleString()} tokens)`);
   }
@@ -764,7 +764,8 @@ export function computeAutoCompactThreshold(contextWindow: number, maxOutputToke
  */
 export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
   const { inputTokens, outputTokens, cacheReadInputTokens, contextWindow, model } = usage;
-  const totalTokens = inputTokens + cacheReadInputTokens;
+  const cacheCreationInputTokens = usage.cacheCreationInputTokens ?? 0;
+  const totalTokens = inputTokens + cacheCreationInputTokens + cacheReadInputTokens;
   const percent = contextWindow > 0
     ? Number(((totalTokens / contextWindow) * 100).toFixed(1))
     : 0;
@@ -820,6 +821,7 @@ export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
           `\n_Breakdown:_`,
           `\u2022 Input: ${inputTokens.toLocaleString()}`,
           `\u2022 Output: ${outputTokens.toLocaleString()}`,
+          `\u2022 Cache creation: ${cacheCreationInputTokens.toLocaleString()}`,
           `\u2022 Cache read: ${cacheReadInputTokens.toLocaleString()}`,
         ].join('\n'),
       },

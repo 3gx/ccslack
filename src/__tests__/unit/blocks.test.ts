@@ -554,6 +554,7 @@ describe('blocks', () => {
       inputTokens: 1000,
       outputTokens: 500,
       cacheReadInputTokens: 49000,
+      cacheCreationInputTokens: 0,
       contextWindow: 200000,
       model: 'claude-sonnet-4-5',
       maxOutputTokens: 64000,  // sonnet uses 64k output tokens
@@ -595,6 +596,7 @@ describe('blocks', () => {
 
       expect(sectionBlock?.text?.text).toContain('Input: 1,000');
       expect(sectionBlock?.text?.text).toContain('Output: 500');
+      expect(sectionBlock?.text?.text).toContain('Cache creation: 0');
       expect(sectionBlock?.text?.text).toContain('Cache read: 49,000');
     });
 
@@ -719,6 +721,19 @@ describe('blocks', () => {
       const sectionBlock = blocks.find((b: any) => b.type === 'section');
       expect(sectionBlock?.text?.text).toContain('175%');
       expect(sectionBlock?.text?.text).toContain('\u2588'.repeat(20));
+    });
+
+    it('should include cache creation tokens in context percentage', () => {
+      const withCacheCreation: LastUsage = {
+        ...baseUsage,
+        inputTokens: 1000,
+        cacheReadInputTokens: 39000,
+        cacheCreationInputTokens: 10000, // 1000 + 10000 + 39000 = 50000 = 25%
+      };
+      const blocks = buildContextDisplayBlocks(withCacheCreation);
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+      expect(sectionBlock?.text?.text).toContain('25%');
+      expect(sectionBlock?.text?.text).toContain('Cache creation: 10,000');
     });
   });
 

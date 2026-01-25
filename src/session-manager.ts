@@ -32,6 +32,7 @@ export interface LastUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens: number;
+  cacheCreationInputTokens?: number;  // Tokens written to cache (included in CLI context %)
   contextWindow: number;
   model: string;
   maxOutputTokens?: number;  // From SDK ModelUsage - for accurate auto-compact threshold

@@ -122,6 +122,11 @@ interface ProcessingState {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadInputTokens?: number;  // For accurate context % calculation
+  cacheCreationInputTokens?: number;  // Cumulative cache creation tokens
+  // Per-turn usage from last assistant message (CLI uses per-turn, not cumulative)
+  perTurnInputTokens?: number;
+  perTurnCacheReadInputTokens?: number;
+  perTurnCacheCreationInputTokens?: number;
   contextWindow?: number;
   maxOutputTokens?: number;  // From SDK ModelUsage - for accurate auto-compact threshold
   costUsd?: number;
@@ -3670,6 +3675,14 @@ async function handleMessage(params: {
         console.log(`[Mapping] Captured assistant message UUID: ${uuid} (total: ${assistantMessageUuids.size})`);
         // Track generating activity for user visibility (shows text is being streamed)
         updateGeneratingEntry(currentResponse.length);
+        // Capture per-turn usage from assistant message (CLI uses last assistant msg, not cumulative)
+        const assistantMsg = msg as any;
+        if (assistantMsg.message?.usage) {
+          const u = assistantMsg.message.usage;
+          processingState.perTurnInputTokens = u.input_tokens || 0;
+          processingState.perTurnCacheReadInputTokens = u.cache_read_input_tokens || 0;
+          processingState.perTurnCacheCreationInputTokens = u.cache_creation_input_tokens || 0;
+        }
       }
 
       // Capture session ID and model from init message
@@ -3888,6 +3901,7 @@ async function handleMessage(params: {
           processingState.outputTokens = resultMsg.usage.output_tokens || 0;
           // Cache tokens are needed for accurate context % calculation
           processingState.cacheReadInputTokens = resultMsg.usage.cache_read_input_tokens || 0;
+          processingState.cacheCreationInputTokens = resultMsg.usage.cache_creation_input_tokens || 0;
         }
         // Extract cost and context window from SDK result
         if (resultMsg.total_cost_usd !== undefined) {
@@ -3935,17 +3949,20 @@ async function handleMessage(params: {
       );
     }
 
-    // Calculate context percentage using input tokens + cache read tokens
-    // This gives accurate context utilization since cached tokens are in the context window
-    const totalContextTokens = (processingState.inputTokens || 0) + (processingState.cacheReadInputTokens || 0);
-    const contextPercent = processingState.contextWindow && totalContextTokens > 0
-      ? Number(((totalContextTokens / processingState.contextWindow) * 100).toFixed(1))
+    // Calculate context percentage using per-turn usage from last assistant message
+    // CLI formula: total = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+    // CLI uses Math.round and clamps to [0, 100]
+    const perTurnTotal = (processingState.perTurnInputTokens || 0)
+      + (processingState.perTurnCacheCreationInputTokens || 0)
+      + (processingState.perTurnCacheReadInputTokens || 0);
+    const contextPercent = processingState.contextWindow && perTurnTotal > 0
+      ? Math.min(100, Math.max(0, Math.round(perTurnTotal / processingState.contextWindow * 100)))
       : undefined;
 
     // Calculate % left until auto-compact triggers
     // Formula from SDK: threshold = contextWindow - maxOutputTokens - 13000
-    const compactPercent = processingState.contextWindow && totalContextTokens > 0
-      ? Number((((computeAutoCompactThreshold(processingState.contextWindow, processingState.maxOutputTokens) - totalContextTokens) / processingState.contextWindow) * 100).toFixed(1))
+    const compactPercent = processingState.contextWindow && perTurnTotal > 0
+      ? Number((((computeAutoCompactThreshold(processingState.contextWindow, processingState.maxOutputTokens) - perTurnTotal) / processingState.contextWindow) * 100).toFixed(1))
       : undefined;
 
     // Store in processingState for abort handler access
@@ -4016,21 +4033,24 @@ async function handleMessage(params: {
       });
 
       // Save usage data for /status and /context commands
+      // Use per-turn values (from last assistant message) for accurate context %, matching CLI behavior
       if (processingState.model && processingState.contextWindow) {
         const lastUsage: LastUsage = {
-          inputTokens: processingState.inputTokens || 0,
+          inputTokens: processingState.perTurnInputTokens || 0,
           outputTokens: processingState.outputTokens || 0,
-          cacheReadInputTokens: processingState.cacheReadInputTokens || 0,
+          cacheReadInputTokens: processingState.perTurnCacheReadInputTokens || 0,
+          cacheCreationInputTokens: processingState.perTurnCacheCreationInputTokens || 0,
           contextWindow: processingState.contextWindow,
           model: processingState.model,
           maxOutputTokens: processingState.maxOutputTokens,
         };
+        const perTurnContextTotal = lastUsage.inputTokens + (lastUsage.cacheCreationInputTokens ?? 0) + lastUsage.cacheReadInputTokens;
         if (threadTs) {
           await saveThreadSession(channelId, threadTs, { lastUsage });
-          console.log(`[Usage] Saved thread lastUsage: ${lastUsage.inputTokens + lastUsage.cacheReadInputTokens}/${lastUsage.contextWindow} tokens (${Math.round((lastUsage.inputTokens + lastUsage.cacheReadInputTokens) / lastUsage.contextWindow * 100)}%)`);
+          console.log(`[Usage] Saved thread lastUsage: ${perTurnContextTotal}/${lastUsage.contextWindow} tokens (${Math.round(perTurnContextTotal / lastUsage.contextWindow * 100)}%)`);
         } else {
           await saveSession(channelId, { lastUsage });
-          console.log(`[Usage] Saved lastUsage: ${lastUsage.inputTokens + lastUsage.cacheReadInputTokens}/${lastUsage.contextWindow} tokens (${Math.round((lastUsage.inputTokens + lastUsage.cacheReadInputTokens) / lastUsage.contextWindow * 100)}%)`);
+          console.log(`[Usage] Saved lastUsage: ${perTurnContextTotal}/${lastUsage.contextWindow} tokens (${Math.round(perTurnContextTotal / lastUsage.contextWindow * 100)}%)`);
         }
       }
     }
