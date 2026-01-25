@@ -2189,6 +2189,13 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
 
   const lines: string[] = [];
 
+  // Always show user input permalink at the top (before rolling window truncation)
+  // Extract from starting entry which is always entries[0]
+  const startingEntry = entries.find(e => e.type === 'starting');
+  if (startingEntry?.userInputPermalink) {
+    lines.push(`<${startingEntry.userInputPermalink}|:leftwards_arrow_with_hook:>`);
+  }
+
   // Show truncation notice if in rolling window mode
   if (entries.length > MAX_LIVE_ENTRIES) {
     const hiddenCount = entries.length - ROLLING_WINDOW_SIZE;
@@ -2206,10 +2213,8 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
   for (const entry of displayEntries) {
     switch (entry.type) {
       case 'starting':
-        const inputLink = entry.userInputPermalink
-          ? ` <${entry.userInputPermalink}|:leftwards_arrow_with_hook:>`
-          : '';
-        lines.push(`:brain: *Analyzing request...*${inputLink}`);
+        // Link is shown at the top of activity log (before rolling window)
+        lines.push(':brain: *Analyzing request...*');
         break;
       case 'thinking':
         // Show thinking content - rolling window for in-progress, truncated for complete
@@ -2467,13 +2472,17 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
 
   const lines: string[] = [];
 
+  // Always show user input permalink at the top
+  const startingEntry = entries.find(e => e.type === 'starting');
+  if (startingEntry?.userInputPermalink) {
+    lines.push(`<${startingEntry.userInputPermalink}|:leftwards_arrow_with_hook:>`);
+  }
+
   for (const entry of entries) {
     switch (entry.type) {
       case 'starting':
-        const startInputLink = entry.userInputPermalink
-          ? ` <${entry.userInputPermalink}|:leftwards_arrow_with_hook:>`
-          : '';
-        lines.push(`:brain: *Analyzing request...*${startInputLink}`);
+        // Link is shown at the top of activity log
+        lines.push(':brain: *Analyzing request...*');
         break;
       case 'tool_start':
         // Only show tool_start if tool hasn't completed yet
