@@ -575,4 +575,59 @@ describe('updateThinkingMessageWithRetry', () => {
     // Let the promise complete
     await resultPromise;
   });
+
+  describe('stripAnsiCodes', () => {
+    it('should strip color codes', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      // Green text: \x1B[32m ... \x1B[39m (reset foreground)
+      expect(stripAnsiCodes('\x1B[32m✓\x1B[39m test passed')).toBe('✓ test passed');
+    });
+
+    it('should strip bold codes', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      // Bold: \x1B[1m ... \x1B[22m (reset bold)
+      expect(stripAnsiCodes('\x1B[1mbold text\x1B[22m')).toBe('bold text');
+    });
+
+    it('should strip reset codes', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      // Reset all: \x1B[0m
+      expect(stripAnsiCodes('text\x1B[0m more')).toBe('text more');
+    });
+
+    it('should strip multiple SGR parameters', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      // Bold green: \x1B[1;32m
+      expect(stripAnsiCodes('\x1B[1;32mhello\x1B[0m')).toBe('hello');
+    });
+
+    it('should strip cursor movement codes', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      // Clear line: \x1B[2K, Cursor up: \x1B[1A
+      expect(stripAnsiCodes('\x1B[2Kline\x1B[1A')).toBe('line');
+    });
+
+    it('should handle text without ANSI codes', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      expect(stripAnsiCodes('plain text')).toBe('plain text');
+    });
+
+    it('should handle empty string', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      expect(stripAnsiCodes('')).toBe('');
+    });
+
+    it('should handle complex vitest output', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      // Simulated vitest output with colors
+      const input = '\x1B[32m✓\x1B[39m src/__tests__/unit/blocks.test.ts \x1B[2m(335 tests)\x1B[22m';
+      const expected = '✓ src/__tests__/unit/blocks.test.ts (335 tests)';
+      expect(stripAnsiCodes(input)).toBe(expected);
+    });
+
+    it('should strip adjacent codes', async () => {
+      const { stripAnsiCodes } = await import('../../slack-bot.js');
+      expect(stripAnsiCodes('\x1B[1m\x1B[32mtest\x1B[0m\x1B[0m')).toBe('test');
+    });
+  });
 });

@@ -244,6 +244,15 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Strip ANSI escape codes from text (colors, bold, etc.).
+ * Handles CSI sequences: ESC [ <params> <command>
+ * Example: "\x1B[32m✓\x1B[0m" → "✓"
+ */
+export function stripAnsiCodes(text: string): string {
+  return text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
+}
+
+/**
  * Read thinking content from session file by timestamp and charCount.
  * Uses timestamp as primary match, charCount as verification.
  *
@@ -4012,12 +4021,15 @@ async function handleMessage(params: {
                     matchingEntry.toolOutput = resultContent.slice(0, MAX_FULL);
                     matchingEntry.toolOutputTruncated = resultContent.length > MAX_FULL;
 
+                    // Strip ANSI codes for clean preview display
+                    const cleanedContent = stripAnsiCodes(resultContent);
+
                     // Handle empty output
-                    if (resultContent.length === 0) {
+                    if (cleanedContent.length === 0) {
                       matchingEntry.toolOutputPreview = '[No output]';
                     } else {
-                      matchingEntry.toolOutputPreview = resultContent.slice(0, PREVIEW_LEN);
-                      if (resultContent.length > PREVIEW_LEN) {
+                      matchingEntry.toolOutputPreview = cleanedContent.slice(0, PREVIEW_LEN);
+                      if (cleanedContent.length > PREVIEW_LEN) {
                         matchingEntry.toolOutputPreview += '...';
                       }
                     }
