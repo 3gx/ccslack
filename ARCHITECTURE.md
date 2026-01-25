@@ -30,8 +30,9 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │  Command Parser (commands.ts)                                        │   │
 │  │  /status, /mode, /model, /cd, /ls, /set-current-path, /context,      │   │
-│  │  /continue, /fork, /fork-thread, /clear, /compact,                   │   │
-│  │  /max-thinking-tokens, /update-rate, /message-size, /strip-empty-tag │   │
+│  │  /watch, /stop-watching, /fork, /resume, /clear, /compact,           │   │
+│  │  /max-thinking-tokens, /update-rate, /message-size, /strip-empty-tag,│   │
+│  │  /show-plan, /wait, /help                                            │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │                                          ↓                                   │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
@@ -116,10 +117,11 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 
 ### Session Manager (`src/session-manager.ts`)
 - Persists sessions to `sessions.json`
-- **Session interface**: `sessionId`, `workingDir`, `mode`, `model`, `pathConfigured`, `lastUsage`, `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `stripEmptyTag`, `planFilePath`
+- **Session interface**: `sessionId`, `previousSessionIds`, `workingDir`, `mode`, `model`, `pathConfigured`, `configuredPath`, `configuredBy`, `configuredAt`, `lastUsage`, `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `stripEmptyTag`, `planFilePath`, `syncedMessageUuids`, `slackOriginatedUserUuids`
+- **LastUsage interface**: `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `contextWindow`, `model`, `maxOutputTokens`
 - **ThreadSession interface**: Inherits from Session, adds `forkedFrom`, `forkedFromThreadTs`, `resumeSessionAtMessageId`
 - **Message mapping**: `SlackMessageMapping` links Slack timestamps to SDK message IDs and session IDs
-- **Activity log storage**: Stores activity entries by conversation key for View Log modal
+- **Activity log storage**: Stores activity entries by conversation key for View Log modal and download
 - `previousSessionIds[]`: Tracks sessions before `/clear` for time-travel forking
 - Handles corrupted session files gracefully with migration support
 
@@ -143,7 +145,8 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 
 ### Commands (`src/commands.ts`)
 - Parses slash commands from user messages
-- Implements: `/status`, `/mode`, `/model`, `/cd`, `/ls`, `/set-current-path`, `/context`, `/continue`, `/fork`, `/fork-thread`, `/resume`, `/clear`, `/compact`, `/max-thinking-tokens`, `/update-rate`, `/message-size`, `/strip-empty-tag`, `/wait`
+- Implements: `/help`, `/status`, `/context`, `/mode`, `/model`, `/cd`, `/ls`, `/set-current-path`, `/watch`, `/stop-watching`, `/fork`, `/resume`, `/clear`, `/compact`, `/max-thinking-tokens`, `/update-rate`, `/message-size`, `/strip-empty-tag`, `/show-plan`, `/wait`
+- `/ff` is disabled (returns unknown command error)
 
 ### Error Handling (`src/errors.ts`)
 - `SlackBotError` class with typed error codes
@@ -259,7 +262,7 @@ Sessions are stored in `sessions.json`:
       "configuredBy": "U12345678",
       "configuredAt": 1705123456789,
       "maxThinkingTokens": 31999,
-      "updateRateSeconds": 2,
+      "updateRateSeconds": 3,
       "threadCharLimit": 500,
       "stripEmptyTag": false,
       "planFilePath": null,
@@ -267,8 +270,10 @@ Sessions are stored in `sessions.json`:
         "inputTokens": 5000,
         "outputTokens": 1200,
         "cacheReadInputTokens": 3000,
+        "cacheCreationInputTokens": 500,
         "contextWindow": 200000,
-        "model": "claude-sonnet-4-5-20250929"
+        "model": "claude-sonnet-4-5-20250929",
+        "maxOutputTokens": 16384
       },
       "messageMap": {
         "1234567890.001": {
@@ -299,7 +304,7 @@ Sessions are stored in `sessions.json`:
           "configuredBy": "U12345678",
           "configuredAt": 1705123456789,
           "maxThinkingTokens": 31999,
-          "updateRateSeconds": 2,
+          "updateRateSeconds": 3,
           "threadCharLimit": 500,
           "stripEmptyTag": false,
           "planFilePath": null
@@ -334,7 +339,7 @@ Sessions are stored in `sessions.json`:
 During query processing, the bot maintains two Slack messages that are updated in real-time:
 
 ### Message 1: Status Panel
-Updated every `updateRateSeconds` (configurable 1-10s, default 2s):
+Updated every `updateRateSeconds` (configurable 1-10s, default 3s):
 - Header: "Claude is working..." with spinner animation
 - Mode and model display
 - Current activity (Thinking/Running: ToolName/Generating)
@@ -364,16 +369,18 @@ On completion:
 ```typescript
 interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted';
   tool?: string;
   durationMs?: number;
   message?: string;
-  thinkingContent?: string;     // Full content for modal
-  thinkingTruncated?: string;   // Last 500 chars for live display
+  thinkingContent?: string;     // Full content for modal/download
+  thinkingTruncated?: string;   // First 500 chars for live display
   thinkingInProgress?: boolean;
   generatingChunks?: number;
   generatingChars?: number;
   generatingInProgress?: boolean;
+  generatingContent?: string;   // Full response text
+  generatingTruncated?: string; // First 500 chars for live display
 }
 ```
 
@@ -455,13 +462,13 @@ After `/clear`, users can still fork from old messages:
 - Thread forks from the OLD session, not the null current session
 - `previousSessionIds[]` tracks cleared sessions for reference
 
-### Thread-to-Thread Forking
+### Fork to New Channel
 
-Users can fork from within a thread using `> fork: description` or `/fork-thread description`:
-1. Creates new top-level anchor message in channel
-2. Creates thread session pointing to source thread's session
-3. Posts link back to source thread's fork point
-4. New thread has its own independent history from fork point
+Users can fork to a new channel using the "Fork here" button on messages:
+1. Creates new Slack channel
+2. Creates session with `forkedFromChannelId`, `forkedFromMessageTs`, `forkedFromSdkMessageId`
+3. Forks from the specified point with full history up to that message
+4. New channel has independent session from fork point
 
 ### Graceful Degradation
 
@@ -565,25 +572,29 @@ make clean              # Remove dist/ and coverage/
 | Command | Description |
 |---------|-------------|
 | `@claude <message>` | Send message to Claude |
+| `@claude /help` | Show all available commands |
 | `@claude /status` | Show session status, context usage |
-| `@claude /mode` | Show mode selection buttons |
+| `@claude /context` | Show detailed context usage with progress bar |
+| `@claude /mode [plan\|bypass\|ask\|edit]` | Show mode picker or switch directly |
 | `@claude /model` | Show model selection buttons |
 | `@claude /cd <dir>` | Change working directory (before lock) |
 | `@claude /ls [path]` | List files in directory |
 | `@claude /set-current-path` | Lock current directory (one-time) |
-| `@claude /context` | Show detailed context usage |
-| `@claude /continue` | Get terminal resume command |
+| `@claude /watch` | Start watching session for terminal updates |
+| `@claude /stop-watching` | Stop watching terminal session |
 | `@claude /fork` | Get terminal fork command |
-| `@claude /fork-thread <desc>` | Fork current thread to new thread |
-| `@claude /resume <id>` | Resume a terminal session in Slack |
+| `@claude /resume <id>` | Resume a terminal session in Slack (UUID format) |
 | `@claude /clear` | Clear conversation history |
 | `@claude /compact` | Compact session to reduce context |
-| `@claude /max-thinking-tokens <tokens>` | Set extended thinking budget (0=disable, 1024-128000) |
-| `@claude /update-rate <1-10>` | Set status update interval (default 2s) |
-| `@claude /message-size <100-36000>` | Set message size limit (default 500) |
+| `@claude /max-thinking-tokens [tokens]` | Set extended thinking budget (0=disable, 1024-128000, default=31999) |
+| `@claude /update-rate [1-10]` | Set status update interval (default 3s) |
+| `@claude /message-size [100-36000]` | Set message size limit (default 500) |
 | `@claude /strip-empty-tag [true\|false]` | Strip bare ``` wrappers (default false) |
-| `@claude /wait <1-300>` | Rate limit test |
-| `> fork: <description>` | (In thread) Fork to new thread |
+| `@claude /show-plan` | Display current plan file content in thread |
+| `@claude /wait <1-300>` | Rate limit stress test |
+
+**Disabled Commands:**
+- `/ff` (fast-forward) - Returns unknown command error
 
 ## Session Cleanup
 

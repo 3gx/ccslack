@@ -2,6 +2,19 @@
 
 A Slack bot that integrates the Claude Code SDK for AI-powered coding assistance in Slack channels.
 
+## Quick Start
+
+1. **Set up Slack App** - Follow the [Slack Bot Setup Guide](./SETUP.md) to create and configure your Slack app
+2. **Configure environment** - Copy `.env.example` to `.env` and add your tokens
+3. **Install & run**:
+   ```bash
+   make setup    # Install dependencies
+   make build    # Compile TypeScript
+   make start    # Run the bot
+   ```
+
+See [SETUP.md](./SETUP.md) for detailed step-by-step instructions.
+
 ## Features
 
 - **Direct messaging** with Claude Code via Slack mentions (@bot)
@@ -22,22 +35,23 @@ A Slack bot that integrates the Claude Code SDK for AI-powered coding assistance
 | `/help` | Show all available commands |
 | `/status` | Show session info (ID, mode, directory, context usage) |
 | `/context` | Show context window usage with visual progress bar |
-| `/mode` | Show mode picker (plan, default, bypassPermissions, acceptEdits) |
+| `/mode [plan\|bypass\|ask\|edit]` | Show mode picker or switch directly with shortcut |
 | `/model` | Show model picker |
 | `/max-thinking-tokens [n]` | Set thinking budget (0=disable, 1024-128000, default=31999) |
-| `/update-rate [n]` | Set status update interval (1-10 seconds, default=2) |
+| `/update-rate [n]` | Set status update interval (1-10 seconds, default=3) |
 | `/message-size [n]` | Set message size limit before truncation (100-36000, default=500) |
 | `/strip-empty-tag [true\|false]` | Strip bare ``` wrappers (default=false) |
 | `/ls [path]` | List files in directory (relative or absolute) |
 | `/cd [path]` | Change directory (only before path is locked) |
 | `/set-current-path` | Lock current directory (one-time only, cannot be changed) |
-| `/continue` | Get command to continue session in terminal |
+| `/watch` | Start watching session for terminal updates (main channel only) |
+| `/stop-watching` | Stop watching terminal session |
 | `/fork` | Get command to fork session to terminal |
-| `/fork-thread [desc]` | Fork current thread to a new thread |
-| `/resume <id>` | Resume a terminal session in Slack |
+| `/resume <id>` | Resume a terminal session in Slack (UUID format required) |
 | `/compact` | Compact session to reduce context size |
 | `/clear` | Clear session history (start fresh) |
-| `/wait <sec>` | Rate limit test (1-300 seconds) |
+| `/show-plan` | Display current plan file content in thread |
+| `/wait <sec>` | Rate limit stress test (1-300 seconds) |
 
 ## Permission Modes
 
@@ -62,37 +76,6 @@ After completion:
 - Collapsed summary with thinking block and tool counts
 - "View Log" button opens paginated modal with full content
 - "Download .txt" button exports complete log with full thinking content
-
-## Setup
-
-```bash
-# Install dependencies
-make setup
-
-# Set environment variables
-export SLACK_BOT_TOKEN=xoxb-...      # Bot OAuth Token
-export SLACK_APP_TOKEN=xapp-...      # Socket Mode Token
-export SLACK_SIGNING_SECRET=...      # Request signing secret
-
-# Run the bot
-npm start
-```
-
-### Required Slack App Permissions
-
-**Bot Token Scopes:**
-- `app_mentions:read` - Receive @mentions
-- `channels:history` - Read channel messages
-- `channels:read` - Access channel info
-- `chat:write` - Post messages
-- `reactions:read` - Read reactions
-- `reactions:write` - Add reactions
-- `files:write` - Upload files (for log downloads)
-
-**Event Subscriptions:**
-- `app_mention` - When bot is mentioned
-- `message.channels` - Messages in public channels
-- `channel_deleted` - Channel deletion events
 
 ## Development
 
@@ -132,8 +115,8 @@ See [CLAUDE.md](./CLAUDE.md) for detailed development instructions and [ARCHITEC
 - Thread replies create new forked sessions with **point-in-time history**
 - When you reply to message B in a conversation A→B→C→D, the thread only knows about A and B
 - This enables "what if" scenarios from any point in the conversation
-- `/fork-thread` creates explicit thread forks
 - All forks tracked in `sessions.json` under parent channel
+- "Fork here" button on messages creates new channel with forked session
 
 ### Cleanup
 - Channel deletion triggers automatic cleanup
@@ -150,7 +133,7 @@ The bot cannot currently detect if a session is active in your terminal. This fe
 - macOS `ps` command truncates long arguments, hiding session IDs
 - No reliable cross-platform detection method found
 
-**Workaround:** Before using `/continue` to move a session to terminal, manually check if Claude is already running:
+**Workaround:** Before using `/watch` to sync with terminal, manually check if Claude is already running:
 ```bash
 ps aux | grep "claude --resume"
 ```
@@ -160,3 +143,7 @@ This limitation will be addressed in a future update.
 ### Concurrent Session Warning
 
 Due to the terminal detection limitation above, the bot cannot warn you if you're about to use a session that's already active in terminal. Using the same session from multiple places simultaneously may cause unexpected behavior.
+
+### Disabled Commands
+
+- `/ff` (fast-forward) - Disabled, returns "Unknown command" error

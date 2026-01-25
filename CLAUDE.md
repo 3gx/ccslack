@@ -30,25 +30,34 @@ npx tsc --noEmit
 
 ```
 src/
-├── index.ts           # Entry point, initializes Slack app
-├── slack-bot.ts       # Main bot logic, event handlers, button handlers
-├── claude-client.ts   # Claude Code SDK wrapper
-├── mcp-server.ts      # MCP ask_user/approve_action tools
-├── session-manager.ts # Session persistence to sessions.json
-├── streaming.ts       # Slack streaming API with fallback
-├── blocks.ts          # Block Kit builders for all UI
-├── commands.ts        # Slash command parsing
-├── errors.ts          # SlackBotError class and error factories
-├── retry.ts           # Retry utilities with backoff
-├── abort-tracker.ts   # Tracks aborted queries by conversation key
-├── concurrent-check.ts # Detects if session is active in terminal
-├── model-cache.ts     # Caches available models from SDK
-├── markdown-png.ts    # Markdown to PNG image conversion
-├── utils.ts           # Utility functions (markdown conversion, etc.)
+├── index.ts              # Entry point, initializes Slack app and answer directory
+├── slack-bot.ts          # Main bot logic, event handlers, button handlers (~6000 lines)
+├── claude-client.ts      # Claude Code SDK wrapper with MCP configuration
+├── mcp-server.ts         # MCP server providing ask_user/approve_action tools
+├── session-manager.ts    # Session persistence to sessions.json with mutex locking
+├── session-reader.ts     # Parses Claude SDK JSONL session files from ~/.claude/projects/
+├── session-event-stream.ts # Reads session JSONL files as async generator
+├── streaming.ts          # Slack streaming API with fallback to chat.update
+├── blocks.ts             # Block Kit builders for all UI (~74KB)
+├── commands.ts           # Slash command parsing and execution
+├── errors.ts             # SlackBotError class and error factories
+├── retry.ts              # Retry utilities with exponential backoff
+├── abort-tracker.ts      # Tracks aborted queries by conversation key
+├── ff-abort-tracker.ts   # Tracks aborted fast-forward syncs
+├── concurrent-check.ts   # Terminal session detection (currently disabled)
+├── model-cache.ts        # Caches available models from SDK (1-hour TTL)
+├── markdown-png.ts       # Markdown to PNG image conversion via Puppeteer
+├── utils.ts              # Utility functions (markdown conversion, etc.)
+├── message-sync.ts       # Syncs terminal session messages to Slack
+├── terminal-watcher.ts   # Polls terminal session files and posts updates
+├── activity-thread.ts    # Posts activity entries as thread replies
+├── file-handler.ts       # Downloads and processes Slack file uploads
+├── content-builder.ts    # Builds Claude-compatible multi-modal content blocks
+├── types.d.ts            # Module declarations for markdown-it plugins
 └── __tests__/
-    ├── unit/          # Unit tests (mocked dependencies)
-    ├── integration/   # Integration tests (mocked Slack/SDK)
-    └── sdk-live/      # Live SDK tests (requires real API key)
+    ├── unit/             # Unit tests (29 files, mocked dependencies)
+    ├── integration/      # Integration tests (20 files, mocked Slack/SDK)
+    └── sdk-live/         # Live SDK tests (41 files, requires real API key)
 ```
 
 ## Key Patterns
@@ -78,7 +87,7 @@ Sessions are automatically cleaned up when:
 
 **What gets deleted:**
 - ✅ Main channel session
-- ✅ Thread sessions (auto-forks and `/fork-thread` forks)
+- ✅ Thread sessions (auto-forks from thread replies)
 - ❌ Terminal forks (created via `claude --resume <id> --fork-session`)
 
 **Why terminal forks are NOT deleted:**
@@ -121,16 +130,23 @@ Sessions are automatically cleaned up when:
 ### Permission Modes
 | Mode | SDK `permissionMode` | Tool Approval |
 |------|---------------------|---------------|
-| Plan | `plan` | SDK handles internally |
-| Auto | `bypassPermissions` | No approval needed |
-| Ask | `default` | Uses `canUseTool` callback |
-| AcceptEdits | `acceptEdits` | Accept code edits without prompting |
+| Plan | `plan` | SDK handles via ExitPlanMode tool, shows 5-button approval UI |
+| Bypass | `bypassPermissions` | No approval needed, all tools auto-allowed |
+| Ask (Default) | `default` | Uses `canUseTool` callback with Approve/Deny buttons |
+| AcceptEdits | `acceptEdits` | Accept code edits without prompting, prompt for others |
+
+### Mode Shortcuts
+- `/mode plan` → `plan`
+- `/mode bypass` → `bypassPermissions`
+- `/mode ask` → `default`
+- `/mode edit` → `acceptEdits`
 
 ### canUseTool Callback
 In `default` mode, SDK calls `canUseTool` for tool approval:
-- Must return `{ behavior: 'allow' }` or `{ behavior: 'deny', message }`
-- Has 60-second timeout (we use 55s to be safe)
-- Auto-deny `mcp__ask-user__approve_action` to avoid double prompts
+- Must return `{ behavior: 'allow', updatedInput: {...} }` or `{ behavior: 'deny', message }`
+- Has 7-day timeout with 4-hour reminder intervals
+- Auto-deny `mcp__ask-user__approve_action` to avoid double prompts (handled via Slack buttons)
+- `AskUserQuestion` tool always prompts user in ALL modes
 
 ### MCP Server Communication
 - MCP server runs as subprocess spawned by SDK
@@ -156,10 +172,11 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 
 ### Update Rate Configuration
 - `updateRateSeconds` controls how often Slack status updates during processing
-- Values: `undefined` = 2 seconds (default), range 1-10 seconds
+- Values: `undefined` = 3 seconds (default), range 1-10 seconds
 - Higher values reduce Slack API rate limit pressure
 - Set via `/update-rate <seconds>` command
 - Shown in `/status` output
+- Can be updated mid-query (takes effect immediately)
 
 ### Message Size Configuration
 - `threadCharLimit` controls max chars before response truncation
@@ -175,11 +192,24 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 
 ### Activity Log and Generating Entries
 - Real-time activity tracking via `ActivityEntry` type
-- Entry types: `starting`, `thinking`, `tool_start`, `tool_complete`, `error`, `generating`
+- Entry types: `starting`, `thinking`, `tool_start`, `tool_complete`, `error`, `generating`, `aborted`
 - `generating` entries track text streaming progress (chunks, chars, duration)
 - Activity logs stored in `activityLogs` by conversation key
 - View Log modal shows paginated activity history
 - Download .txt exports full activity log
+
+### Plan Mode
+- Claude writes to a plan file via `ExitPlanMode` tool
+- Session stores `planFilePath` for the current plan
+- `/show-plan` command displays plan file content in thread
+- Plan approval shows 5 buttons: Clear context & bypass, Accept edits, Bypass, Manual, Change the plan
+
+### Terminal Integration
+- `/watch` starts watching a session for terminal updates
+- `/stop-watching` stops watching the terminal session
+- `/fork` provides terminal command to fork session
+- Terminal watcher polls session JSONL files and posts new messages to Slack
+- `/ff` command is disabled (returns unknown command error)
 
 ## Common Issues
 
@@ -200,9 +230,38 @@ If both `canUseTool` and MCP `approve_action` show prompts:
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `SLACK_BOT_TOKEN` | Bot OAuth Token (xoxb-...) |
-| `SLACK_APP_TOKEN` | Socket Mode Token (xapp-...) |
-| `SLACK_SIGNING_SECRET` | Request signing secret |
-| `ANTHROPIC_API_KEY` | API key for SDK live tests (optional) |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SLACK_BOT_TOKEN` | Yes | Bot OAuth Token (xoxb-...) |
+| `SLACK_APP_TOKEN` | Yes | Socket Mode Token (xapp-...) |
+| `SLACK_SIGNING_SECRET` | No | Request signing secret (not needed for Socket Mode) |
+| `ANTHROPIC_API_KEY` | No | API key for SDK live tests |
+| `SLACK_CONTEXT` | No | JSON string set dynamically for MCP server subprocess |
+| `SKIP_SDK_TESTS` | No | Set to 'true' to skip live SDK tests |
+
+## All Slash Commands
+
+| Command | Parameters | Description |
+|---------|------------|-------------|
+| `/help` | - | Show all available commands |
+| `/status` | - | Show session info (ID, mode, directory, context usage) |
+| `/context` | - | Show context window usage with visual progress bar |
+| `/mode` | `[plan\|bypass\|ask\|edit]` | Show mode picker or switch directly with shortcut |
+| `/model` | `[name]` | Show model picker (name arg redirects to picker) |
+| `/max-thinking-tokens` | `[n]` | Set thinking budget (0=disable, 1024-128000, default=31999) |
+| `/update-rate` | `[n]` | Set status update interval (1-10 seconds, default=3) |
+| `/message-size` | `[n]` | Set message size limit (100-36000, default=500) |
+| `/strip-empty-tag` | `[true\|false]` | Strip bare ``` wrappers (default=false) |
+| `/ls` | `[path]` | List files in directory |
+| `/cd` | `[path]` | Change directory (disabled after path locked) |
+| `/set-current-path` | - | Lock current directory (one-time, cannot be changed) |
+| `/watch` | - | Start watching session for terminal updates (main channel only) |
+| `/stop-watching` | - | Stop watching terminal session |
+| `/fork` | - | Get terminal command to fork session |
+| `/resume` | `<session-id>` | Resume a terminal session in Slack (UUID format required) |
+| `/compact` | - | Compact session to reduce context size |
+| `/clear` | - | Clear session history and start fresh |
+| `/show-plan` | - | Display current plan file content in thread |
+| `/wait` | `<seconds>` | Rate limit stress test (1-300 seconds) |
+
+**Note:** `/ff` (fast-forward) command is disabled and returns "Unknown command" error.
