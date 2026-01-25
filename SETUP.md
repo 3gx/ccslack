@@ -7,19 +7,83 @@ This guide walks you through creating and configuring a Slack app for the Claude
 - A Slack workspace where you have admin permissions (or permission to install apps)
 - Node.js 18+ installed
 - The Claude Code Slack Bot code cloned to your machine
+- Native dependencies installed (see [Install Native Dependencies](#install-native-dependencies))
 
 ## Table of Contents
 
-1. [Create a Slack App](#step-1-create-a-slack-app)
-2. [Enable Socket Mode](#step-2-enable-socket-mode)
-3. [Configure Bot Token Scopes](#step-3-configure-bot-token-scopes)
-4. [Subscribe to Events](#step-4-subscribe-to-events)
-5. [Enable Interactivity](#step-5-enable-interactivity)
-6. [Install App to Workspace](#step-6-install-app-to-workspace)
-7. [Get Your Tokens](#step-7-get-your-tokens)
-8. [Configure Environment](#step-8-configure-environment)
-9. [Run the Bot](#step-9-run-the-bot)
-10. [Invite Bot to Channels](#step-10-invite-bot-to-channels)
+1. [Install Native Dependencies](#install-native-dependencies)
+2. [Create a Slack App](#step-1-create-a-slack-app)
+3. [Enable Socket Mode](#step-2-enable-socket-mode)
+4. [Configure Bot Token Scopes](#step-3-configure-bot-token-scopes)
+5. [Subscribe to Events](#step-4-subscribe-to-events)
+6. [Enable Interactivity](#step-5-enable-interactivity)
+7. [Install App to Workspace](#step-6-install-app-to-workspace)
+8. [Get Your Tokens](#step-7-get-your-tokens)
+9. [Configure Environment](#step-8-configure-environment)
+10. [Run the Bot](#step-9-run-the-bot)
+11. [Invite Bot to Channels](#step-10-invite-bot-to-channels)
+
+---
+
+## Install Native Dependencies
+
+The bot uses two npm packages that require native system libraries:
+
+| Package | Purpose | Required |
+|---------|---------|----------|
+| **Puppeteer** | Markdown → PNG image conversion | Optional (graceful fallback) |
+| **Sharp** | Image resizing for file uploads | Required for image uploads |
+
+### Quick Install
+
+```bash
+make setup-tools    # Install native dependencies for your OS
+make verify-tools   # Verify all dependencies are installed
+```
+
+### macOS
+
+macOS generally works out of the box. Puppeteer auto-downloads Chromium.
+
+```bash
+# Optional: Install via Homebrew if you have issues
+brew install --cask chromium
+```
+
+### Ubuntu/Debian Linux
+
+**Ubuntu 24.04+:**
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 libxi6 libxtst6 \
+  libnss3 libnspr4 libcups2 libxss1 libxrandr2 libasound2t64 libatk1.0-0 \
+  libatk-bridge2.0-0 libgtk-3-0 libgbm1 libpango-1.0-0 libpangocairo-1.0-0 \
+  libcairo2 libfontconfig1 libdbus-1-3 libexpat1 libglib2.0-0
+```
+
+**Ubuntu 22.04 and earlier:**
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 libxi6 libxtst6 \
+  libnss3 libnspr4 libcups2 libxss1 libxrandr2 libasound2 libatk1.0-0 \
+  libatk-bridge2.0-0 libgtk-3-0 libgbm1 libpango-1.0-0 libpangocairo-1.0-0 \
+  libcairo2 libfontconfig1 libdbus-1-3 libexpat1 libglib2.0-0
+```
+
+**Note:** Ubuntu 24.04 renamed `libasound2` to `libasound2t64` for 64-bit time support.
+
+### Verify Installation
+
+```bash
+make verify-tools
+```
+
+Or manually check for missing Chromium dependencies:
+```bash
+ldd ~/.cache/puppeteer/chrome/*/chrome-linux64/chrome 2>/dev/null | grep "not found"
+```
+
+If no output, all dependencies are installed.
 
 ---
 
@@ -312,21 +376,9 @@ Your tokens may be incorrect or expired.
 
 ### Puppeteer/Chrome Errors on Linux
 
-The bot uses Puppeteer for markdown-to-image conversion. On Linux, you need to install Chrome dependencies:
+See [Install Native Dependencies](#install-native-dependencies) section above for installation commands.
 
-**Debian/Ubuntu:**
-```bash
-sudo apt-get install -y \
-  libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 libxi6 libxtst6 \
-  libnss3 libnspr4 libcups2 libxss1 libxrandr2 libasound2 libatk1.0-0 \
-  libatk-bridge2.0-0 libgtk-3-0 libgbm1 libpango-1.0-0 libpangocairo-1.0-0 \
-  libcairo2 libfontconfig1 libdbus-1-3 libexpat1 libglib2.0-0
-```
-
-**Check for missing dependencies:**
-```bash
-ldd ~/.cache/puppeteer/chrome/*/chrome-linux64/chrome | grep "not found"
-```
+Run `make verify-tools` to check for missing dependencies.
 
 ---
 
