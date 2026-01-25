@@ -532,7 +532,7 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
     return {
       handled: true,
       response:
-        'Usage: `/resume <session-id>`\n\nGet the session ID from your terminal with `claude --print-session-id`',
+        'Usage: `/resume <session-id>`\n\nGet the session ID by typing `/status` in Claude Code',
     };
   }
 
