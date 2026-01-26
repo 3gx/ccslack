@@ -1730,4 +1730,140 @@ describe('slack-bot mention handlers', () => {
     });
   });
 
+  describe('inline /mode command', () => {
+    it('should extract and apply inline /mode plan', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'default',  // Start in default mode
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'test-session', model: 'claude-sonnet-4' },
+        { type: 'result', result: 'Done' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) yield msg;
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Send message with inline /mode
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /mode plan help me design something',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Session should be saved with plan mode
+      expect(saveSession).toHaveBeenCalledWith('C123', expect.objectContaining({ mode: 'plan' }));
+
+      // Query should be called with remaining text only (not including /mode plan)
+      // startClaudeQuery(message, options) - message is first argument
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'help me design something',  // /mode plan stripped
+        expect.objectContaining({ mode: 'plan' })
+      );
+    });
+
+    it('should show error for invalid inline mode', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /mode invalid do something',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should post error message
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const errorCall = postCalls.find((call: any) =>
+        call[0].text?.includes('Unknown mode')
+      );
+      expect(errorCall).toBeDefined();
+
+      // Should NOT call Claude
+      expect(startClaudeQuery).not.toHaveBeenCalled();
+
+      // Should remove eyes reaction
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'eyes' })
+      );
+    });
+
+    it('should confirm mode change when only /mode is provided', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /mode bypass',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Session should be saved with bypass mode
+      expect(saveSession).toHaveBeenCalledWith('C123', expect.objectContaining({ mode: 'bypassPermissions' }));
+
+      // Should post confirmation
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const confirmCall = postCalls.find((call: any) =>
+        call[0].text?.includes('Mode set to')
+      );
+      expect(confirmCall).toBeDefined();
+
+      // Should NOT call Claude (no query text)
+      expect(startClaudeQuery).not.toHaveBeenCalled();
+    });
+
+    // Note: @bot mentions in threads are rejected by design, so inline /mode in threads
+    // is not supported (the thread rejection happens before inline mode extraction)
+  });
+
 });

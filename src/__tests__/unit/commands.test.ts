@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { parseCommand } from '../../commands.js';
+import { parseCommand, extractInlineMode } from '../../commands.js';
 import { Session } from '../../session-manager.js';
 
 // Mock session-reader for /resume tests
@@ -1102,6 +1102,102 @@ describe('commands', () => {
     it('should appear in /help output', () => {
       const result = parseCommand('/help', mockSession);
       expect(result.response).toContain('/show-plan');
+    });
+  });
+
+  describe('extractInlineMode', () => {
+    it('should return text unchanged when no /mode present', () => {
+      const result = extractInlineMode('hello world');
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('hello world');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should extract /mode plan at start', () => {
+      const result = extractInlineMode('/mode plan help me design a feature');
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('help me design a feature');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should extract /mode bypass at start', () => {
+      const result = extractInlineMode('/mode bypass fix this bug quickly');
+      expect(result.mode).toBe('bypassPermissions');
+      expect(result.remainingText).toBe('fix this bug quickly');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should extract /mode ask at start', () => {
+      const result = extractInlineMode('/mode ask review this code');
+      expect(result.mode).toBe('default');
+      expect(result.remainingText).toBe('review this code');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should extract /mode edit at start', () => {
+      const result = extractInlineMode('/mode edit refactor the function');
+      expect(result.mode).toBe('acceptEdits');
+      expect(result.remainingText).toBe('refactor the function');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should extract /mode from middle of text', () => {
+      const result = extractInlineMode('hello /mode plan world');
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('hello world');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should be case insensitive', () => {
+      const result = extractInlineMode('/MODE PLAN test');
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('test');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should return error for invalid mode', () => {
+      const result = extractInlineMode('/mode invalid do something');
+      expect(result.mode).toBeUndefined();
+      expect(result.error).toContain('Unknown mode');
+      expect(result.error).toContain('invalid');
+      expect(result.error).toContain('plan, bypass, ask, edit');
+    });
+
+    it('should handle standalone /mode with valid mode', () => {
+      const result = extractInlineMode('/mode plan');
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should normalize multiple spaces', () => {
+      const result = extractInlineMode('hello   /mode   plan   world');
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('hello world');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should only match first occurrence', () => {
+      const result = extractInlineMode('/mode plan then /mode bypass');
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('then /mode bypass');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should not match /moderation as /mode', () => {
+      const result = extractInlineMode('/moderation policy');
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('/moderation policy');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should handle /mode without argument - treated as no match', () => {
+      // /mode followed by nothing - the regex requires \S+ after /mode
+      // So this should not match, leaving text unchanged
+      const result = extractInlineMode('/mode');
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('/mode');
+      expect(result.error).toBeUndefined();
     });
   });
 });

@@ -1363,7 +1363,7 @@ export function buildPathSetupBlocks(): Block[] {
 // Activity entry type (mirrors session-manager.ts)
 export interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed';
   tool?: string;
   durationMs?: number;
   message?: string;
@@ -1394,6 +1394,7 @@ export interface ActivityEntry {
   toolOutputTruncated?: boolean;     // True if output was truncated
   toolIsError?: boolean;             // True if tool returned error
   toolErrorMessage?: string;         // Error message if failed
+  mode?: string;                     // For mode_changed entries
 }
 
 // Constants for activity log display
@@ -2312,6 +2313,9 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
           }
         }
         break;
+      case 'mode_changed':
+        lines.push(`:gear: Mode changed to *${entry.mode}*`);
+        break;
       case 'aborted':
         lines.push(':octagonal_sign: *Aborted by user*');
         break;
@@ -2496,6 +2500,9 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
         break;
       case 'error':
         lines.push(`:x: *Error:* ${entry.message || 'Unknown error'}`);
+        break;
+      case 'mode_changed':
+        lines.push(`:gear: *Mode changed* → \`${entry.mode}\``);
         break;
       case 'aborted':
         lines.push(':octagonal_sign: *Aborted by user*');

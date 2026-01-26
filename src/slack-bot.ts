@@ -58,7 +58,7 @@ import { uploadMarkdownAndPngWithResponse, extractTailWithFormatting, uploadFile
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
-import { parseCommand, UPDATE_RATE_DEFAULT, MESSAGE_SIZE_DEFAULT, THINKING_MESSAGE_SIZE } from './commands.js';
+import { parseCommand, extractInlineMode, UPDATE_RATE_DEFAULT, MESSAGE_SIZE_DEFAULT, THINKING_MESSAGE_SIZE } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { processSlackFiles, SlackFile } from './file-handler.js';
 import { buildMessageContent, ContentBlock } from './content-builder.js';
@@ -2570,8 +2570,62 @@ async function handleMessage(params: {
     }
   }
 
+  // Extract inline /mode command (e.g., "@bot /mode plan do something")
+  const inlineModeResult = extractInlineMode(userText);
+
+  if (inlineModeResult.error) {
+    await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: effectiveThreadTs,
+        text: inlineModeResult.error,
+      })
+    );
+    if (originalTs) {
+      try {
+        await client.reactions.remove({ channel: channelId, timestamp: originalTs, name: 'eyes' });
+      } catch { /* ignore */ }
+    }
+    return;
+  }
+
+  // Track inline mode change for activity log
+  let inlineModeChanged: string | undefined;
+
+  if (inlineModeResult.mode) {
+    // Save mode change (thread-aware)
+    if (threadTs) {
+      await saveThreadSession(channelId, threadTs, { mode: inlineModeResult.mode });
+    } else {
+      await saveSession(channelId, { mode: inlineModeResult.mode });
+    }
+    session.mode = inlineModeResult.mode;
+    inlineModeChanged = inlineModeResult.mode;  // Track for activity log
+    console.log(`[InlineMode] Mode switched to ${inlineModeResult.mode}`);
+
+    // If no remaining text, just confirm mode change
+    if (!inlineModeResult.remainingText) {
+      await withSlackRetry(() =>
+        client.chat.postMessage({
+          channel: channelId,
+          thread_ts: effectiveThreadTs,
+          text: `Mode set to \`${inlineModeResult.mode}\``,
+        })
+      );
+      if (originalTs) {
+        try {
+          await client.reactions.remove({ channel: channelId, timestamp: originalTs, name: 'eyes' });
+        } catch { /* ignore */ }
+      }
+      return;
+    }
+  }
+
+  // Use remaining text for command parsing
+  const textToProcess = inlineModeResult.remainingText;
+
   // Check for slash commands (e.g., /status, /mode, /continue)
-  const commandResult = parseCommand(userText, session, threadTs);
+  const commandResult = parseCommand(textToProcess, session, threadTs);
 
   // Handle /wait command (rate limit stress test)
   if (commandResult.waitTest) {
@@ -3008,6 +3062,17 @@ async function handleMessage(params: {
     compactIsManual: false,  // auto-compact
   };
 
+  // Add mode_changed entry if inline mode was used
+  if (inlineModeChanged) {
+    const modeEntry: ActivityEntry = {
+      timestamp: Date.now(),
+      type: 'mode_changed',
+      mode: inlineModeChanged,
+    };
+    processingState.activityLog.push(modeEntry);
+    processingState.activityBatch.push(modeEntry);
+  }
+
   // Post single combined message (activity log + status panel)
   // Activity log at top, status panel with abort button at bottom
   let statusMsgTs: string | undefined;
@@ -3143,7 +3208,7 @@ async function handleMessage(params: {
     };
 
     // Process uploaded files (if any)
-    let messageContent: string | ContentBlock[] = userText!;
+    let messageContent: string | ContentBlock[] = textToProcess;
     if (files && files.length > 0) {
       console.log(`[FileUpload] Processing ${files.length} file(s)`);
       try {
@@ -3151,7 +3216,7 @@ async function handleMessage(params: {
           files,
           process.env.SLACK_BOT_TOKEN!
         );
-        messageContent = buildMessageContent(userText!, processedFiles, warnings);
+        messageContent = buildMessageContent(textToProcess, processedFiles, warnings);
         if (Array.isArray(messageContent)) {
           console.log(`[FileUpload] Built ${messageContent.length} content blocks`);
         }

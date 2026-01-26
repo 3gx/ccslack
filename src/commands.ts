@@ -60,6 +60,56 @@ export interface CommandResult {
   planFilePath?: string;
 }
 
+// Mode shortcut mapping for quick /mode <arg> switching
+export const MODE_SHORTCUTS: Record<string, PermissionMode> = {
+  plan: 'plan',
+  bypass: 'bypassPermissions',
+  ask: 'default',
+  edit: 'acceptEdits',
+};
+
+export interface InlineModeResult {
+  mode?: PermissionMode;      // Mode to switch to (if detected)
+  remainingText: string;      // Text with /mode <mode> stripped
+  error?: string;             // Error message if invalid
+}
+
+/**
+ * Extract inline /mode command from message text.
+ * Detects /mode <mode> anywhere in text, strips it, and returns the mode.
+ */
+export function extractInlineMode(text: string): InlineModeResult {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+
+  // Pattern: /mode followed by a word (not /moderation, etc.)
+  const modePattern = /\/mode\s+(\S+)/i;
+  const match = normalized.match(modePattern);
+
+  if (!match) {
+    return { remainingText: normalized };
+  }
+
+  const modeArg = match[1].toLowerCase();
+  const fullMatch = match[0];
+
+  // Validate mode
+  const mode = MODE_SHORTCUTS[modeArg];
+  if (!mode) {
+    return {
+      remainingText: normalized,
+      error: `Unknown mode \`${modeArg}\`. Valid modes: plan, bypass, ask, edit`,
+    };
+  }
+
+  // Strip /mode <arg> and normalize spaces
+  const remainingText = normalized
+    .replace(fullMatch, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return { mode, remainingText };
+}
+
 /**
  * Parse and handle slash commands.
  * Returns { handled: false } if text is not a command (passes to Claude).
@@ -374,14 +424,6 @@ function handleContext(session: Session): CommandResult {
     blocks: buildContextDisplayBlocks(session.lastUsage),
   };
 }
-
-// Mode shortcut mapping for quick /mode <arg> switching
-const MODE_SHORTCUTS: Record<string, PermissionMode> = {
-  plan: 'plan',
-  bypass: 'bypassPermissions',
-  ask: 'default',
-  edit: 'acceptEdits',
-};
 
 /**
  * /mode [arg] - Show mode picker or switch mode with shortcut

@@ -2404,6 +2404,30 @@ describe('blocks', () => {
       const lastNonEmptyLine = lines.filter(l => l.trim()).pop();
       expect(lastNonEmptyLine).toContain('Aborted by user');
     });
+
+    it('should format mode_changed entry with gear emoji', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'mode_changed', mode: 'plan' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':gear:');
+      expect(text).toContain('Mode changed to *plan*');
+    });
+
+    it('should show mode_changed after starting entry', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'mode_changed', mode: 'bypassPermissions' },
+        { timestamp: Date.now(), type: 'tool_start', tool: 'Read' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      const lines = text.split('\n').filter(l => l.trim());
+      // Order: starting, mode_changed, tool
+      expect(lines[0]).toContain('Analyzing request');
+      expect(lines[1]).toContain('Mode changed to *bypassPermissions*');
+      expect(lines[2]).toContain('Read');
+    });
   });
 
   describe('buildLiveActivityBlocks', () => {
@@ -3763,6 +3787,29 @@ describe('blocks', () => {
       const text = formatThreadActivityBatch(entries);
       expect(text).toContain(':octagonal_sign:');
       expect(text).toContain('Aborted by user');
+    });
+
+    it('should format mode_changed entry for thread posting', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'mode_changed', mode: 'plan' },
+      ];
+      const text = formatThreadActivityBatch(entries);
+      expect(text).toContain(':gear:');
+      expect(text).toContain('*Mode changed*');
+      expect(text).toContain('`plan`');
+    });
+
+    it('should show mode_changed in correct order for thread batch', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'starting' },
+        { timestamp: 2000, type: 'mode_changed', mode: 'default' },
+        { timestamp: 3000, type: 'tool_complete', tool: 'Read', durationMs: 500 },
+      ];
+      const text = formatThreadActivityBatch(entries);
+      // All three entries should be present
+      expect(text).toContain('Analyzing request');
+      expect(text).toContain('Mode changed');
+      expect(text).toContain('Read');
     });
   });
 
