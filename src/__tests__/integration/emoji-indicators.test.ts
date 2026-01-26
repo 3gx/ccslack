@@ -10,7 +10,10 @@ vi.mock('@slack/bolt', () => {
       event(name: string, handler: any) { registeredHandlers[`event_${name}`] = handler; }
       message(handler: any) { registeredHandlers['message'] = handler; }
       action(pattern: RegExp, handler: any) { registeredHandlers[`action_${pattern.source}`] = handler; }
-      view(pattern: RegExp, handler: any) { registeredHandlers[`view_${pattern.source}`] = handler; }
+      view(pattern: RegExp | string, handler: any) {
+        const key = typeof pattern === 'string' ? pattern : pattern.source;
+        registeredHandlers[`view_${key}`] = handler;
+      }
       async start() { return Promise.resolve(); }
     },
   };
@@ -385,6 +388,162 @@ describe('emoji-indicators integration tests', () => {
         })
       );
       expect(resolvePromise).toHaveBeenCalledWith('Option A');
+    });
+  });
+
+  describe('SDK question ABORT emoji handling', () => {
+    it('should remove :question: and add :octagonal_sign: when SDK question is aborted', async () => {
+      const { pendingSdkQuestions } = await import('../../slack-bot.js');
+      const modalHandler = registeredHandlers['view_abort_confirmation_modal'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const resolvePromise = vi.fn();
+
+      pendingSdkQuestions.set('sdkq-abort-123', {
+        resolve: resolvePromise,
+        messageTs: 'question-msg-123',
+        channelId: 'C123',
+        threadTs: 'thread-123',
+        question: 'Which option do you want?',
+        originalTs: 'user-msg-123',
+      });
+
+      await modalHandler({
+        ack,
+        view: {
+          private_metadata: JSON.stringify({
+            abortType: 'sdk_question',
+            key: 'sdkq-abort-123',
+            channelId: 'C123',
+            messageTs: 'question-msg-123',
+          }),
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-123',
+          name: 'question',
+        })
+      );
+      expect(mockClient.reactions.add).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-123',
+          name: 'octagonal_sign',
+        })
+      );
+      expect(resolvePromise).toHaveBeenCalledWith('__ABORTED__');
+    });
+
+    it('should handle abort gracefully when originalTs is undefined', async () => {
+      const { pendingSdkQuestions } = await import('../../slack-bot.js');
+      const modalHandler = registeredHandlers['view_abort_confirmation_modal'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const resolvePromise = vi.fn();
+
+      pendingSdkQuestions.set('sdkq-no-original-456', {
+        resolve: resolvePromise,
+        messageTs: 'question-msg-456',
+        channelId: 'C123',
+        threadTs: undefined,
+        question: 'Select an option',
+        // originalTs is undefined
+      });
+
+      await modalHandler({
+        ack,
+        view: {
+          private_metadata: JSON.stringify({
+            abortType: 'sdk_question',
+            key: 'sdkq-no-original-456',
+            channelId: 'C123',
+            messageTs: 'question-msg-456',
+          }),
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.reactions.remove).not.toHaveBeenCalled();
+      expect(mockClient.reactions.add).not.toHaveBeenCalled();
+      expect(resolvePromise).toHaveBeenCalledWith('__ABORTED__');
+    });
+
+    it('should update question message to show aborted status', async () => {
+      const { pendingSdkQuestions } = await import('../../slack-bot.js');
+      const modalHandler = registeredHandlers['view_abort_confirmation_modal'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const resolvePromise = vi.fn();
+
+      pendingSdkQuestions.set('sdkq-abort-789', {
+        resolve: resolvePromise,
+        messageTs: 'question-msg-789',
+        channelId: 'C123',
+        threadTs: 'thread-123',
+        question: 'Do you want to proceed?',
+        originalTs: 'user-msg-789',
+      });
+
+      await modalHandler({
+        ack,
+        view: {
+          private_metadata: JSON.stringify({
+            abortType: 'sdk_question',
+            key: 'sdkq-abort-789',
+            channelId: 'C123',
+            messageTs: 'question-msg-789',
+          }),
+        },
+        client: mockClient,
+      });
+
+      expect(mockClient.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          ts: 'question-msg-789',
+          text: 'Question aborted',
+        })
+      );
+    });
+
+    it('should clean up pending question entry from map', async () => {
+      const { pendingSdkQuestions, pendingSdkMultiSelections } = await import('../../slack-bot.js');
+      const modalHandler = registeredHandlers['view_abort_confirmation_modal'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+      const resolvePromise = vi.fn();
+
+      pendingSdkQuestions.set('sdkq-cleanup-999', {
+        resolve: resolvePromise,
+        messageTs: 'question-msg-999',
+        channelId: 'C123',
+        threadTs: undefined,
+        question: 'Multiple choice?',
+        originalTs: 'user-msg-999',
+      });
+      pendingSdkMultiSelections.set('sdkq-cleanup-999', ['option1', 'option2']);
+
+      await modalHandler({
+        ack,
+        view: {
+          private_metadata: JSON.stringify({
+            abortType: 'sdk_question',
+            key: 'sdkq-cleanup-999',
+            channelId: 'C123',
+            messageTs: 'question-msg-999',
+          }),
+        },
+        client: mockClient,
+      });
+
+      expect(pendingSdkQuestions.has('sdkq-cleanup-999')).toBe(false);
+      expect(pendingSdkMultiSelections.has('sdkq-cleanup-999')).toBe(false);
     });
   });
 

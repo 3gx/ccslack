@@ -499,7 +499,7 @@ interface PendingSdkQuestion {
 export const pendingSdkQuestions = new Map<string, PendingSdkQuestion>();
 
 // Track pending multi-select selections for SDK questions
-const pendingSdkMultiSelections = new Map<string, string[]>();
+export const pendingSdkMultiSelections = new Map<string, string[]>();
 
 // Track pending mode/model picker selections for emoji cleanup
 interface PendingPickerSelection {
@@ -2018,6 +2018,13 @@ function startToolApprovalReminder(
           });
         } catch (error) {
           console.error('Error updating expired tool approval message:', error);
+        }
+
+        // Handle emoji updates for expiry (same as abort)
+        // Remove :question: and add :octagonal_sign: on user's original message
+        if (pending.originalTs) {
+          await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+          await addReaction(client, pending.channelId, pending.originalTs, 'octagonal_sign');
         }
 
         pending.resolve({ behavior: 'deny', message: 'Tool approval expired after 7 days. Please retry.' });
@@ -6031,6 +6038,13 @@ async function handleSdkQuestionAbort(questionId: string, channelId: string, mes
       });
     } catch (error) {
       console.error('Error updating aborted SDK question message:', error);
+    }
+
+    // Handle emoji updates for abort
+    // Remove :question: and add :octagonal_sign: on user's original message
+    if (pending.originalTs) {
+      await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+      await addReaction(client, pending.channelId, pending.originalTs, 'octagonal_sign');
     }
 
     pending.resolve('__ABORTED__');
