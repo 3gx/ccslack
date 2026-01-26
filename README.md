@@ -109,12 +109,10 @@ See [CLAUDE.md](./CLAUDE.md) for detailed development instructions and [ARCHITEC
 - Session stored in `./sessions.json` (bot records)
 - Session stored in `~/.claude/projects/` (SDK files)
 
-### Forking (Point-in-Time)
-- Thread replies create new forked sessions with **point-in-time history**
-- When you reply to message B in a conversation A→B→C→D, the thread only knows about A and B
-- This enables "what if" scenarios from any point in the conversation
-- All forks tracked in `sessions.json` under parent channel
-- "Fork here" button on messages creates new channel with forked session
+### Forking
+- "Fork here" button creates a new Slack channel with a point-in-time forked session
+- SDK's `resumeSessionAt` parameter limits context to that message (verified in sdk-fork-e2e-clear.test.ts)
+- Thread sessions tracked under parent channel in `sessions.json`
 
 ### Cleanup
 - Channel deletion triggers automatic cleanup

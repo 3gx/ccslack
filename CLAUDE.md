@@ -70,7 +70,7 @@ src/
 
 ### Session Management
 - Sessions stored in `sessions.json`
-- Thread replies get forked sessions automatically (point-in-time)
+- "Fork here" button creates new channel with point-in-time forked session
 - Session includes: `sessionId`, `workingDir`, `mode`, `model`, timestamps
 - Channel sessions include `messageMap` for Slack ts → SDK message ID mapping
 - Session configuration: `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `stripEmptyTag`, `lastUsage`, `planFilePath`
@@ -87,7 +87,7 @@ Sessions are automatically cleaned up when:
 
 **What gets deleted:**
 - ✅ Main channel session
-- ✅ Thread sessions (auto-forks from thread replies)
+- ✅ Forked channel sessions (from "Fork here" button)
 - ❌ Terminal forks (created via `claude --resume <id> --fork-session`)
 
 **Why terminal forks are NOT deleted:**
@@ -153,15 +153,11 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 - Uses file-based IPC via `/tmp/ccslack-answers/`
 - Main process writes answer files, MCP server polls for them
 
-### Thread Forking (Point-in-Time)
-- Detect thread via `thread_ts` in message event
-- Check `sessions.json` for existing thread session
-- If new:
-  - Look up `thread_ts` in `messageMap` to find SDK message ID
-  - Fork from parent using `forkSession: true` and `resumeSessionAt`
-  - Thread gets history only up to the fork point (not future messages)
-- Older channels without `messageMap` fall back to latest-state forking
-- After `/clear`, forks use session ID stored in `messageMap` (not current null session)
+### Fork Here Button
+- "Fork here" button on messages creates new Slack channel with point-in-time forked session
+- Uses `forkSession: true` and `resumeSessionAt` to limit context to that message
+- Fork gets context up to that message only (verified in sdk-fork-e2e-clear.test.ts)
+- New channel has independent session from fork point
 
 ### Extended Thinking Configuration
 - `maxThinkingTokens` in session controls Claude's extended thinking budget

@@ -6,7 +6,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 - Real-time status panel with activity log during processing
 - Interactive questions and tool approvals via Block Kit
 - Session management with terminal handoff
-- Thread-based session forking with point-in-time history
+- "Fork here" button for point-in-time forking to new channels
 - Extended thinking with configurable budget
 - Configurable update rate per session
 - Multiple permission modes (plan, default, bypassPermissions, acceptEdits)
@@ -95,7 +95,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 - Manages active queries with abort capability via `ClaudeQuery.interrupt()`
 - Posts real-time status panel and activity log during processing
 - Coordinates tool approval flow in `default` permission mode
-- **Thread forking**: Detects `thread_ts` and auto-forks sessions with point-in-time history
+- **Fork here button**: Creates new channel with point-in-time forked session
 - **Error handling**: Top-level try/catch wraps all handlers
 - **Mutex locking**: Prevents race conditions during abort operations
 
@@ -103,7 +103,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 - Wraps Claude Code SDK `query()` function
 - Configures MCP server for `ask_user` and `approve_action` tools
 - Maps permission modes directly to SDK (`plan`, `default`, `bypassPermissions`, `acceptEdits`)
-- Supports `forkSession` and `resumeSessionAt` for point-in-time thread forking
+- Supports `forkSession` and `resumeSessionAt` for "Fork here" button
 - Configures `maxThinkingTokens` for extended thinking budget
 - Enables `includePartialMessages` for real-time activity tracking
 
@@ -323,7 +323,7 @@ Note: Activity logs are stored in memory during processing only and are NOT pers
 
 ### Key Storage Concepts
 
-- **messageMap**: Links Slack message timestamps to SDK message IDs AND session IDs, enabling point-in-time forking even after `/clear`
+- **messageMap**: Links Slack message timestamps to SDK message IDs AND session IDs, enabling forking after `/clear`
 - **previousSessionIds**: Tracks old session IDs after `/clear` for time-travel forking
 - **resumeSessionAtMessageId**: SDK message ID to fork from (passed to `resumeSessionAt` in SDK query)
 - **activityLogs**: In-memory only during processing (not persisted to sessions.json)
@@ -422,60 +422,29 @@ When activity entries exceed MAX_LIVE_ENTRIES (300), switches to rolling window 
 | Rate limited | Retry with backoff |
 | Corrupted sessions.json | Reset to empty, log warning |
 
-## Thread Forking (Point-in-Time)
+## Fork Here Button
 
-Thread forking uses **point-in-time history** - the thread only knows about messages up to where it forked:
-
-```
-Main channel: A → B → C → D
-User replies to B in thread
-Thread context: A, B only (not C, D)
-```
+The "Fork here" button on messages creates a new Slack channel with a point-in-time forked session.
 
 ### How It Works
 
 1. **Message Mapping**: As messages flow, bot captures Slack timestamps → SDK message IDs (with session ID)
-2. **Fork Detection**: When user replies in thread, bot detects `thread_ts`
-3. **Fork Point Lookup**: `findForkPointMessageId()` returns both SDK message ID AND session ID
-4. **Session Resolution**: Uses session ID from message mapping (not current main session) - enables "time travel" forking after `/clear`
-5. **Point-in-Time Fork**: SDK `resumeSessionAt` parameter creates fork with history only up to that point
-6. **Notification**: Posts link to the exact message being forked from
+2. **Button Click**: User clicks "Fork here" on any bot response message
+3. **Fork Point**: Button includes SDK message ID and session ID for the fork point
+4. **Channel Creation**: Creates new Slack channel with user-specified name
+5. **SDK Fork**: Uses `forkSession: true` with `resumeSessionAt` to limit context to that message (verified in sdk-fork-e2e-clear.test.ts)
+6. **Session Setup**: New channel gets independent session from fork point
 
 ### Fork Flow
 
-1. Bot detects `thread_ts` in message event
-2. Calls `findForkPointMessageId(channelId, threadTs)` to get fork point
-3. Checks if thread already has a session via `getOrCreateThreadSession()`
-4. If new thread:
-   - Uses `forkPoint.sessionId` (NOT current main session) as parent
-   - Uses `forkPoint.messageId` for `resumeSessionAt`
-   - Forks from parent session using `forkSession: true`
-   - Posts "Forked with conversation state through: [this message]" notification
-5. Creates new SDK session with limited history
-6. Saves thread session with `resumeSessionAtMessageId` to `sessions.json`
-
-### Time Travel Forking
-
-After `/clear`, users can still fork from old messages:
-- `messageMap` entries include `sessionId` field
-- `findForkPointMessageId()` returns the session where the message lives
-- Thread forks from the OLD session, not the null current session
-- `previousSessionIds[]` tracks cleared sessions for reference
-
-### Fork to New Channel
-
-Users can fork to a new channel using the "Fork here" button on messages:
-1. Creates new Slack channel
-2. Creates session with `forkedFromChannelId`, `forkedFromMessageTs`, `forkedFromSdkMessageId`
-3. Forks from the specified point with full history up to that message
-4. New channel has independent session from fork point
-
-### Graceful Degradation
-
-For older channels without message mappings:
-- Falls back to forking from latest state
-- New messages after migration will have proper mappings
-- Migration adds `sessionId` to old entries using current session (best effort)
+1. User clicks "Fork here" button on a message
+2. Modal prompts for new channel name
+3. Bot creates new Slack channel
+4. Bot forks SDK session using:
+   - `forkSession: true`
+   - `resumeSessionAt: <sdk_message_id>`
+5. Creates session record with `forkedFromChannelId`, `forkedFromMessageTs`, `forkedFromSdkMessageId`
+6. Posts welcome message in new channel with link to fork point
 
 ## Permission Modes
 
