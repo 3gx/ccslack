@@ -1864,6 +1864,58 @@ describe('slack-bot mention handlers', () => {
 
     // Note: @bot mentions in threads are rejected by design, so inline /mode in threads
     // is not supported (the thread rejection happens before inline mode extraction)
+
+    it('should send message with /mode in middle to Claude (not reject)', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      const mockMessages = [
+        { type: 'system', subtype: 'init', session_id: 'test-session', model: 'claude-sonnet-4' },
+        { type: 'result', result: 'The /mode command allows...' },
+      ];
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const msg of mockMessages) yield msg;
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Message with /mode in the MIDDLE - should be sent to Claude, not rejected
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> what does /mode xyz mean?',
+          channel: 'C123',
+          ts: 'msg123',
+        },
+        client: mockClient,
+      });
+
+      // Should NOT post error message
+      const postCalls = mockClient.chat.postMessage.mock.calls;
+      const errorCall = postCalls.find((call: any) =>
+        call[0].text?.includes('Unknown mode')
+      );
+      expect(errorCall).toBeUndefined();
+
+      // SHOULD call Claude with full message
+      expect(startClaudeQuery).toHaveBeenCalledWith(
+        'what does /mode xyz mean?',
+        expect.anything()
+      );
+    });
   });
 
 });

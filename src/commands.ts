@@ -77,13 +77,14 @@ export interface InlineModeResult {
 
 /**
  * Extract inline /mode command from message text.
- * Detects /mode <mode> anywhere in text, strips it, and returns the mode.
+ * Only detects /mode <mode> at the START of text (immediately after @bot mention).
+ * Mentions of /mode elsewhere in the message are ignored and passed to Claude.
  */
 export function extractInlineMode(text: string): InlineModeResult {
   const normalized = text.replace(/\s+/g, ' ').trim();
 
-  // Pattern: /mode followed by a word (not /moderation, etc.)
-  const modePattern = /\/mode\s+(\S+)/i;
+  // Pattern: /mode at START followed by a word (not /moderation, etc.)
+  const modePattern = /^\/mode\s+(\S+)/i;
   const match = normalized.match(modePattern);
 
   if (!match) {

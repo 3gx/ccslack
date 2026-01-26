@@ -1118,10 +1118,10 @@ describe('commands', () => {
       expect(result.error).toBeUndefined();
     });
 
-    it('should extract /mode from middle of text', () => {
+    it('should ignore /mode in middle of text', () => {
       const result = extractInlineMode('hello /mode plan world');
-      expect(result.mode).toBe('plan');
-      expect(result.remainingText).toBe('hello world');
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('hello /mode plan world');
       expect(result.error).toBeUndefined();
     });
 
@@ -1148,7 +1148,7 @@ describe('commands', () => {
     });
 
     it('should normalize multiple spaces', () => {
-      const result = extractInlineMode('hello   /mode   plan   world');
+      const result = extractInlineMode('/mode   plan   hello   world');
       expect(result.mode).toBe('plan');
       expect(result.remainingText).toBe('hello world');
       expect(result.error).toBeUndefined();
@@ -1174,6 +1174,20 @@ describe('commands', () => {
       const result = extractInlineMode('/mode');
       expect(result.mode).toBeUndefined();
       expect(result.remainingText).toBe('/mode');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should ignore /mode invalid in middle of text (no error)', () => {
+      const result = extractInlineMode('what does /mode xyz mean?');
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('what does /mode xyz mean?');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should ignore valid /mode in middle of text', () => {
+      const result = extractInlineMode('explain the /mode plan option');
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('explain the /mode plan option');
       expect(result.error).toBeUndefined();
     });
   });
