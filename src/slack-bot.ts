@@ -209,6 +209,7 @@ interface ActiveQuery {
   mode: PermissionMode;
   model?: string;
   processingState: ProcessingState;
+  originalTs?: string;           // Original user message timestamp (for emoji tracking)
 }
 const activeQueries = new Map<string, ActiveQuery>();
 
@@ -409,6 +410,65 @@ function cleanupMutex(conversationKey: string): void {
   updateMutexes.delete(conversationKey);
 }
 
+// ============================================================================
+// Emoji Reaction Helpers (with mutex serialization to prevent race conditions)
+// ============================================================================
+const emojiMutexes = new Map<string, Mutex>();
+
+function getEmojiMutex(channel: string, timestamp: string): Mutex {
+  const key = `${channel}_${timestamp}`;
+  if (!emojiMutexes.has(key)) {
+    emojiMutexes.set(key, new Mutex());
+  }
+  return emojiMutexes.get(key)!;
+}
+
+/**
+ * Add a reaction emoji to a message (serialized per message).
+ * Silently ignores errors if reaction already exists.
+ */
+async function addReaction(
+  client: any,
+  channel: string,
+  timestamp: string,
+  name: string
+): Promise<void> {
+  const mutex = getEmojiMutex(channel, timestamp);
+  await mutex.runExclusive(async () => {
+    try {
+      await client.reactions.add({ channel, timestamp, name });
+    } catch (e: any) {
+      // Ignore - reaction may already exist
+      if (e?.data?.error !== 'already_reacted') {
+        console.log(`[Emoji] Failed to add ${name}:`, e?.data?.error || e?.message);
+      }
+    }
+  });
+}
+
+/**
+ * Remove a reaction emoji from a message (serialized per message).
+ * Silently ignores errors if reaction doesn't exist.
+ */
+async function removeReaction(
+  client: any,
+  channel: string,
+  timestamp: string,
+  name: string
+): Promise<void> {
+  const mutex = getEmojiMutex(channel, timestamp);
+  await mutex.runExclusive(async () => {
+    try {
+      await client.reactions.remove({ channel, timestamp, name });
+    } catch (e: any) {
+      // Ignore - reaction may already be removed
+      if (e?.data?.error !== 'no_reaction') {
+        console.log(`[Emoji] Failed to remove ${name}:`, e?.data?.error || e?.message);
+      }
+    }
+  });
+}
+
 // Track pending tool approvals (for manual approval mode)
 interface PendingToolApproval {
   toolName: string;
@@ -417,8 +477,9 @@ interface PendingToolApproval {
   messageTs: string;
   channelId: string;
   threadTs?: string;
+  originalTs?: string;  // For emoji tracking on original user message
 }
-const pendingToolApprovals = new Map<string, PendingToolApproval>();
+export const pendingToolApprovals = new Map<string, PendingToolApproval>();
 
 // Track tool approval reminders (matches MCP ask_user pattern)
 const toolApprovalReminderIntervals = new Map<string, NodeJS.Timeout>();
@@ -432,8 +493,9 @@ interface PendingSdkQuestion {
   channelId: string;
   threadTs?: string;
   question: string;  // For showing in answered state
+  originalTs?: string;  // For emoji tracking on original user message
 }
-const pendingSdkQuestions = new Map<string, PendingSdkQuestion>();
+export const pendingSdkQuestions = new Map<string, PendingSdkQuestion>();
 
 // Track pending multi-select selections for SDK questions
 const pendingSdkMultiSelections = new Map<string, string[]>();
@@ -1141,6 +1203,7 @@ async function runClearSession(
       lastUsage: undefined,  // Clear stale usage data so /status and /context show fresh state
       mode: 'default',  // Reset to safe default mode
       planFilePath: null,  // Reset plan file path on clear
+      planPresentationCount: undefined,  // Reset plan presentation counter on clear
     });
 
     // Stop terminal watcher if active (session is being cleared)
@@ -1193,6 +1256,7 @@ async function runClearSession(
           maxThinkingTokens: updatedSession.maxThinkingTokens,
           updateRateSeconds: updatedSession.updateRateSeconds,
           messageSize: updatedSession.threadCharLimit,
+          planPresentationCount: updatedSession.planPresentationCount,
         }),
         text: 'Session status',
       });
@@ -2008,7 +2072,8 @@ function waitForSdkQuestionAnswer(
   channelId: string,
   threadTs: string | undefined,
   question: string,
-  client: any
+  client: any,
+  originalTs?: string  // For emoji tracking
 ): Promise<string> {
   return new Promise((resolve) => {
     pendingSdkQuestions.set(questionId, {
@@ -2017,6 +2082,7 @@ function waitForSdkQuestionAnswer(
       channelId,
       threadTs,
       question,
+      originalTs,  // For emoji tracking
     });
     // Start reminder (reuses tool approval reminder pattern)
     startToolApprovalReminder(questionId, 'AskUserQuestion', channelId, client, threadTs);
@@ -2032,7 +2098,8 @@ async function handleAskUserQuestion(
   getAccumulatedResponse: () => string,
   clearAccumulatedResponse: () => void,
   isStillStreaming: () => boolean,
-  conversationKey: string
+  conversationKey: string,
+  originalTs?: string  // For emoji tracking
 ): Promise<PermissionResult> {
   const input = toolInput as unknown as AskUserQuestionInput;
   const answers: Record<string, string> = {};
@@ -2088,6 +2155,11 @@ async function handleAskUserQuestion(
       })
     );
 
+    // Add :question: emoji to show user input needed
+    if (originalTs) {
+      await addReaction(client, channelId, originalTs, 'question');
+    }
+
     // Wait for user answer
     const answer = await waitForSdkQuestionAnswer(
       questionId,
@@ -2095,7 +2167,8 @@ async function handleAskUserQuestion(
       channelId,
       threadTs,
       q.question,
-      client
+      client,
+      originalTs  // For emoji tracking
     );
 
     // Check for abort
@@ -2311,6 +2384,26 @@ async function showPlanApprovalUI(params: {
     tool: 'ExitPlanMode',
   });
 
+  // Add :page_with_curl: emoji to indicate plan presentation
+  if (originalTs) {
+    await addReaction(client, channelId, originalTs, 'page_with_curl');
+  }
+
+  // Increment plan presentation counter in session
+  if (threadTs) {
+    const threadSession = getThreadSession(channelId, threadTs);
+    const currentCount = threadSession?.planPresentationCount ?? 0;
+    await saveThreadSession(channelId, threadTs, {
+      planPresentationCount: currentCount + 1,
+    });
+  } else {
+    const mainSession = getSession(channelId);
+    const currentCount = mainSession?.planPresentationCount ?? 0;
+    await saveSession(channelId, {
+      planPresentationCount: currentCount + 1,
+    });
+  }
+
   // Update status panel to complete
   if (statusMsgTs) {
     try {
@@ -2399,6 +2492,11 @@ async function showPlanApprovalUI(params: {
         text: 'Would you like to proceed? Choose how to execute the plan.',
       })
     );
+
+    // Add :question: emoji to show user input needed for plan approval
+    if (originalTs) {
+      await addReaction(client, channelId, originalTs, 'question');
+    }
   } catch (btnError) {
     console.error('[PlanApproval] Error posting plan approval buttons:', btnError);
   }
@@ -3181,7 +3279,8 @@ async function handleMessage(params: {
           () => currentResponse,           // Getter for current segment response
           () => { currentResponse = ''; },  // Clear current segment after posting
           () => isActivelyStreaming,        // Check if still in middle of streaming
-          conversationKey
+          conversationKey,
+          originalTs  // For emoji tracking
         );
       }
 
@@ -3240,6 +3339,11 @@ async function handleMessage(params: {
         })
       );
 
+      // Add :question: emoji to show user input needed
+      if (originalTs) {
+        await addReaction(client, channelId, originalTs, 'question');
+      }
+
       // Wait for user response (7-day timeout with 4-hour reminders)
       return new Promise((resolve) => {
         pendingToolApprovals.set(approvalId, {
@@ -3249,6 +3353,7 @@ async function handleMessage(params: {
           messageTs: (result as { ts?: string }).ts!,
           channelId,
           threadTs: effectiveThreadTs,
+          originalTs,  // For emoji tracking
         });
 
         // Start reminder interval (4 hours) with 7-day expiry
@@ -3306,6 +3411,7 @@ async function handleMessage(params: {
         statusMsgTs,
         mode: session.mode,
         processingState,
+        originalTs,  // For emoji tracking on abort
       });
     }
 
@@ -4677,17 +4783,11 @@ async function handleMessage(params: {
       });
     }
 
-    // Remove eyes reaction on error
+    // Update emojis on error: remove :eyes: and :question:, add :x:
     if (originalTs) {
-      try {
-        await client.reactions.remove({
-          channel: channelId,
-          timestamp: originalTs,
-          name: 'eyes',
-        });
-      } catch (e) {
-        // Ignore
-      }
+      await removeReaction(client, channelId, originalTs, 'eyes');
+      await removeReaction(client, channelId, originalTs, 'question');
+      await addReaction(client, channelId, originalTs, 'x');
     }
 
     // Note: Error already posted to activity thread and status message above
@@ -5006,24 +5106,25 @@ async function handleQueryAbort(conversationKey: string, channelId: string, clie
       });
     }
 
-    // Clean up active query (abortedQueries cleaned up in finally block of main flow)
-    activeQueries.delete(conversationKey);
-    busyConversations.delete(conversationKey);
-
-    // Clear pending plan approval state and :eyes: on abort
+    // Handle emoji updates for abort
+    // Check for pending plan approval first (has originalTs)
     const pendingPlan = pendingPlanApprovals.get(conversationKey);
     if (pendingPlan) {
       pendingPlanApprovals.delete(conversationKey);
-      try {
-        await client.reactions.remove({
-          channel: pendingPlan.channelId,
-          timestamp: pendingPlan.originalTs,
-          name: 'eyes',
-        });
-      } catch (e) {
-        // Ignore - reaction may already be removed
-      }
+      // Remove :eyes: and :question:, add :octagonal_sign:
+      await removeReaction(client, pendingPlan.channelId, pendingPlan.originalTs, 'eyes');
+      await removeReaction(client, pendingPlan.channelId, pendingPlan.originalTs, 'question');
+      await addReaction(client, pendingPlan.channelId, pendingPlan.originalTs, 'octagonal_sign');
+    } else if (active.originalTs) {
+      // Regular query abort - use originalTs from active query
+      await removeReaction(client, channelId, active.originalTs, 'eyes');
+      await removeReaction(client, channelId, active.originalTs, 'question');
+      await addReaction(client, channelId, active.originalTs, 'octagonal_sign');
     }
+
+    // Clean up active query (abortedQueries cleaned up in finally block of main flow)
+    activeQueries.delete(conversationKey);
+    busyConversations.delete(conversationKey);
   } else {
     console.log(`No active query found for: ${conversationKey}`);
   }
@@ -5372,20 +5473,15 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
-  // Clear pending plan approval state and :eyes:
+  // Clear pending plan approval state and :eyes: and :question:
   const pending = pendingPlanApprovals.get(conversationKey);
   if (pending) {
     pendingPlanApprovals.delete(conversationKey);
     busyConversations.delete(conversationKey);
-    try {
-      await client.reactions.remove({
-        channel: pending.channelId,
-        timestamp: pending.originalTs,
-        name: 'eyes',
-      });
-    } catch (e) {
-      // Ignore - reaction may already be removed
-    }
+    // Remove :question: emoji (answer received)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    // Remove :eyes: emoji (no longer processing)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'eyes');
   }
 
   console.log(`Plan option 1 (clear + bypass) clicked for: ${conversationKey}`);
@@ -5444,20 +5540,15 @@ app.action(/^plan_accept_edits_(.+)$/, async ({ action, ack, body, client }) => 
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
-  // Clear pending plan approval state and :eyes:
+  // Clear pending plan approval state and :eyes: and :question:
   const pending = pendingPlanApprovals.get(conversationKey);
   if (pending) {
     pendingPlanApprovals.delete(conversationKey);
     busyConversations.delete(conversationKey);
-    try {
-      await client.reactions.remove({
-        channel: pending.channelId,
-        timestamp: pending.originalTs,
-        name: 'eyes',
-      });
-    } catch (e) {
-      // Ignore - reaction may already be removed
-    }
+    // Remove :question: emoji (answer received)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    // Remove :eyes: emoji (no longer processing)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'eyes');
   }
 
   console.log(`Plan option 2 (accept edits) clicked for: ${conversationKey}`);
@@ -5501,20 +5592,15 @@ app.action(/^plan_bypass_(.+)$/, async ({ action, ack, body, client }) => {
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
-  // Clear pending plan approval state and :eyes:
+  // Clear pending plan approval state and :eyes: and :question:
   const pending = pendingPlanApprovals.get(conversationKey);
   if (pending) {
     pendingPlanApprovals.delete(conversationKey);
     busyConversations.delete(conversationKey);
-    try {
-      await client.reactions.remove({
-        channel: pending.channelId,
-        timestamp: pending.originalTs,
-        name: 'eyes',
-      });
-    } catch (e) {
-      // Ignore - reaction may already be removed
-    }
+    // Remove :question: emoji (answer received)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    // Remove :eyes: emoji (no longer processing)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'eyes');
   }
 
   console.log(`Plan option 3 (bypass) clicked for: ${conversationKey}`);
@@ -5558,20 +5644,15 @@ app.action(/^plan_manual_(.+)$/, async ({ action, ack, body, client }) => {
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
-  // Clear pending plan approval state and :eyes:
+  // Clear pending plan approval state and :eyes: and :question:
   const pending = pendingPlanApprovals.get(conversationKey);
   if (pending) {
     pendingPlanApprovals.delete(conversationKey);
     busyConversations.delete(conversationKey);
-    try {
-      await client.reactions.remove({
-        channel: pending.channelId,
-        timestamp: pending.originalTs,
-        name: 'eyes',
-      });
-    } catch (e) {
-      // Ignore - reaction may already be removed
-    }
+    // Remove :question: emoji (answer received)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    // Remove :eyes: emoji (no longer processing)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'eyes');
   }
 
   console.log(`Plan option 4 (manual) clicked for: ${conversationKey}`);
@@ -5615,20 +5696,16 @@ app.action(/^plan_reject_(.+)$/, async ({ action, ack, body, client }) => {
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
-  // Clear pending plan approval state and :eyes:
+  // Clear pending plan approval state and :question: (keep :page_with_curl: since plan was shown)
+  // For reject, we DON'T remove :eyes: because processing continues with user feedback
   const pending = pendingPlanApprovals.get(conversationKey);
   if (pending) {
     pendingPlanApprovals.delete(conversationKey);
     busyConversations.delete(conversationKey);
-    try {
-      await client.reactions.remove({
-        channel: pending.channelId,
-        timestamp: pending.originalTs,
-        name: 'eyes',
-      });
-    } catch (e) {
-      // Ignore - reaction may already be removed
-    }
+    // Remove :question: emoji (answer received - user chose to change the plan)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    // Remove :eyes: emoji (will be re-added when processing resumes)
+    await removeReaction(client, pending.channelId, pending.originalTs, 'eyes');
   }
 
   console.log(`Plan option 5 (reject/change) clicked for: ${conversationKey}`);
@@ -5672,6 +5749,11 @@ app.action(/^tool_approve_(.+)$/, async ({ action, ack, body, client }) => {
     clearToolApprovalReminder(approvalId);
     pendingToolApprovals.delete(approvalId);
 
+    // Remove :question: emoji (answer received)
+    if (pending.originalTs) {
+      await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    }
+
     // Update message to show approved
     try {
       await client.chat.update({
@@ -5709,6 +5791,11 @@ app.action(/^tool_deny_(.+)$/, async ({ action, ack, body, client }) => {
     // Clear reminder interval
     clearToolApprovalReminder(approvalId);
     pendingToolApprovals.delete(approvalId);
+
+    // Remove :question: emoji (answer received)
+    if (pending.originalTs) {
+      await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    }
 
     // Update message to show denied
     try {
@@ -5752,6 +5839,11 @@ app.action(/^sdkq_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
     // Clear reminder
     clearToolApprovalReminder(questionId);
     pendingSdkQuestions.delete(questionId);
+
+    // Remove :question: emoji (answer received)
+    if (pending.originalTs) {
+      await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    }
 
     // Update message to show answered state
     try {
@@ -5817,6 +5909,11 @@ app.action(/^sdkq_submit_(.+)$/, async ({ action, ack, body, client }) => {
     clearToolApprovalReminder(questionId);
     pendingSdkQuestions.delete(questionId);
     pendingSdkMultiSelections.delete(questionId);
+
+    // Remove :question: emoji (answer received)
+    if (pending.originalTs) {
+      await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    }
 
     // Update message to show answered state
     try {
@@ -6000,6 +6097,11 @@ app.view(/^sdkq_freetext_modal_(.+)$/, async ({ ack, body, view, client }) => {
     // Clean up
     clearToolApprovalReminder(questionId);
     pendingSdkQuestions.delete(questionId);
+
+    // Remove :question: emoji (answer received)
+    if (pending.originalTs) {
+      await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+    }
 
     // Update original message to show answered state
     try {

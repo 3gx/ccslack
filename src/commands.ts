@@ -404,6 +404,7 @@ function handleStatus(session: Session): CommandResult {
       messageSize: session.threadCharLimit,
       stripEmptyTag: session.stripEmptyTag,
       planFilePath: session.planFilePath,
+      planPresentationCount: session.planPresentationCount,
     }),
   };
 }

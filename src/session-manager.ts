@@ -63,6 +63,8 @@ export interface Session {
   stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
   // Persistent plan file path for plan mode (detected from tool usage)
   planFilePath?: string | null;
+  // Count of plan presentations in current session (for emoji tracking)
+  planPresentationCount?: number;
   // UUIDs of messages synced from terminal via /ff (for resumable fast-forward)
   syncedMessageUuids?: string[];
   // UUIDs of user messages that originated from Slack bot (to skip in /ff)
@@ -113,6 +115,8 @@ export interface ThreadSession {
   stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
   // Persistent plan file path for plan mode (NOT inherited - each thread has its own)
   planFilePath?: string | null;
+  // Count of plan presentations in current session (for emoji tracking)
+  planPresentationCount?: number;
   // UUIDs of messages synced from terminal via /ff (for resumable fast-forward)
   syncedMessageUuids?: string[];
   // UUIDs of user messages that originated from Slack bot (to skip in /ff)
