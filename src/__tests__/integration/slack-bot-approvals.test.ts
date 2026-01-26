@@ -529,63 +529,8 @@ describe('slack-bot approval handlers', () => {
     });
   });
 
-  describe('canUseTool auto-deny for approve_action', () => {
-    it('should auto-deny mcp__ask-user__approve_action in default mode', async () => {
-      const handler = registeredHandlers['event_app_mention'];
-      const mockClient = createMockSlackClient();
-
-      // Set up session with default mode
-      vi.mocked(getSession).mockReturnValue({
-        sessionId: 'test-session',
-        workingDir: '/test/dir',
-        mode: 'default',
-        createdAt: Date.now(),
-        lastActiveAt: Date.now(),
-            pathConfigured: true,
-      configuredPath: '/test/dir',
-      configuredBy: 'U123',
-      configuredAt: Date.now(),
-          });
-
-      // Capture the canUseTool callback passed to startClaudeQuery
-      let capturedCanUseTool: any = null;
-      vi.mocked(startClaudeQuery).mockImplementation((prompt, options) => {
-        capturedCanUseTool = options.canUseTool;
-        return {
-          [Symbol.asyncIterator]: async function* () {
-            yield { type: 'system', subtype: 'init', session_id: 'test-session', model: 'claude-sonnet' };
-            yield { type: 'result', result: 'Done' };
-          },
-          interrupt: vi.fn(),
-        } as any;
-      });
-
-      await handler({
-        event: {
-          user: 'U123',
-          text: '<@BOT123> test message',
-          channel: 'C123',
-          ts: 'msg123',
-        },
-        client: mockClient,
-      });
-
-      // Verify canUseTool callback was captured
-      expect(capturedCanUseTool).toBeDefined();
-
-      // Call the callback with approve_action tool
-      const result = await capturedCanUseTool(
-        'mcp__ask-user__approve_action',
-        { action: 'test action' },
-        { signal: new AbortController().signal }
-      );
-
-      // Should auto-deny
-      expect(result.behavior).toBe('deny');
-      expect(result.message).toContain('handled directly');
-    });
-
-    it('should prompt for approval for regular tools in default mode', async () => {
+  describe('canUseTool callback', () => {
+    it('should prompt for approval for tools in default mode', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 

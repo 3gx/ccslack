@@ -70,36 +70,4 @@ describe.skipIf(SKIP_LIVE)('default mode canUseTool (live)', { timeout: 120000 }
       'Checking what happened'
     ).toEqual({ canUseToolCalled: false, calledToolName: null, canUseToolCalls: [], toolsUsed: ['Bash'] });
   });
-
-  it('verifies canUseTool is NOT called for allowed MCP tools', async () => {
-    // This tests that MCP tools in allowedTools bypass canUseTool
-    // (similar to how bot excludes approve_action in default mode)
-
-    let canUseToolCallCount = 0;
-    const canUseToolCalls: string[] = [];
-
-    const result = query({
-      prompt: 'What is 2 + 2? Just answer directly.',
-      options: {
-        permissionMode: 'default',
-        maxTurns: 1,
-        canUseTool: async (toolName, input, _options) => {
-          canUseToolCallCount++;
-          canUseToolCalls.push(toolName);
-          return { behavior: 'allow', updatedInput: input };
-        },
-      },
-    });
-
-    for await (const _msg of result) {
-      // Consume
-    }
-
-    console.log('canUseTool call count:', canUseToolCallCount);
-    console.log('Tools that triggered canUseTool:', canUseToolCalls);
-
-    // Simple math question shouldn't trigger any tool use
-    // This is just a sanity check
-    expect(canUseToolCallCount >= 0).toBe(true);
-  });
 });

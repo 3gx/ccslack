@@ -117,103 +117,11 @@ describe('claude-client', () => {
       );
     });
 
-    it('should configure MCP server when slackContext provided', () => {
-      startClaudeQuery('test prompt', {
-        slackContext: { channel: 'C123', user: 'U123' },
-      });
-
-      expect(query).toHaveBeenCalledWith(
-        expect.objectContaining({
-          options: expect.objectContaining({
-            mcpServers: expect.any(Object),
-            allowedTools: expect.arrayContaining(['mcp__ask-user__ask_user']),
-          }),
-        })
-      );
-    });
-
-    it('should exclude approve_action in default mode (canUseTool handles it)', () => {
-      startClaudeQuery('test prompt', {
-        mode: 'default',
-        slackContext: { channel: 'C123', user: 'U123' },
-      });
-
-      const callArgs = vi.mocked(query).mock.calls[0][0];
-      const allowedTools = callArgs.options.allowedTools as string[];
-
-      // Should only have ask_user, NOT approve_action
-      expect(allowedTools).toContain('mcp__ask-user__ask_user');
-      expect(allowedTools).not.toContain('mcp__ask-user__approve_action');
-      expect(allowedTools).toHaveLength(1);
-    });
-
-    it('should include approve_action in plan mode', () => {
-      startClaudeQuery('test prompt', {
-        mode: 'plan',
-        slackContext: { channel: 'C123', user: 'U123' },
-      });
-
-      const callArgs = vi.mocked(query).mock.calls[0][0];
-      const allowedTools = callArgs.options.allowedTools as string[];
-
-      // Should have both ask_user and approve_action
-      expect(allowedTools).toContain('mcp__ask-user__ask_user');
-      expect(allowedTools).toContain('mcp__ask-user__approve_action');
-      expect(allowedTools).toHaveLength(2);
-    });
-
-    it('should include approve_action in bypassPermissions mode', () => {
-      startClaudeQuery('test prompt', {
-        mode: 'bypassPermissions',
-        slackContext: { channel: 'C123', user: 'U123' },
-      });
-
-      const callArgs = vi.mocked(query).mock.calls[0][0];
-      const allowedTools = callArgs.options.allowedTools as string[];
-
-      // Should have both ask_user and approve_action
-      expect(allowedTools).toContain('mcp__ask-user__ask_user');
-      expect(allowedTools).toContain('mcp__ask-user__approve_action');
-    });
-
     it('should return a ClaudeQuery with interrupt method', () => {
       const result = startClaudeQuery('test prompt', {});
 
       expect(result).toBeDefined();
       expect(typeof result.interrupt).toBe('function');
-    });
-
-    // Additional tests for Phase 0 SDK upgrade coverage
-
-    describe('MCP Server Config Structure', () => {
-      it('MCP server config has correct command and args', () => {
-        startClaudeQuery('test prompt', {
-          slackContext: { channel: 'C123', user: 'U123' },
-        });
-
-        const callArgs = vi.mocked(query).mock.calls[0][0];
-        const mcpServers = callArgs.options.mcpServers as Record<string, any>;
-
-        expect(mcpServers).toBeDefined();
-        expect(mcpServers['ask-user']).toBeDefined();
-        expect(mcpServers['ask-user'].command).toBe('npx');
-        expect(mcpServers['ask-user'].args).toContain('tsx');
-        expect(mcpServers['ask-user'].args.some((arg: string) => arg.includes('mcp-server.ts'))).toBe(true);
-      });
-
-      it('MCP server receives SLACK_CONTEXT as JSON env var', () => {
-        const slackContext = { channel: 'C123', threadTs: 'thread-ts', user: 'U456' };
-        startClaudeQuery('test prompt', { slackContext });
-
-        const callArgs = vi.mocked(query).mock.calls[0][0];
-        const mcpServers = callArgs.options.mcpServers as Record<string, any>;
-
-        expect(mcpServers['ask-user'].env.SLACK_CONTEXT).toBeDefined();
-        const parsedContext = JSON.parse(mcpServers['ask-user'].env.SLACK_CONTEXT);
-        expect(parsedContext.channel).toBe('C123');
-        expect(parsedContext.threadTs).toBe('thread-ts');
-        expect(parsedContext.user).toBe('U456');
-      });
     });
 
     describe('Session Fork Options', () => {

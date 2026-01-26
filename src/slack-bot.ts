@@ -91,9 +91,6 @@ import {
 } from './activity-thread.js';
 import fs from 'fs';
 
-// Answer directory for file-based communication with MCP subprocess
-const ANSWER_DIR = '/tmp/ccslack-answers';
-
 // Processing state constants for activity tracking
 const THINKING_TRUNCATE_LENGTH = 500;
 const MAX_LIVE_ENTRIES = 300;  // Switch to rolling window if exceeded
@@ -195,9 +192,6 @@ interface PendingMessage {
   threadTs?: string;
 }
 const pendingMessages = new Map<string, PendingMessage>();
-
-// Store pending multi-select selections (before user clicks Submit)
-const pendingSelections = new Map<string, string[]>();
 
 // Track busy conversations (processing a request)
 // Exported for testing
@@ -3337,13 +3331,6 @@ async function handleMessage(params: {
         );
       }
 
-      // Auto-deny MCP approve_action tool - we handle approvals directly via canUseTool
-      // Without this, we'd get double approval: canUseTool for approve_action, then MCP's own UI
-      if (toolName === 'mcp__ask-user__approve_action') {
-        console.log(`Auto-denying ${toolName} - approvals handled via canUseTool`);
-        return { behavior: 'deny', message: 'Tool approvals are handled directly via Slack buttons, not via MCP approve_action.' };
-      }
-
       // For non-AskUserQuestion tools, only prompt in 'default' mode
       if (session.mode !== 'default') {
         return { behavior: 'allow', updatedInput: toolInput };
@@ -3450,11 +3437,6 @@ async function handleMessage(params: {
       resumeSessionAt: needsFork ? resumeSessionAtMessageId : undefined,  // Point-in-time forking
       canUseTool,  // For manual approval in default mode
       maxThinkingTokens,  // Extended thinking budget
-      slackContext: {
-        channel: channelId,
-        threadTs: effectiveThreadTs,
-        user: userId ?? 'unknown',
-      },
     });
 
     // Track active query for abort capability
@@ -4860,203 +4842,6 @@ async function handleMessage(params: {
   }
 }
 
-// Handle button clicks for ask_user tool
-app.action(/^answer_(.+)_(\d+)$/, async ({ action, ack, body, client }) => {
-  try {
-    await ack();
-  } catch (error) {
-    console.error('Error acknowledging button click:', error);
-    // ack() failed but we should still try to process the answer
-  }
-
-  // Extract question ID from action_id: "answer_{questionId}_{index}"
-  // Use regex to properly extract questionId (which contains underscores)
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^answer_(.+)_(\d+)$/);
-  const questionId = match ? match[1] : '';
-  const answer = 'value' in action ? action.value : '';
-
-  console.log(`Button clicked: questionId=${questionId}, answer=${answer}`);
-
-  // Write answer to file for MCP subprocess to read
-  const answerFile = `${ANSWER_DIR}/${questionId}.json`;
-  try {
-    fs.writeFileSync(answerFile, JSON.stringify({ answer, timestamp: Date.now() }));
-    console.log(`Wrote answer file: ${answerFile}`);
-  } catch (error) {
-    console.error('Error writing answer file:', error);
-  }
-
-  // Update message to show selection
-  const bodyWithChannel = body as any;
-  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
-    try {
-      await client.chat.update({
-        channel: bodyWithChannel.channel.id,
-        ts: bodyWithChannel.message.ts,
-        text: `You selected: *${answer}*`,
-        blocks: [],
-      });
-    } catch (error) {
-      console.error('Error updating message:', error);
-    }
-  }
-});
-
-// Helper function to execute MCP question abort logic (called from modal submission)
-async function handleQuestionAbort(questionId: string, channelId: string, messageTs: string, client: WebClient): Promise<void> {
-  console.log(`Aborting MCP question: ${questionId}`);
-
-  // Write abort answer to file
-  const answerFile = `${ANSWER_DIR}/${questionId}.json`;
-  try {
-    fs.writeFileSync(answerFile, JSON.stringify({ answer: '__ABORTED__', timestamp: Date.now() }));
-    console.log(`Wrote abort file: ${answerFile}`);
-  } catch (error) {
-    console.error('Error writing abort file:', error);
-  }
-
-  // Clear any pending multiselect for this question
-  pendingSelections.delete(questionId);
-
-  // Update message to show aborted
-  if (channelId && messageTs) {
-    try {
-      await client.chat.update({
-        channel: channelId,
-        ts: messageTs,
-        text: `*Aborted* - Question cancelled by user`,
-        blocks: [],
-      });
-    } catch (error) {
-      console.error('Error updating message:', error);
-    }
-  }
-}
-
-// Handle "Abort" button for ask_user questions - opens confirmation modal
-// Note: (?!query_) prevents matching abort_query_* which has its own handler
-app.action(/^abort_(?!query_)(.+)$/, async ({ action, ack, body, client }) => {
-  try {
-    await ack();
-  } catch (error) {
-    console.error('Error acknowledging abort click:', error);
-  }
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^abort_(?!query_)(.+)$/);
-  const questionId = match ? match[1] : '';
-
-  console.log(`Abort clicked for question: ${questionId}`);
-
-  const bodyWithTrigger = body as any;
-  const channelId = bodyWithTrigger.channel?.id;
-  const messageTs = bodyWithTrigger.message?.ts;
-
-  if (!bodyWithTrigger.trigger_id || !channelId) {
-    console.error('Missing trigger_id or channelId for abort modal');
-    if (channelId && bodyWithTrigger.user?.id) {
-      await client.chat.postEphemeral({
-        channel: channelId,
-        user: bodyWithTrigger.user.id,
-        text: ':warning: Failed to open abort confirmation. Please try again.',
-      });
-    }
-    return;
-  }
-
-  try {
-    await client.views.open({
-      trigger_id: bodyWithTrigger.trigger_id,
-      view: buildAbortConfirmationModalView({
-        abortType: 'question',
-        key: questionId,
-        channelId,
-        messageTs: messageTs || '',
-      }),
-    });
-  } catch (error) {
-    console.error('Error opening abort confirmation modal:', error);
-    if (bodyWithTrigger.user?.id) {
-      await client.chat.postEphemeral({
-        channel: channelId,
-        user: bodyWithTrigger.user.id,
-        text: ':warning: Failed to open abort confirmation. Please try again.',
-      });
-    }
-  }
-});
-
-// Handle multi-select selection changes (stores selection, doesn't submit yet)
-app.action(/^multiselect_(?!submit_)(.+)$/, async ({ action, ack }) => {
-  try {
-    await ack();
-  } catch (error) {
-    console.error('Error acknowledging multiselect change:', error);
-    // ack() failed but we should still try to store the selection
-  }
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^multiselect_(.+)$/);
-  const questionId = match ? match[1] : '';
-
-  // Get selected options from the action
-  const selectedOptions = 'selected_options' in action ? action.selected_options : [];
-  const selections = selectedOptions?.map((opt: any) => opt.value) || [];
-
-  console.log(`Multi-select changed for ${questionId}: ${selections.join(', ')}`);
-
-  // Store selections (will be submitted when user clicks Submit)
-  pendingSelections.set(questionId, selections);
-});
-
-// Handle multi-select submit button
-app.action(/^multiselect_submit_(.+)$/, async ({ action, ack, body, client }) => {
-  try {
-    await ack();
-  } catch (error) {
-    console.error('Error acknowledging multiselect submit:', error);
-    // ack() failed but we should still try to process the submission
-  }
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^multiselect_submit_(.+)$/);
-  const questionId = match ? match[1] : '';
-
-  // Get pending selections
-  const selections = pendingSelections.get(questionId) || [];
-  const answer = selections.join(', ');
-
-  console.log(`Multi-select submitted for ${questionId}: ${answer}`);
-
-  // Write answer to file
-  const answerFile = `${ANSWER_DIR}/${questionId}.json`;
-  try {
-    fs.writeFileSync(answerFile, JSON.stringify({ answer, timestamp: Date.now() }));
-    console.log(`Wrote answer file: ${answerFile}`);
-  } catch (error) {
-    console.error('Error writing answer file:', error);
-  }
-
-  // Clear pending selections
-  pendingSelections.delete(questionId);
-
-  // Update message to show selection
-  const bodyWithChannel = body as any;
-  if (bodyWithChannel.channel?.id && bodyWithChannel.message?.ts) {
-    try {
-      await client.chat.update({
-        channel: bodyWithChannel.channel.id,
-        ts: bodyWithChannel.message.ts,
-        text: `You selected: *${answer || '(none)'}*`,
-        blocks: [],
-      });
-    } catch (error) {
-      console.error('Error updating message:', error);
-    }
-  }
-});
-
 // Helper function to execute query abort logic (called from modal submission)
 async function handleQueryAbort(conversationKey: string, channelId: string, client: WebClient): Promise<void> {
   const active = activeQueries.get(conversationKey);
@@ -5235,77 +5020,6 @@ app.action(/^abort_query_(.+)$/, async ({ action, ack, body, client }) => {
   }
 });
 
-// Handle "Type something" button - opens modal for free text input
-app.action(/^freetext_(.+)$/, async ({ action, ack, body, client }) => {
-  try {
-    await ack();
-  } catch (error) {
-    console.error('Error acknowledging freetext click:', error);
-    // ack() failed but we should still try to open the modal
-  }
-
-  const actionId = 'action_id' in action ? action.action_id : '';
-  const match = actionId.match(/^freetext_(.+)$/);
-  const questionId = match ? match[1] : '';
-
-  console.log(`Freetext clicked for question: ${questionId}`);
-
-  const bodyWithTrigger = body as any;
-  const triggerId = bodyWithTrigger.trigger_id;
-
-  if (triggerId) {
-    try {
-      await client.views.open({
-        trigger_id: triggerId,
-        view: {
-          type: "modal",
-          callback_id: `freetext_modal_${questionId}`,
-          title: { type: "plain_text", text: "Your Answer" },
-          submit: { type: "plain_text", text: "Submit" },
-          close: { type: "plain_text", text: "Cancel" },
-          blocks: [
-            {
-              type: "input",
-              block_id: "answer_block",
-              element: {
-                type: "plain_text_input",
-                action_id: "answer_input",
-                multiline: true,
-                placeholder: { type: "plain_text", text: "Type your answer here..." },
-              },
-              label: { type: "plain_text", text: "Answer" },
-            },
-          ],
-        },
-      });
-    } catch (error) {
-      console.error('Error opening modal:', error);
-    }
-  }
-});
-
-// Handle modal submission for free text answers
-app.view(/^freetext_modal_(.+)$/, async ({ ack, body, view, client }) => {
-  await ack();
-
-  const callbackId = view.callback_id;
-  const match = callbackId.match(/^freetext_modal_(.+)$/);
-  const questionId = match ? match[1] : '';
-
-  const answer = view.state.values.answer_block.answer_input.value || '';
-
-  console.log(`Modal submitted for question: ${questionId}, answer: ${answer}`);
-
-  // Write answer to file
-  const answerFile = `${ANSWER_DIR}/${questionId}.json`;
-  try {
-    fs.writeFileSync(answerFile, JSON.stringify({ answer, timestamp: Date.now() }));
-    console.log(`Wrote answer file: ${answerFile}`);
-  } catch (error) {
-    console.error('Error writing answer file:', error);
-  }
-});
-
 // Handle "Fork to New Channel" modal submission
 app.view('fork_to_channel_modal', async ({ ack, body, view, client }) => {
   const channelName = (view.state.values.channel_name_block?.channel_name_input?.value || '').trim();
@@ -5352,9 +5066,6 @@ app.view('abort_confirmation_modal', async ({ ack, view, client }) => {
   switch (abortType) {
     case 'query':
       await handleQueryAbort(key, channelId, client as WebClient);
-      break;
-    case 'question':
-      await handleQuestionAbort(key, channelId, messageTs, client as WebClient);
       break;
     case 'sdk_question':
       await handleSdkQuestionAbort(key, channelId, messageTs, client as WebClient);

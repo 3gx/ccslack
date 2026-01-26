@@ -1,11 +1,6 @@
 import { query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { PermissionMode } from './session-manager.js';
 import { ContentBlock } from './content-builder.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // Permission result from canUseTool callback (must match SDK exactly)
 export type PermissionResult =
@@ -28,11 +23,6 @@ export interface StreamOptions {
   resumeSessionAt?: string;  // SDK message ID for point-in-time forking
   canUseTool?: CanUseToolCallback;  // For tool approval in default mode
   maxThinkingTokens?: number;  // Extended thinking budget (0 = disabled, undefined = default)
-  slackContext?: {
-    channel: string;
-    threadTs?: string;
-    user: string;
-  };
 }
 
 // Query type with control methods (from SDK)
@@ -105,31 +95,6 @@ export function startClaudeQuery(
     }
   } else {
     console.log('Starting new Claude conversation');
-  }
-
-  // Add MCP server for ask_user tool if we have Slack context
-  if (options.slackContext) {
-    const mcpServerPath = path.join(__dirname, 'mcp-server.ts');
-    queryOptions.mcpServers = {
-      'ask-user': {
-        command: 'npx',
-        args: ['tsx', mcpServerPath],
-        env: {
-          SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN,
-          SLACK_CONTEXT: JSON.stringify(options.slackContext),
-        },
-      },
-    };
-    // Allow the MCP tools
-    // In 'default' mode, canUseTool callback handles approval, so exclude approve_action
-    // to avoid double-approval prompts
-    if (permissionMode === 'default') {
-      queryOptions.allowedTools = ['mcp__ask-user__ask_user'];
-      console.log('MCP ask-user server configured (approve_action disabled - using canUseTool)');
-    } else {
-      queryOptions.allowedTools = ['mcp__ask-user__ask_user', 'mcp__ask-user__approve_action'];
-      console.log('MCP ask-user server configured');
-    }
   }
 
   // Add canUseTool callback for tool approval in default mode

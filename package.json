@@ -1,7 +1,7 @@
 {
   "name": "ccslack",
   "version": "1.0.0",
-  "description": "Claude Code Slack Bot with MCP tools",
+  "description": "Claude Code Slack Bot",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -16,7 +16,6 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "latest",
-    "@modelcontextprotocol/sdk": "^1.25.2",
     "@slack/bolt": "^4.1.0",
     "@slack/web-api": "^7.8.0",
     "async-mutex": "^0.5.0",

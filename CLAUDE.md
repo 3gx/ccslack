@@ -30,10 +30,9 @@ npx tsc --noEmit
 
 ```
 src/
-├── index.ts              # Entry point, initializes Slack app and answer directory
+├── index.ts              # Entry point, initializes Slack app
 ├── slack-bot.ts          # Main bot logic, event handlers, button handlers (~6400 lines)
-├── claude-client.ts      # Claude Code SDK wrapper with MCP configuration
-├── mcp-server.ts         # MCP server providing ask_user/approve_action tools
+├── claude-client.ts      # Claude Code SDK wrapper
 ├── session-manager.ts    # Session persistence to sessions.json with mutex locking
 ├── session-reader.ts     # Parses Claude SDK JSONL session files from ~/.claude/projects/
 ├── session-event-stream.ts # Reads session JSONL files as async generator
@@ -104,7 +103,6 @@ Sessions are automatically cleaned up when:
 - Use `query()` from `@anthropic-ai/claude-agent-sdk`
 - Pass `permissionMode` directly to SDK
 - Handle `canUseTool` callback for manual approval mode
-- MCP server provides `ask_user` and `approve_action` tools
 - `includePartialMessages: true` enables real-time activity tracking (stream_event messages)
 
 ## Testing
@@ -145,13 +143,7 @@ Sessions are automatically cleaned up when:
 In `default` mode, SDK calls `canUseTool` for tool approval:
 - Must return `{ behavior: 'allow', updatedInput: {...} }` or `{ behavior: 'deny', message }`
 - Has 7-day timeout with 4-hour reminder intervals
-- Auto-deny `mcp__ask-user__approve_action` to avoid double prompts (handled via Slack buttons)
 - `AskUserQuestion` tool always prompts user in ALL modes
-
-### MCP Server Communication
-- MCP server runs as subprocess spawned by SDK
-- Uses file-based IPC via `/tmp/ccslack-answers/`
-- Main process writes answer files, MCP server polls for them
 
 ### Fork Here Button
 - "Fork here" button on messages creates new Slack channel with point-in-time forked session
@@ -209,11 +201,6 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 
 ## Common Issues
 
-### Double Approval Prompts
-If both `canUseTool` and MCP `approve_action` show prompts:
-- Ensure `approve_action` is auto-denied in `canUseTool`
-- Check `allowedTools` doesn't include `approve_action` in default mode
-
 ### Rate Limiting
 - Slack API has rate limits
 - `withSlackRetry()` handles `Retry-After` headers
@@ -231,7 +218,6 @@ If both `canUseTool` and MCP `approve_action` show prompts:
 | `SLACK_BOT_TOKEN` | Yes | Bot OAuth Token (xoxb-...) |
 | `SLACK_APP_TOKEN` | Yes | Socket Mode Token (xapp-...) |
 | `ANTHROPIC_API_KEY` | No | API key for SDK live tests |
-| `SLACK_CONTEXT` | No | JSON string set dynamically for MCP server subprocess |
 | `SKIP_SDK_TESTS` | No | Set to 'true' to skip live SDK tests |
 
 ## All Slash Commands

@@ -260,31 +260,6 @@ describe.skipIf(SKIP_LIVE)('SDK Live Verification', { timeout: 30000, concurrent
 
     // NOTE: 'CANARY: resume + forkSession + resumeSessionAt accepted' moved to
     // sdk-fork-canary.test.ts for process isolation (SDK may hang on invalid sessions)
-
-    it('CANARY: mcpServers config structure accepted', async () => {
-      // MCP server config format used by claude-client.ts
-      const q = query({
-        prompt: 'echo test',
-        options: {
-          maxTurns: 1,
-          mcpServers: {
-            'test-server': {
-              command: 'echo',
-              args: ['test'],
-              env: { TEST_KEY: 'value' },
-            },
-          },
-        },
-      });
-
-      // Should not throw for config structure
-      const iter = q[Symbol.asyncIterator]();
-      const msg = await iter.next();
-
-      expect(msg.done).toBe(false);
-
-      await q.interrupt();
-    });
   });
 
   describe.concurrent('Future Compatibility', () => {

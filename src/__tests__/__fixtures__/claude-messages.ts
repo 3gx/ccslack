@@ -33,10 +33,9 @@ export const mockToolUse = {
   content: [{
     type: 'tool_use',
     id: 'tool_123',
-    name: 'mcp__ask-user__ask_user',
+    name: 'Read',
     input: {
-      question: 'Do you approve this change?',
-      options: ['Yes', 'No'],
+      file_path: '/test/file.txt',
     },
   }],
 };
