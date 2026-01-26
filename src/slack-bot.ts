@@ -1239,6 +1239,10 @@ async function handleFastForwardSync(
     return;
   }
 
+  // Mark conversation as busy to block queries during /ff sync
+  // This will remain set while watching - removed when stopWatching is called
+  busyConversations.add(conversationKey);
+
   const updateRate = session.updateRateSeconds ?? UPDATE_RATE_DEFAULT;
   const terminalCommand = `cd ${session.workingDir} && claude --dangerously-skip-permissions --resume ${sessionId}`;
 
@@ -1411,7 +1415,11 @@ async function handleFastForwardSync(
         })
       );
       // Start watching with anchor as thread parent
-      startWatching(channelId, anchorTs, session, client, anchorTs, userId);
+      const watchResult = startWatching(channelId, anchorTs, session, client, anchorTs, userId);
+      if (!watchResult.success) {
+        // Remove from busy state since watcher failed to start
+        busyConversations.delete(conversationKey);
+      }
       return;
     }
 
@@ -1429,6 +1437,8 @@ async function handleFastForwardSync(
           blocks: buildAnchorBlocks('stopped', syncedCount, totalToSync),
         })
       );
+      // Remove from busy state since we're not transitioning to watching
+      busyConversations.delete(conversationKey);
       return;  // Don't start watching after stop
     }
 
@@ -1450,6 +1460,8 @@ async function handleFastForwardSync(
         thread_ts: anchorTs,
         text: `:warning: Could not start watching: ${result.error}`,
       });
+      // Remove from busy state since watcher failed to start
+      busyConversations.delete(conversationKey);
     }
 
   } catch (error) {
@@ -1461,6 +1473,8 @@ async function handleFastForwardSync(
         text: `:x: Failed to sync terminal messages: ${error instanceof Error ? error.message : String(error)}`,
       })
     );
+    // Remove from busy state on error
+    busyConversations.delete(conversationKey);
   }
 }
 
@@ -2691,6 +2705,13 @@ async function handleMessage(params: {
     // NOTE: No mode header for commands - header is only posted for Claude queries
     // Commands handle their own output (response text, blocks, or special handlers)
 
+    // Check if busy BEFORE posting /watch response - must block before anchor is posted
+    if (commandResult.startTerminalWatch && session?.sessionId) {
+      if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey, originalTs)) {
+        return;
+      }
+    }
+
     // Post command response
     if (commandResult.blocks) {
       // For /watch command: anchor posted to main channel (no thread_ts)
@@ -2708,6 +2729,10 @@ async function handleMessage(params: {
       // This makes all terminal activity post as thread replies to the anchor
       if (commandResult.startTerminalWatch && session?.sessionId && response.ts) {
         const anchorTs = response.ts as string;
+
+        // Mark conversation as busy to block queries during /watch setup
+        // This will remain set while watching - removed when stopWatching is called
+        busyConversations.add(conversationKey);
 
         // Update the anchor with correct blocks that include anchorTs for stop button
         // This is needed because commands.ts doesn't know anchorTs when building blocks
@@ -2745,12 +2770,17 @@ async function handleMessage(params: {
             thread_ts: anchorTs,
             text: `:warning: Could not start watching: ${result.error}`,
           });
+          // Remove from busy state since watcher failed to start
+          busyConversations.delete(conversationKey);
         }
       }
 
     } else if (commandResult.stopTerminalWatch) {
       // Stop terminal watcher (for /stop-watching command)
       const stopped = stopWatching(channelId, threadTs);
+      // Remove from busy state when watcher stops
+      // Always use channelId only since /watch is main-channel-only
+      busyConversations.delete(channelId);
       await client.chat.postMessage({
         channel: channelId,
         thread_ts: effectiveThreadTs,
@@ -2759,6 +2789,10 @@ async function handleMessage(params: {
           : ':information_source: No active terminal watcher in this conversation.',
       });
     } else if (commandResult.fastForward && session?.sessionId) {
+      // Check if busy - /ff should be blocked like agent queries
+      if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey, originalTs)) {
+        return;
+      }
       // Fast-forward: sync missed terminal messages and start watching
       await handleFastForwardSync(client, channelId, effectiveThreadTs, session, userId);
     } else if (commandResult.showPlan && commandResult.planFilePath) {
@@ -6101,6 +6135,9 @@ app.action('stop_terminal_watch', async ({ ack, body, client }) => {
   }
 
   const stopped = stopWatching(channelId, threadTs);
+  // Remove from busy state when watcher stops
+  // Always use channelId only since /watch is main-channel-only
+  busyConversations.delete(channelId);
 
   if (stopped && bodyWithMessage.message?.ts) {
     // Update the message to show stopped state

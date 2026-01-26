@@ -120,7 +120,7 @@ vi.mock('fs', () => ({
 import { createMockSlackClient } from './slack-bot-setup.js';
 
 // Import mocked modules
-import { getSession, saveSession, getMessageMapUuids, clearSyncedMessageUuids, saveActivityLog } from '../../session-manager.js';
+import { getSession, saveSession, getMessageMapUuids, clearSyncedMessageUuids, saveActivityLog, getOrCreateThreadSession } from '../../session-manager.js';
 import { startWatching, stopWatching, isWatching, getWatcher, onSessionCleared, updateWatchRate, postTerminalMessage } from '../../terminal-watcher.js';
 import { startClaudeQuery } from '../../claude-client.js';
 import { readNewMessages, sessionFileExists, extractTextContent, groupMessagesByTurn } from '../../session-reader.js';
@@ -1749,5 +1749,311 @@ describe('slack-bot /watch command', () => {
         })
       );
     });
+  });
+
+  describe('busyConversations blocking for /watch and /ff', () => {
+    it('should add to busyConversations when /watch starts', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Clear any existing state
+      busyConversations.clear();
+
+      vi.mocked(isWatching).mockReturnValue(false);
+      vi.mocked(startWatching).mockReturnValue({ success: true });
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      vi.mocked(sessionFileExists).mockReturnValue(true);
+
+      await handler({
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'watch-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should have added to busyConversations
+      expect(busyConversations.has('C123')).toBe(true);
+
+      // Cleanup
+      busyConversations.delete('C123');
+    });
+
+    it('should remove from busyConversations when /stop-watching is called', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Pre-populate busyConversations
+      busyConversations.add('C123');
+
+      vi.mocked(isWatching).mockReturnValue(false);  // Allow /stop-watching through
+      vi.mocked(stopWatching).mockReturnValue(true);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { text: '<@BOT123> /stop-watching', channel: 'C123', ts: 'stop-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should have removed from busyConversations
+      expect(busyConversations.has('C123')).toBe(false);
+    });
+
+    it('should block Claude queries with busy message during /watch', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Simulate /watch is active (added to busyConversations but isWatching returns false for race window test)
+      busyConversations.add('C123');
+      vi.mocked(isWatching).mockReturnValue(false);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { text: '<@BOT123> hello', channel: 'C123', ts: 'query-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should have posted busy message
+      const busyCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes("I'm busy with the current request")
+      );
+      expect(busyCalls.length).toBe(1);
+
+      // Should have removed :eyes: reaction
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'query-ts',
+        name: 'eyes',
+      });
+
+      // Cleanup
+      busyConversations.delete('C123');
+    });
+
+    it('should remove from busyConversations when startWatching fails', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Clear any existing state
+      busyConversations.clear();
+
+      vi.mocked(isWatching).mockReturnValue(false);
+      vi.mocked(startWatching).mockReturnValue({ success: false, error: 'No session' });
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      vi.mocked(sessionFileExists).mockReturnValue(true);
+
+      await handler({
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'watch-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should have removed from busyConversations on failure
+      expect(busyConversations.has('C123')).toBe(false);
+    });
+
+    it('should remove from busyConversations when Stop Watching button is clicked', async () => {
+      const buttonHandler = registeredHandlers['action_stop_terminal_watch'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Pre-populate busyConversations
+      busyConversations.add('C123');
+
+      vi.mocked(stopWatching).mockReturnValue(true);
+
+      await buttonHandler({
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'anchor-ts' },
+          actions: [{ value: JSON.stringify({}) }],
+        },
+        client: mockClient,
+      });
+
+      // Should have removed from busyConversations
+      expect(busyConversations.has('C123')).toBe(false);
+    });
+
+    it('should remove from busyConversations when Stop button has threadTs in value (production scenario)', async () => {
+      const buttonHandler = registeredHandlers['action_stop_terminal_watch'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Pre-populate busyConversations with main channel key
+      busyConversations.add('C123');
+
+      vi.mocked(stopWatching).mockReturnValue(true);
+
+      // Button value has threadTs: anchor-ts (as happens in production)
+      await buttonHandler({
+        ack: vi.fn(),
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'anchor-ts' },
+          actions: [{ value: JSON.stringify({ threadTs: 'anchor-ts', sessionId: 'test-session' }) }],
+        },
+        client: mockClient,
+      });
+
+      // Should have removed from busyConversations using channelId only
+      // (not C123_anchor-ts which would be wrong)
+      expect(busyConversations.has('C123')).toBe(false);
+    });
+
+    it('should block /watch when agent is already busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Pre-populate busyConversations (simulating an active query)
+      busyConversations.add('C123');
+      vi.mocked(isWatching).mockReturnValue(false);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { text: '<@BOT123> /watch', channel: 'C123', ts: 'watch-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should have posted busy message (and ONLY the busy message, not the anchor)
+      const allCalls = mockClient.chat.postMessage.mock.calls;
+      expect(allCalls.length).toBe(1);  // Only busy message, no anchor
+      expect(allCalls[0][0]?.text).toContain("I'm busy with the current request");
+
+      // Should have removed :eyes: reaction
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'watch-ts',
+        name: 'eyes',
+      });
+
+      // Should NOT have called startWatching
+      expect(startWatching).not.toHaveBeenCalled();
+
+      // Cleanup
+      busyConversations.delete('C123');
+    });
+
+    it('should block /ff when agent is already busy', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Pre-populate busyConversations (simulating an active query)
+      busyConversations.add('C123');
+      vi.mocked(isWatching).mockReturnValue(false);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/project',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/project',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      vi.mocked(sessionFileExists).mockReturnValue(true);
+
+      await handler({
+        event: { text: '<@BOT123> /ff', channel: 'C123', ts: 'ff-ts', user: 'U123' },
+        client: mockClient,
+        say: vi.fn(),
+      });
+
+      // Should have posted busy message
+      const busyCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes("I'm busy with the current request")
+      );
+      expect(busyCalls.length).toBe(1);
+
+      // Should have removed :eyes: reaction
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'ff-ts',
+        name: 'eyes',
+      });
+
+      // Should NOT have called readNewMessages (ff sync logic)
+      expect(readNewMessages).not.toHaveBeenCalled();
+
+      // Cleanup
+      busyConversations.delete('C123');
+    });
+
   });
 });
