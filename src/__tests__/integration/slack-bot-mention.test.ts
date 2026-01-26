@@ -1346,6 +1346,13 @@ describe('slack-bot mention handlers', () => {
 
       // Should NOT start Claude query (command handled internally)
       expect(startClaudeQuery).not.toHaveBeenCalled();
+
+      // Verify :page_with_curl: emoji was added (matches plan mode behavior)
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg123',
+        name: 'page_with_curl',
+      });
     });
 
     it('should post error when plan file does not exist', async () => {
@@ -1388,6 +1395,12 @@ describe('slack-bot mention handlers', () => {
 
       // Should NOT start Claude query
       expect(startClaudeQuery).not.toHaveBeenCalled();
+
+      // Verify :page_with_curl: emoji was NOT added (plan not shown due to error)
+      const pageCurlCalls = mockClient.reactions.add.mock.calls.filter(
+        (call: any) => call[0].name === 'page_with_curl'
+      );
+      expect(pageCurlCalls).toHaveLength(0);
     });
 
     it('should post error when no plan file path in session', async () => {

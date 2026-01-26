@@ -3008,6 +3008,10 @@ async function handleMessage(params: {
           liveConfig.threadCharLimit,
           liveConfig.stripEmptyTag
         );
+        // Add :page_with_curl: emoji to indicate plan shown (matches plan mode behavior)
+        if (originalTs) {
+          await addReaction(client, channelId, originalTs, 'page_with_curl');
+        }
       } catch (e) {
         await client.chat.postMessage({
           channel: channelId,
