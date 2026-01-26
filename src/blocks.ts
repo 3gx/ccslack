@@ -2257,6 +2257,7 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     blocks.push({
       type: 'section',
       text: { type: 'mrkdwn', text: todoText },
+      expand: true,
     } as Block);
     blocks.push({ type: 'divider' } as Block);
   }
