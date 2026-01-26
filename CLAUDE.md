@@ -14,7 +14,7 @@ make clean              # Remove dist/ and coverage/
 
 # Testing
 make test               # Unit + integration tests (mocked, JOBS=4 for parallel)
-make sdk-test           # Live SDK tests (may require ANTHROPIC_API_KEY, SDKJOBS=8)
+make sdk-test           # Live SDK tests (may require ANTHROPIC_API_KEY, SDKJOBS=4)
 make all-test           # All tests (unit + integration + SDK live)
 make test-watch         # Watch mode
 make test-coverage      # With coverage report
@@ -31,14 +31,14 @@ npx tsc --noEmit
 ```
 src/
 ├── index.ts              # Entry point, initializes Slack app and answer directory
-├── slack-bot.ts          # Main bot logic, event handlers, button handlers (~6000 lines)
+├── slack-bot.ts          # Main bot logic, event handlers, button handlers (~6400 lines)
 ├── claude-client.ts      # Claude Code SDK wrapper with MCP configuration
 ├── mcp-server.ts         # MCP server providing ask_user/approve_action tools
 ├── session-manager.ts    # Session persistence to sessions.json with mutex locking
 ├── session-reader.ts     # Parses Claude SDK JSONL session files from ~/.claude/projects/
 ├── session-event-stream.ts # Reads session JSONL files as async generator
 ├── streaming.ts          # Slack streaming API with fallback to chat.update
-├── blocks.ts             # Block Kit builders for all UI (~74KB)
+├── blocks.ts             # Block Kit builders for all UI (~83KB)
 ├── commands.ts           # Slash command parsing and execution
 ├── errors.ts             # SlackBotError class and error factories
 ├── retry.ts              # Retry utilities with exponential backoff
@@ -55,9 +55,9 @@ src/
 ├── content-builder.ts    # Builds Claude-compatible multi-modal content blocks
 ├── types.d.ts            # Module declarations for markdown-it plugins
 └── __tests__/
-    ├── unit/             # Unit tests (29 files, mocked dependencies)
-    ├── integration/      # Integration tests (20 files, mocked Slack/SDK)
-    └── sdk-live/         # Live SDK tests (41 files, requires real API key)
+    ├── unit/             # Unit tests (27 files, mocked dependencies)
+    ├── integration/      # Integration tests (19 files, mocked Slack/SDK)
+    └── sdk-live/         # Live SDK tests (50 files, requires real API key)
 ```
 
 ## Key Patterns
@@ -192,9 +192,9 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 
 ### Activity Log and Generating Entries
 - Real-time activity tracking via `ActivityEntry` type
-- Entry types: `starting`, `thinking`, `tool_start`, `tool_complete`, `error`, `generating`, `aborted`
+- Entry types: `starting`, `thinking`, `tool_start`, `tool_complete`, `error`, `generating`, `aborted`, `mode_changed`
 - `generating` entries track text streaming progress (chunks, chars, duration)
-- Activity logs stored in `activityLogs` by conversation key
+- Activity logs stored in memory during processing (not persisted to sessions.json)
 - View Log modal shows paginated activity history
 - Download .txt exports full activity log
 
@@ -202,7 +202,7 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 - Claude writes to a plan file via `ExitPlanMode` tool
 - Session stores `planFilePath` for the current plan
 - `/show-plan` command displays plan file content in thread
-- Plan approval shows 5 buttons: Clear context & bypass, Accept edits, Bypass, Manual, Change the plan
+- Plan approval shows 5 buttons: 1. Clear context & bypass, 2. Accept edits, 3. Bypass permissions, 4. Manual approve, 5. Change the plan
 
 ### Terminal Integration
 - `/watch` starts watching a session for terminal updates
@@ -234,7 +234,6 @@ If both `canUseTool` and MCP `approve_action` show prompts:
 |----------|----------|-------------|
 | `SLACK_BOT_TOKEN` | Yes | Bot OAuth Token (xoxb-...) |
 | `SLACK_APP_TOKEN` | Yes | Socket Mode Token (xapp-...) |
-| `SLACK_SIGNING_SECRET` | No | Request signing secret (not needed for Socket Mode) |
 | `ANTHROPIC_API_KEY` | No | API key for SDK live tests |
 | `SLACK_CONTEXT` | No | JSON string set dynamically for MCP server subprocess |
 | `SKIP_SDK_TESTS` | No | Set to 'true' to skip live SDK tests |
@@ -258,6 +257,7 @@ If both `canUseTool` and MCP `approve_action` show prompts:
 | `/watch` | - | Start watching session for terminal updates (main channel only) |
 | `/stop-watching` | - | Stop watching terminal session |
 | `/fork` | - | Get terminal command to fork session |
+| `/ff` | - | Fast-forward sync missed terminal messages (main channel only) |
 | `/resume` | `<session-id>` | Resume a terminal session in Slack (UUID format required) |
 | `/compact` | - | Compact session to reduce context size |
 | `/clear` | - | Clear session history and start fresh |

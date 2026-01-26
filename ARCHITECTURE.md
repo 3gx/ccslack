@@ -82,9 +82,10 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 ## Components
 
 ### Entry Point (`src/index.ts`)
-- Initializes Slack app with Socket Mode
-- Loads environment variables
-- Starts the bot
+- Creates and clears answer directory (`/tmp/ccslack-answers/`) for MCP IPC
+- Starts the bot via `startBot()`
+- Sets up graceful shutdown handlers (SIGTERM, SIGINT)
+- Calls `stopAllWatchers()` to stop terminal watchers on shutdown
 
 ### Slack Bot (`src/slack-bot.ts`)
 - Handles `app_mention` events for channel @mentions
@@ -121,15 +122,16 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 - **LastUsage interface**: `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `contextWindow`, `model`, `maxOutputTokens`
 - **ThreadSession interface**: Inherits from Session, adds `forkedFrom`, `forkedFromThreadTs`, `resumeSessionAtMessageId`
 - **Message mapping**: `SlackMessageMapping` links Slack timestamps to SDK message IDs and session IDs
-- **Activity log storage**: Stores activity entries by conversation key for View Log modal and download
+- **Activity log storage**: Activity entries stored in memory during processing (not persisted to sessions.json)
 - `previousSessionIds[]`: Tracks sessions before `/clear` for time-travel forking
 - Handles corrupted session files gracefully with migration support
 
 ### Streaming (`src/streaming.ts`)
 - Implements Slack native streaming API (chat.startStream/appendStream/stopStream)
 - Falls back to throttled `chat.update` on errors (2-second interval)
-- **Message splitting**: Splits long responses (>4000 chars) at natural boundaries
-- `postSplitResponse()`: Posts multi-part messages with retry logic
+- `truncateWithClosedFormatting()`: Truncates text at configurable limit with proper formatting closure
+- `uploadMarkdownAndPngWithResponse()`: Posts response with attached .md and .png files when truncated
+- `uploadFilesToThread()`: Uploads thinking content as files to thread
 
 ### Blocks (`src/blocks.ts`)
 - Block Kit builders for all message types
@@ -145,8 +147,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 
 ### Commands (`src/commands.ts`)
 - Parses slash commands from user messages
-- Implements: `/help`, `/status`, `/context`, `/mode`, `/model`, `/cd`, `/ls`, `/set-current-path`, `/watch`, `/stop-watching`, `/fork`, `/resume`, `/clear`, `/compact`, `/max-thinking-tokens`, `/update-rate`, `/message-size`, `/strip-empty-tag`, `/show-plan`, `/wait`
-- `/ff` is disabled (returns unknown command error)
+- Implements: `/help`, `/status`, `/context`, `/mode`, `/model`, `/cd`, `/ls`, `/set-current-path`, `/watch`, `/stop-watching`, `/fork`, `/ff`, `/resume`, `/clear`, `/compact`, `/max-thinking-tokens`, `/update-rate`, `/message-size`, `/strip-empty-tag`, `/show-plan`, `/wait`
 
 ### Error Handling (`src/errors.ts`)
 - `SlackBotError` class with typed error codes
@@ -162,16 +163,17 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 
 ### Model Cache (`src/model-cache.ts`)
 - Caches available models from SDK
-- `getAvailableModels()`, `isModelAvailable()`, `refreshModelCache()`
+- `getAvailableModels()`, `isModelAvailable()`, `refreshModelCache()`, `getModelInfo()`, `getDefaultModel()`
 - Used for `/model` command and model selection UI
 
 ### Markdown PNG (`src/markdown-png.ts`)
-- Converts markdown to PNG images
-- Used for rendering code blocks and formatted text as images
+- Converts markdown to PNG images using Puppeteer
+- Includes syntax highlighting for code blocks via highlight.js
+- Returns null on failure for graceful fallback
 
 ### Abort Tracker (`src/abort-tracker.ts`)
 - Tracks aborted conversations to prevent race conditions
-- `markAborted()`, `isAborted()`, `clearAborted()`
+- `markAborted()`, `isAborted()`, `clearAborted()`, `reset()` (testing only)
 - Used during query interrupt flow
 
 ## Data Flow
@@ -310,17 +312,13 @@ Sessions are stored in `sessions.json`:
           "planFilePath": null
         }
       },
-      "activityLogs": {
-        "C123456789_1234567890.001": [
-          { "timestamp": 1705123456789, "type": "starting" },
-          { "timestamp": 1705123457000, "type": "thinking", "thinkingContent": "..." },
-          { "timestamp": 1705123458000, "type": "tool_start", "tool": "Read" },
-          { "timestamp": 1705123459000, "type": "tool_complete", "tool": "Read", "durationMs": 1000 }
-        ]
-      }
+      "syncedMessageUuids": [],
+      "slackOriginatedUserUuids": []
     }
   }
 }
+
+Note: Activity logs are stored in memory during processing only and are NOT persisted to sessions.json.
 ```
 
 ### Key Storage Concepts
@@ -328,7 +326,7 @@ Sessions are stored in `sessions.json`:
 - **messageMap**: Links Slack message timestamps to SDK message IDs AND session IDs, enabling point-in-time forking even after `/clear`
 - **previousSessionIds**: Tracks old session IDs after `/clear` for time-travel forking
 - **resumeSessionAtMessageId**: SDK message ID to fork from (passed to `resumeSessionAt` in SDK query)
-- **activityLogs**: Preserved activity entries by conversation key for View Log modal
+- **activityLogs**: In-memory only during processing (not persisted to sessions.json)
 - **pathConfigured**: Immutable after first set - prevents accidental working directory changes
 - **threadCharLimit**: Message size limit before response truncation (default 500)
 - **stripEmptyTag**: Whether to strip bare ``` wrappers (default false)
@@ -369,7 +367,7 @@ On completion:
 ```typescript
 interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed';
   tool?: string;
   durationMs?: number;
   message?: string;
@@ -381,6 +379,7 @@ interface ActivityEntry {
   generatingInProgress?: boolean;
   generatingContent?: string;   // Full response text
   generatingTruncated?: string; // First 500 chars for live display
+  mode?: string;                // For mode_changed entries
 }
 ```
 
@@ -407,6 +406,7 @@ When activity entries exceed MAX_LIVE_ENTRIES (300), switches to rolling window 
 | `WORKING_DIR_NOT_FOUND` | Directory doesn't exist | No |
 | `FILE_READ_ERROR` | Could not read file | No |
 | `FILE_WRITE_ERROR` | Could not write file | No |
+| `FILE_DOWNLOAD_ERROR` | Could not download file | No |
 | `GIT_CONFLICT` | Git conflicts detected | No |
 | `INVALID_INPUT` | Invalid user input | No |
 | `EMPTY_MESSAGE` | No message text provided | No |
@@ -565,7 +565,9 @@ make clean              # Remove dist/ and coverage/
 |----------|-------------|
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (xoxb-...) |
 | `SLACK_APP_TOKEN` | App-Level Token for Socket Mode (xapp-...) |
-| `SLACK_SIGNING_SECRET` | Request signing secret |
+| `ANTHROPIC_API_KEY` | API key for SDK live tests (optional) |
+| `SLACK_CONTEXT` | JSON string set dynamically for MCP server subprocess |
+| `SKIP_SDK_TESTS` | Set to 'true' to skip live SDK tests |
 
 ## Commands
 
@@ -583,6 +585,7 @@ make clean              # Remove dist/ and coverage/
 | `@claude /watch` | Start watching session for terminal updates |
 | `@claude /stop-watching` | Stop watching terminal session |
 | `@claude /fork` | Get terminal fork command |
+| `@claude /ff` | Fast-forward sync missed terminal messages (main channel only) |
 | `@claude /resume <id>` | Resume a terminal session in Slack (UUID format) |
 | `@claude /clear` | Clear conversation history |
 | `@claude /compact` | Compact session to reduce context |
@@ -592,9 +595,6 @@ make clean              # Remove dist/ and coverage/
 | `@claude /strip-empty-tag [true\|false]` | Strip bare ``` wrappers (default false) |
 | `@claude /show-plan` | Display current plan file content in thread |
 | `@claude /wait <1-300>` | Rate limit stress test |
-
-**Disabled Commands:**
-- `/ff` (fast-forward) - Returns unknown command error
 
 ## Session Cleanup
 

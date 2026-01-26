@@ -47,6 +47,7 @@ See [SETUP.md](./SETUP.md) for detailed step-by-step instructions.
 | `/watch` | Start watching session for terminal updates (main channel only) |
 | `/stop-watching` | Stop watching terminal session |
 | `/fork` | Get command to fork session to terminal |
+| `/ff` | Fast-forward sync missed terminal messages (main channel only) |
 | `/resume <id>` | Resume a terminal session in Slack (UUID format required) |
 | `/compact` | Compact session to reduce context size |
 | `/clear` | Clear session history (start fresh) |
@@ -95,9 +96,6 @@ make test-coverage
 # Type check
 npx tsc --noEmit
 
-# Lint
-npm run lint
-
 # Run dev mode
 make dev
 ```
@@ -143,7 +141,3 @@ This limitation will be addressed in a future update.
 ### Concurrent Session Warning
 
 Due to the terminal detection limitation above, the bot cannot warn you if you're about to use a session that's already active in terminal. Using the same session from multiple places simultaneously may cause unexpected behavior.
-
-### Disabled Commands
-
-- `/ff` (fast-forward) - Disabled, returns "Unknown command" error
