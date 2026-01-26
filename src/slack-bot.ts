@@ -446,11 +446,13 @@ function getLiveSessionConfig(channelId: string, threadTs?: string) {
 
 // Helper to check if conversation is busy and respond if so
 // Returns true if busy (caller should return early), false if not busy
+// Also removes :eyes: reaction if originalTs is provided
 async function checkBusyAndRespond(
   client: any,
   channelId: string,
   threadTs: string | undefined,
-  conversationKey: string
+  conversationKey: string,
+  originalTs?: string
 ): Promise<boolean> {
   if (busyConversations.has(conversationKey)) {
     await client.chat.postMessage({
@@ -458,6 +460,18 @@ async function checkBusyAndRespond(
       thread_ts: threadTs,
       text: "I'm busy with the current request. Please wait for it to complete, or click Abort.",
     });
+    // Remove :eyes: reaction since we're not processing this message
+    if (originalTs) {
+      try {
+        await client.reactions.remove({
+          channel: channelId,
+          timestamp: originalTs,
+          name: 'eyes',
+        });
+      } catch {
+        // Ignore - reaction may already be removed
+      }
+    }
     return true; // Was busy
   }
   return false; // Not busy
@@ -2582,7 +2596,7 @@ async function handleMessage(params: {
 
   // Handle /compact command (session compaction)
   if (commandResult.compactSession) {
-    if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey)) {
+    if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey, originalTs)) {
       return;
     }
     await runCompactSession(
@@ -2597,7 +2611,7 @@ async function handleMessage(params: {
 
   // Handle /clear command (clear session history)
   if (commandResult.clearSession) {
-    if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey)) {
+    if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey, originalTs)) {
       return;
     }
     await runClearSession(
@@ -2901,7 +2915,7 @@ async function handleMessage(params: {
   }
 
   // Check if conversation is busy before starting query
-  if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey)) {
+  if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey, originalTs)) {
     return;
   }
 

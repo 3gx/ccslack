@@ -754,4 +754,175 @@ describe('slack-bot command handlers', () => {
       setTimeoutSpy.mockRestore();
     });
   });
+
+  describe('busy conversation :eyes: reaction handling', () => {
+    it('should remove :eyes: reaction when responding with busy message', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Import busyConversations to set up busy state
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Pre-populate busyConversations to simulate an in-progress query
+      const conversationKey = 'C123';
+      busyConversations.add(conversationKey);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> hello',
+          channel: 'C123',
+          ts: 'msg456',
+        },
+        client: mockClient,
+      });
+
+      // Should have added :eyes: first
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg456',
+        name: 'eyes',
+      });
+
+      // Should have posted busy message
+      const busyCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes("I'm busy with the current request")
+      );
+      expect(busyCalls.length).toBe(1);
+
+      // Should have removed :eyes: after busy response
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg456',
+        name: 'eyes',
+      });
+
+      // Cleanup
+      busyConversations.delete(conversationKey);
+    });
+
+    it('should remove :eyes: when /compact is blocked by busy conversation', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Simulate busy conversation - checkBusyAndRespond uses main channel key
+      const conversationKey = 'C123';
+      busyConversations.add(conversationKey);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /compact',
+          channel: 'C123',
+          ts: 'msg789',
+        },
+        client: mockClient,
+      });
+
+      // Should have added :eyes:
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg789',
+        name: 'eyes',
+      });
+
+      // Should have posted busy message
+      const busyCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes("I'm busy with the current request")
+      );
+      expect(busyCalls.length).toBe(1);
+
+      // Should have removed :eyes:
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg789',
+        name: 'eyes',
+      });
+
+      // Cleanup
+      busyConversations.delete(conversationKey);
+    });
+
+    it('should remove :eyes: when /clear is blocked by busy conversation', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      const { busyConversations } = await import('../../slack-bot.js');
+
+      // Simulate busy conversation - checkBusyAndRespond uses main channel key
+      const conversationKey = 'C123';
+      busyConversations.add(conversationKey);
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'existing-session-123',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: {
+          user: 'U123',
+          text: '<@BOT123> /clear',
+          channel: 'C123',
+          ts: 'msg999',
+        },
+        client: mockClient,
+      });
+
+      // Should have added :eyes:
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg999',
+        name: 'eyes',
+      });
+
+      // Should have posted busy message
+      const busyCalls = mockClient.chat.postMessage.mock.calls.filter(
+        (call: any[]) => call[0]?.text?.includes("I'm busy with the current request")
+      );
+      expect(busyCalls.length).toBe(1);
+
+      // Should have removed :eyes:
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg999',
+        name: 'eyes',
+      });
+
+      // Cleanup
+      busyConversations.delete(conversationKey);
+    });
+  });
 });
