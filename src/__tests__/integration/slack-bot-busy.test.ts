@@ -494,4 +494,177 @@ describe('busy state handling', () => {
     resolveQuery!();
     await queryPromise;
   });
+
+  it('should block regular query when /compact is running', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    // Mock startClaudeQuery to hang (simulates /compact running)
+    let resolveCompact: () => void;
+    const hangingPromise = new Promise<void>(r => { resolveCompact = r; });
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'test-session', model: 'claude-sonnet' };
+        await hangingPromise;
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 1000 } };
+        yield { type: 'result', result: 'compacted' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    // Start /compact
+    const compactPromise = handler({
+      event: { user: 'U123', text: '<@BOT123> /compact', channel: 'C123', ts: 'compact-ts' },
+      client: mockClient,
+    });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Try regular query while /compact is running - should be blocked
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'query-ts' },
+      client: mockClient,
+    });
+
+    // Should see "I'm busy" message
+    const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+      (call: any[]) => call[0].text?.includes("I'm busy")
+    );
+    expect(busyMessages).toHaveLength(1);
+
+    // Cleanup
+    resolveCompact!();
+    await compactPromise;
+  });
+
+  it('should block concurrent /compact commands', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    // Mock startClaudeQuery to hang
+    let resolveCompact: () => void;
+    const hangingPromise = new Promise<void>(r => { resolveCompact = r; });
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'test-session', model: 'claude-sonnet' };
+        await hangingPromise;
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 1000 } };
+        yield { type: 'result', result: 'compacted' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    // Start first /compact
+    const compactPromise = handler({
+      event: { user: 'U123', text: '<@BOT123> /compact', channel: 'C123', ts: 'compact1-ts' },
+      client: mockClient,
+    });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Try second /compact while first is running - should be blocked
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> /compact', channel: 'C123', ts: 'compact2-ts' },
+      client: mockClient,
+    });
+
+    // Should see "I'm busy" message
+    const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+      (call: any[]) => call[0].text?.includes("I'm busy")
+    );
+    expect(busyMessages).toHaveLength(1);
+
+    // Cleanup
+    resolveCompact!();
+    await compactPromise;
+  });
+
+  it('should remove :eyes: at end of /compact, not at start', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    // Track when :eyes: is removed relative to compact_boundary
+    let eyesRemovedBeforeBoundary = false;
+    let boundaryReached = false;
+    let resolveCompact: () => void;
+    const hangingPromise = new Promise<void>(r => { resolveCompact = r; });
+
+    // Override reactions.remove to track timing
+    mockClient.reactions.remove = vi.fn().mockImplementation(() => {
+      if (!boundaryReached) {
+        eyesRemovedBeforeBoundary = true;
+      }
+      return Promise.resolve({});
+    });
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'test-session', model: 'claude-sonnet' };
+        await hangingPromise;
+        boundaryReached = true;
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 1000 } };
+        yield { type: 'result', result: 'compacted' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    // Start /compact
+    const compactPromise = handler({
+      event: { user: 'U123', text: '<@BOT123> /compact', channel: 'C123', ts: 'compact-ts' },
+      client: mockClient,
+    });
+
+    // Wait a bit for the status message to be posted
+    await new Promise(r => setTimeout(r, 10));
+
+    // At this point, :eyes: should NOT have been removed yet
+    expect(eyesRemovedBeforeBoundary).toBe(false);
+
+    // Let compaction complete
+    resolveCompact!();
+    await compactPromise;
+
+    // Now :eyes: should have been removed
+    expect(mockClient.reactions.remove).toHaveBeenCalledWith({
+      channel: 'C123',
+      timestamp: 'compact-ts',
+      name: 'eyes',
+    });
+  });
 });

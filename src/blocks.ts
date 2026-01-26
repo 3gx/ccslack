@@ -750,6 +750,13 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
 const COMPACT_BUFFER = 13000;
 const DEFAULT_EFFECTIVE_MAX_OUTPUT_TOKENS = 32000;  // CLI HV6 default cap
 
+// All current Claude models (opus-4, opus-4-5, sonnet-4, sonnet-4-5, haiku-4, 3.5-*)
+// have a context window of 200,000 tokens. This constant is used as a fallback
+// when contextWindow is not yet available (first query after /clear, /resume, or fresh channel).
+// The SDK only provides contextWindow in the result message at query END, but we need it
+// during the spinner loop for real-time context % display.
+export const DEFAULT_CONTEXT_WINDOW = 200000;
+
 /**
  * Compute auto-compact threshold in tokens.
  * CLI formula: contextWindow - effectiveMaxOutput - 13000

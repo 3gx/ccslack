@@ -46,6 +46,7 @@ import {
   formatThreadThinkingMessage,
   buildAttachThinkingFileButton,
   computeAutoCompactThreshold,
+  DEFAULT_CONTEXT_WINDOW,
 } from './blocks.js';
 import {
   getAvailableModels,
@@ -210,6 +211,14 @@ interface ActiveQuery {
   processingState: ProcessingState;
 }
 const activeQueries = new Map<string, ActiveQuery>();
+
+// Track pending plan approvals (for maintaining busy state and :eyes:)
+interface PendingPlanApproval {
+  originalTs: string;
+  channelId: string;
+  threadTs?: string;
+}
+export const pendingPlanApprovals = new Map<string, PendingPlanApproval>();
 
 // Mutexes for serializing updates (prevents abort race conditions)
 const updateMutexes = new Map<string, Mutex>();
@@ -696,10 +705,10 @@ async function runCompactSession(
   channelId: string,
   threadTs: string | undefined,
   session: Session,
-  originalTs: string | undefined
+  originalTs: string | undefined,
+  conversationKey: string
 ): Promise<void> {
   const startTime = Date.now();
-  const conversationKey = `compact_${channelId}`;
 
   // Initialize ProcessingState for abort capability (all required fields)
   const processingState: ProcessingState = {
@@ -738,19 +747,6 @@ async function runCompactSession(
     compactPreTokens: null,
     compactIsManual: true,  // /compact is manual
   };
-
-  // Remove eyes reaction first
-  if (originalTs) {
-    try {
-      await client.reactions.remove({
-        channel: channelId,
-        timestamp: originalTs,
-        name: 'eyes',
-      });
-    } catch {
-      // Ignore
-    }
-  }
 
   // Post initial status message
   const statusMsg = (await withSlackRetry(() =>
@@ -974,6 +970,19 @@ async function runCompactSession(
         text: 'Compaction processed',
       })
     );
+  }
+
+  // Remove eyes reaction now that compaction is complete
+  if (originalTs) {
+    try {
+      await client.reactions.remove({
+        channel: channelId,
+        timestamp: originalTs,
+        name: 'eyes',
+      });
+    } catch {
+      // Ignore
+    }
   }
 }
 
@@ -2392,17 +2401,13 @@ async function showPlanApprovalUI(params: {
     console.error('[PlanApproval] Error posting plan approval buttons:', btnError);
   }
 
-  // Remove eyes reaction
+  // Store pending plan approval (keeps busy state and :eyes:)
   if (originalTs) {
-    try {
-      await client.reactions.remove({
-        channel: channelId,
-        timestamp: originalTs,
-        name: 'eyes',
-      });
-    } catch (e) {
-      // Ignore - reaction may already be removed
-    }
+    pendingPlanApprovals.set(conversationKey, {
+      originalTs,
+      channelId,
+      threadTs,
+    });
   }
 }
 
@@ -2618,7 +2623,8 @@ async function handleMessage(params: {
       channelId,
       effectiveThreadTs,
       session,
-      originalTs
+      originalTs,
+      conversationKey
     );
     return;
   }
@@ -3722,7 +3728,7 @@ async function handleMessage(params: {
         const inProgressPerTurnTotal = (processingState.perTurnInputTokens || 0)
           + (processingState.perTurnCacheCreationInputTokens || 0)
           + (processingState.perTurnCacheReadInputTokens || 0);
-        const inProgressContextWindow = processingState.contextWindow || session.lastUsage?.contextWindow;
+        const inProgressContextWindow = processingState.contextWindow || session.lastUsage?.contextWindow || DEFAULT_CONTEXT_WINDOW;
         const inProgressMaxOutput = processingState.maxOutputTokens || session.lastUsage?.maxOutputTokens;
         const inProgressContextPercent = inProgressContextWindow && inProgressPerTurnTotal > 0
           ? Math.min(100, Math.max(0, Number((inProgressPerTurnTotal / inProgressContextWindow * 100).toFixed(1))))
@@ -4444,7 +4450,7 @@ async function handleMessage(params: {
       const catchPerTurnTotal = (processingState.perTurnInputTokens || 0)
         + (processingState.perTurnCacheCreationInputTokens || 0)
         + (processingState.perTurnCacheReadInputTokens || 0);
-      const catchContextWindow = processingState.contextWindow || session.lastUsage?.contextWindow;
+      const catchContextWindow = processingState.contextWindow || session.lastUsage?.contextWindow || DEFAULT_CONTEXT_WINDOW;
       const catchMaxOutput = processingState.maxOutputTokens || session.lastUsage?.maxOutputTokens;
       const catchContextPercent = catchContextWindow && catchPerTurnTotal > 0
         ? Math.min(100, Math.max(0, Number((catchPerTurnTotal / catchContextWindow * 100).toFixed(1))))
@@ -4577,8 +4583,10 @@ async function handleMessage(params: {
     if (spinnerTimer) {
       clearTimeout(spinnerTimer);
     }
-    // Always clean up busy state, active queries, and mutex
-    busyConversations.delete(conversationKey);
+    // Only clear busy state if NOT waiting for plan approval
+    if (!pendingPlanApprovals.has(conversationKey)) {
+      busyConversations.delete(conversationKey);
+    }
     activeQueries.delete(conversationKey);
     clearAborted(conversationKey);
     cleanupMutex(conversationKey);
@@ -4826,7 +4834,7 @@ async function handleQueryAbort(conversationKey: string, channelId: string, clie
         const abortPerTurnTotal = (active.processingState.perTurnInputTokens || 0)
           + (active.processingState.perTurnCacheCreationInputTokens || 0)
           + (active.processingState.perTurnCacheReadInputTokens || 0);
-        const abortContextWindow = active.processingState.contextWindow || abortSession?.lastUsage?.contextWindow;
+        const abortContextWindow = active.processingState.contextWindow || abortSession?.lastUsage?.contextWindow || DEFAULT_CONTEXT_WINDOW;
         const abortMaxOutput = active.processingState.maxOutputTokens || abortSession?.lastUsage?.maxOutputTokens;
         const abortContextPercent = abortContextWindow && abortPerTurnTotal > 0
           ? Math.min(100, Math.max(0, Number((abortPerTurnTotal / abortContextWindow * 100).toFixed(1))))
@@ -4887,6 +4895,21 @@ async function handleQueryAbort(conversationKey: string, channelId: string, clie
     // Clean up active query (abortedQueries cleaned up in finally block of main flow)
     activeQueries.delete(conversationKey);
     busyConversations.delete(conversationKey);
+
+    // Clear pending plan approval state and :eyes: on abort
+    const pendingPlan = pendingPlanApprovals.get(conversationKey);
+    if (pendingPlan) {
+      pendingPlanApprovals.delete(conversationKey);
+      try {
+        await client.reactions.remove({
+          channel: pendingPlan.channelId,
+          timestamp: pendingPlan.originalTs,
+          name: 'eyes',
+        });
+      } catch (e) {
+        // Ignore - reaction may already be removed
+      }
+    }
   } else {
     console.log(`No active query found for: ${conversationKey}`);
   }
@@ -5235,6 +5258,22 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
+  // Clear pending plan approval state and :eyes:
+  const pending = pendingPlanApprovals.get(conversationKey);
+  if (pending) {
+    pendingPlanApprovals.delete(conversationKey);
+    busyConversations.delete(conversationKey);
+    try {
+      await client.reactions.remove({
+        channel: pending.channelId,
+        timestamp: pending.originalTs,
+        name: 'eyes',
+      });
+    } catch (e) {
+      // Ignore - reaction may already be removed
+    }
+  }
+
   console.log(`Plan option 1 (clear + bypass) clicked for: ${conversationKey}`);
 
   await updateApprovalMessage(body, client, '✅ Clearing context and proceeding with bypass mode...');
@@ -5283,6 +5322,22 @@ app.action(/^plan_accept_edits_(.+)$/, async ({ action, ack, body, client }) => 
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
+  // Clear pending plan approval state and :eyes:
+  const pending = pendingPlanApprovals.get(conversationKey);
+  if (pending) {
+    pendingPlanApprovals.delete(conversationKey);
+    busyConversations.delete(conversationKey);
+    try {
+      await client.reactions.remove({
+        channel: pending.channelId,
+        timestamp: pending.originalTs,
+        name: 'eyes',
+      });
+    } catch (e) {
+      // Ignore - reaction may already be removed
+    }
+  }
+
   console.log(`Plan option 2 (accept edits) clicked for: ${conversationKey}`);
 
   await updateApprovalMessage(body, client, '✅ Proceeding with accept-edits mode...');
@@ -5316,6 +5371,22 @@ app.action(/^plan_bypass_(.+)$/, async ({ action, ack, body, client }) => {
   const [channelId, threadTs] = conversationKey.includes('_')
     ? conversationKey.split('_')
     : [conversationKey, undefined];
+
+  // Clear pending plan approval state and :eyes:
+  const pending = pendingPlanApprovals.get(conversationKey);
+  if (pending) {
+    pendingPlanApprovals.delete(conversationKey);
+    busyConversations.delete(conversationKey);
+    try {
+      await client.reactions.remove({
+        channel: pending.channelId,
+        timestamp: pending.originalTs,
+        name: 'eyes',
+      });
+    } catch (e) {
+      // Ignore - reaction may already be removed
+    }
+  }
 
   console.log(`Plan option 3 (bypass) clicked for: ${conversationKey}`);
 
@@ -5351,6 +5422,22 @@ app.action(/^plan_manual_(.+)$/, async ({ action, ack, body, client }) => {
     ? conversationKey.split('_')
     : [conversationKey, undefined];
 
+  // Clear pending plan approval state and :eyes:
+  const pending = pendingPlanApprovals.get(conversationKey);
+  if (pending) {
+    pendingPlanApprovals.delete(conversationKey);
+    busyConversations.delete(conversationKey);
+    try {
+      await client.reactions.remove({
+        channel: pending.channelId,
+        timestamp: pending.originalTs,
+        name: 'eyes',
+      });
+    } catch (e) {
+      // Ignore - reaction may already be removed
+    }
+  }
+
   console.log(`Plan option 4 (manual) clicked for: ${conversationKey}`);
 
   await updateApprovalMessage(body, client, '✅ Proceeding with manual approval mode...');
@@ -5384,6 +5471,22 @@ app.action(/^plan_reject_(.+)$/, async ({ action, ack, body, client }) => {
   const [channelId, threadTs] = conversationKey.includes('_')
     ? conversationKey.split('_')
     : [conversationKey, undefined];
+
+  // Clear pending plan approval state and :eyes:
+  const pending = pendingPlanApprovals.get(conversationKey);
+  if (pending) {
+    pendingPlanApprovals.delete(conversationKey);
+    busyConversations.delete(conversationKey);
+    try {
+      await client.reactions.remove({
+        channel: pending.channelId,
+        timestamp: pending.originalTs,
+        name: 'eyes',
+      });
+    } catch (e) {
+      // Ignore - reaction may already be removed
+    }
+  }
 
   console.log(`Plan option 5 (reject/change) clicked for: ${conversationKey}`);
 

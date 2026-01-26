@@ -318,7 +318,8 @@ describe('slack-bot command handlers', () => {
       });
 
       let busyDuringCompact = false;
-      const conversationKey = 'compact_C123';
+      // /compact now uses same conversationKey as regular queries (channelId)
+      const conversationKey = 'C123';
 
       // Mock SDK to check busyConversations during iteration
       vi.mocked(startClaudeQuery).mockReturnValue({

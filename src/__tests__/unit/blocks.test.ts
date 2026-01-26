@@ -11,6 +11,7 @@ import {
   buildStatusDisplayBlocks,
   buildContextDisplayBlocks,
   computeAutoCompactThreshold,
+  DEFAULT_CONTEXT_WINDOW,
   buildTerminalCommandBlocks,
   buildModeSelectionBlocks,
   buildModelSelectionBlocks,
@@ -767,6 +768,12 @@ describe('blocks', () => {
     it('should not cap maxOutputTokens below 32k (e.g. Claude 3.5 with 8192)', () => {
       // 200000 - 8192 - 13000 = 178808
       expect(computeAutoCompactThreshold(200000, 8192)).toBe(178808);
+    });
+  });
+
+  describe('DEFAULT_CONTEXT_WINDOW', () => {
+    it('should be 200000 (all current Claude models)', () => {
+      expect(DEFAULT_CONTEXT_WINDOW).toBe(200000);
     });
   });
 
