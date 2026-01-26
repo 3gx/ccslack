@@ -1402,6 +1402,191 @@ const THINKING_TRUNCATE_LENGTH = 500;
 const MAX_LIVE_ENTRIES = 300;
 const ROLLING_WINDOW_SIZE = 20;
 export const ACTIVITY_LOG_MAX_CHARS = 1000; // Reduced from 2000 for cleaner display
+export const TODO_LIST_MAX_CHARS = 500; // Max chars for todo section at top of activity message
+
+/**
+ * Todo item from SDK TodoWrite tool.
+ */
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  activeForm?: string;  // Optional - may be missing in older SDK versions
+}
+
+/**
+ * Type guard to validate a todo item structure.
+ */
+export function isTodoItem(item: unknown): item is TodoItem {
+  return typeof item === 'object' && item !== null &&
+    'content' in item && typeof (item as any).content === 'string' &&
+    'status' in item && ['pending', 'in_progress', 'completed'].includes((item as any).status);
+}
+
+/**
+ * Extract the latest todo list from activity log.
+ * Searches backwards for the most recent TodoWrite tool_complete entry.
+ * Falls back to tool_start if no complete entry exists (for in-progress display).
+ */
+export function extractLatestTodos(activityLog: ActivityEntry[]): TodoItem[] {
+  // Search backwards for the most recent TodoWrite entry
+  for (let i = activityLog.length - 1; i >= 0; i--) {
+    const entry = activityLog[i];
+    const toolName = formatToolName(entry.tool || '').toLowerCase();
+
+    // Prefer tool_complete entries
+    if (entry.type === 'tool_complete' && toolName === 'todowrite') {
+      const todos = entry.toolInput?.todos;
+      if (Array.isArray(todos)) {
+        return todos.filter(isTodoItem);
+      }
+    }
+  }
+
+  // Fallback: check for tool_start if no complete entry found
+  for (let i = activityLog.length - 1; i >= 0; i--) {
+    const entry = activityLog[i];
+    const toolName = formatToolName(entry.tool || '').toLowerCase();
+
+    if (entry.type === 'tool_start' && toolName === 'todowrite') {
+      const todos = entry.toolInput?.todos;
+      if (Array.isArray(todos)) {
+        return todos.filter(isTodoItem);
+      }
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Format a single todo item for display.
+ * Truncates text to 50 chars max.
+ */
+function formatTodoItem(item: TodoItem): string {
+  const text = item.status === 'in_progress'
+    ? (item.activeForm || item.content)
+    : item.content;
+  const truncated = text.length > 50 ? text.slice(0, 47) + '...' : text;
+
+  switch (item.status) {
+    case 'completed':
+      return `:ballot_box_with_check: ~${truncated}~`;
+    case 'in_progress':
+      return `:arrow_right: *${truncated}*`;
+    case 'pending':
+      return `:white_large_square: ${truncated}`;
+    default:
+      return `:white_large_square: ${truncated}`;
+  }
+}
+
+/**
+ * Format todo list for display at top of activity message.
+ * Implements smart truncation algorithm:
+ * 1. Try to fit all items first
+ * 2. If exceeds maxChars, prioritize in_progress items
+ * 3. Show up to 3 most recent completed, pending items until limit
+ * 4. Add summaries for truncated sections
+ */
+export function formatTodoListDisplay(todos: TodoItem[], maxChars: number = TODO_LIST_MAX_CHARS): string {
+  if (todos.length === 0) return '';
+
+  // Separate todos by status (preserving order)
+  const completed: TodoItem[] = [];
+  const inProgress: TodoItem[] = [];
+  const pending: TodoItem[] = [];
+
+  for (const todo of todos) {
+    if (todo.status === 'completed') completed.push(todo);
+    else if (todo.status === 'in_progress') inProgress.push(todo);
+    else pending.push(todo);
+  }
+
+  const total = todos.length;
+  const completedCount = completed.length;
+  const allDone = completedCount === total;
+
+  // Header: 📋 Tasks (completed/total) ✓ (checkmark when all done)
+  const header = allDone
+    ? `:clipboard: *Tasks (${completedCount}/${total})* :white_check_mark:`
+    : `:clipboard: *Tasks (${completedCount}/${total})*`;
+
+  // Special case: no in_progress items - add divider between completed and pending
+  const hasInProgress = inProgress.length > 0;
+  const needsDivider = !hasInProgress && completed.length > 0 && pending.length > 0;
+
+  // Try to fit all items first
+  const allLines = [
+    ...completed.map(formatTodoItem),
+    ...(needsDivider ? ['────'] : []),
+    ...inProgress.map(formatTodoItem),
+    ...pending.map(formatTodoItem),
+  ];
+  const fullText = [header, ...allLines].join('\n');
+
+  if (fullText.length <= maxChars) {
+    // All items fit - return full list
+    return fullText;
+  }
+
+  // Smart truncation needed
+  const lines: string[] = [header];
+  let charCount = header.length;
+
+  // Track truncation
+  let completedShown = 0;
+  let pendingShown = 0;
+  const MAX_COMPLETED_SHOWN = 3;
+  const MAX_PENDING_SHOWN = 3;
+
+  // Helper to add line if it fits
+  const addLine = (line: string): boolean => {
+    if (charCount + 1 + line.length <= maxChars - 30) { // Reserve 30 chars for summaries
+      lines.push(line);
+      charCount += 1 + line.length;
+      return true;
+    }
+    return false;
+  };
+
+  // Show last 3 completed (most recent)
+  const completedToShow = completed.slice(-MAX_COMPLETED_SHOWN);
+  const completedTruncated = completed.length - completedToShow.length;
+
+  // Add completed truncation summary at top if needed
+  if (completedTruncated > 0) {
+    addLine(`...${completedTruncated} more completed`);
+  }
+
+  // Add shown completed items
+  for (const item of completedToShow) {
+    if (addLine(formatTodoItem(item))) completedShown++;
+  }
+
+  // Add all in_progress items (non-negotiable)
+  for (const item of inProgress) {
+    addLine(formatTodoItem(item));
+  }
+
+  // Add divider if no in_progress (between completed and pending)
+  if (!hasInProgress && completed.length > 0 && pending.length > 0) {
+    addLine('────');
+  }
+
+  // Add pending items until limit
+  for (const item of pending.slice(0, MAX_PENDING_SHOWN)) {
+    if (addLine(formatTodoItem(item))) pendingShown++;
+    else break;
+  }
+
+  // Add pending truncation summary if needed
+  const pendingTruncated = pending.length - pendingShown;
+  if (pendingTruncated > 0) {
+    lines.push(`...${pendingTruncated} more pending`);
+  }
+
+  return lines.join('\n');
+}
 
 /**
  * Parameters for status panel blocks.
@@ -1510,9 +1695,19 @@ export function formatToolInputSummary(toolName: string, input?: Record<string, 
       const op = input.operation || '';
       const file = input.filePath ? truncatePath(input.filePath as string, 25) : '';
       return op ? ` \`${op}\` \`${file}\`` : '';
-    case 'todowrite':
-      const count = Array.isArray(input.todos) ? input.todos.length : 0;
-      return count > 0 ? ` ${count} items` : '';
+    case 'todowrite': {
+      const todoItems = Array.isArray(input.todos) ? input.todos.filter(isTodoItem) : [];
+      if (todoItems.length === 0) return '';
+      const completedCnt = todoItems.filter((t: TodoItem) => t.status === 'completed').length;
+      const inProgressCnt = todoItems.filter((t: TodoItem) => t.status === 'in_progress').length;
+      const pendingCnt = todoItems.filter((t: TodoItem) => t.status === 'pending').length;
+      // Build compact status: "3✓ 1→ 5☐" (omit zeros)
+      const parts: string[] = [];
+      if (completedCnt > 0) parts.push(`${completedCnt}✓`);
+      if (inProgressCnt > 0) parts.push(`${inProgressCnt}→`);
+      if (pendingCnt > 0) parts.push(`${pendingCnt}☐`);
+      return parts.length > 0 ? ` ${parts.join(' ')}` : '';
+    }
     case 'notebookedit':
       return input.notebook_path ? ` \`${truncatePath(input.notebook_path as string, 35)}\`` : '';
     case 'skill':
@@ -1597,8 +1792,28 @@ export function formatToolDetails(entry: ActivityEntry): string[] {
     if (input?.query) details.push(`Query: "${input.query}"`);
   }
   if (tool === 'todowrite') {
-    const count = Array.isArray(input?.todos) ? input.todos.length : 0;
-    if (count > 0) details.push(`Items: ${count} todos`);
+    const todoItems = Array.isArray(input?.todos) ? input.todos.filter(isTodoItem) : [];
+    if (todoItems.length > 0) {
+      const completedCnt = todoItems.filter((t: TodoItem) => t.status === 'completed').length;
+      const inProgressItems = todoItems.filter((t: TodoItem) => t.status === 'in_progress');
+      const pendingCnt = todoItems.filter((t: TodoItem) => t.status === 'pending').length;
+      const total = todoItems.length;
+
+      // All completed special case
+      if (completedCnt === total) {
+        details.push(`All tasks completed`);
+      } else {
+        // Show breakdown
+        if (completedCnt > 0) details.push(`✓ ${completedCnt} completed`);
+        // Show each in_progress task
+        for (const t of inProgressItems) {
+          const text = t.activeForm || t.content;
+          const truncated = text.length > 40 ? text.slice(0, 37) + '...' : text;
+          details.push(`→ ${truncated}`);
+        }
+        if (pendingCnt > 0) details.push(`☐ ${pendingCnt} pending`);
+      }
+    }
   }
 
   // Generic fallback for unknown tools: show first 2 params
@@ -2035,7 +2250,18 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
   // Format elapsed time
   const elapsedSec = (elapsedMs / 1000).toFixed(1);
 
-  // 1. Activity log section - ALWAYS first
+  // 0. Todo section - FIRST if todos exist
+  const todos = extractLatestTodos(activityLog);
+  const todoText = formatTodoListDisplay(todos, TODO_LIST_MAX_CHARS);
+  if (todoText) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: todoText },
+    } as Block);
+    blocks.push({ type: 'divider' } as Block);
+  }
+
+  // 1. Activity log section
   const activityText = buildActivityLogText(activityLog, inProgress, ACTIVITY_LOG_MAX_CHARS);
   blocks.push({
     type: 'section',

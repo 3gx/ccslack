@@ -32,6 +32,11 @@ import {
   formatOutputPreview,
   ActivityEntry,
   ACTIVITY_LOG_MAX_CHARS,
+  TODO_LIST_MAX_CHARS,
+  TodoItem,
+  isTodoItem,
+  extractLatestTodos,
+  formatTodoListDisplay,
   buildStopWatchingButton,
   buildWatchingStatusSection,
   buildUnifiedStatusLine,
@@ -4184,9 +4189,56 @@ describe('blocks', () => {
         .toBe(' "Claude API docs"');
     });
 
-    it('should format TodoWrite with count', () => {
-      expect(formatToolInputSummary('TodoWrite', { todos: [{}, {}, {}] }))
-        .toBe(' 3 items');
+    it('should format TodoWrite with status breakdown', () => {
+      const todos = [
+        { content: 'Task A', status: 'completed' },
+        { content: 'Task B', status: 'completed' },
+        { content: 'Task C', status: 'in_progress', activeForm: 'Working on C' },
+        { content: 'Task D', status: 'pending' },
+        { content: 'Task E', status: 'pending' },
+      ];
+      expect(formatToolInputSummary('TodoWrite', { todos }))
+        .toBe(' 2✓ 1→ 2☐');
+    });
+
+    it('should format TodoWrite just started (0 done, 1 working, 8 waiting)', () => {
+      const todos = [
+        { content: 'Task 1', status: 'in_progress', activeForm: 'Setting up' },
+        ...Array(8).fill(null).map((_, i) => ({ content: `Task ${i + 2}`, status: 'pending' })),
+      ];
+      expect(formatToolInputSummary('TodoWrite', { todos }))
+        .toBe(' 1→ 8☐');  // Omit 0✓
+    });
+
+    it('should format TodoWrite all done', () => {
+      const todos = [
+        { content: 'Task A', status: 'completed' },
+        { content: 'Task B', status: 'completed' },
+        { content: 'Task C', status: 'completed' },
+      ];
+      expect(formatToolInputSummary('TodoWrite', { todos }))
+        .toBe(' 3✓');  // Omit zeros
+    });
+
+    it('should format TodoWrite no in_progress', () => {
+      const todos = [
+        { content: 'Task A', status: 'completed' },
+        { content: 'Task B', status: 'completed' },
+        { content: 'Task C', status: 'pending' },
+        { content: 'Task D', status: 'pending' },
+      ];
+      expect(formatToolInputSummary('TodoWrite', { todos }))
+        .toBe(' 2✓ 2☐');  // Omit 0→
+    });
+
+    it('should filter invalid todo items', () => {
+      const todos = [
+        { content: 'Valid', status: 'completed' },
+        { invalid: 'data' },  // Missing required fields
+        { content: 'Also valid', status: 'pending' },
+      ];
+      expect(formatToolInputSummary('TodoWrite', { todos }))
+        .toBe(' 1✓ 1☐');  // Only 2 valid items
     });
 
     it('should return empty for AskUserQuestion', () => {
@@ -4427,6 +4479,327 @@ describe('blocks', () => {
     it('should clean control characters', () => {
       const result = formatOutputPreview('bash', 'hello\x00world');
       expect(result).not.toContain('\x00');
+    });
+  });
+
+  describe('isTodoItem', () => {
+    it('should return true for valid todo item', () => {
+      expect(isTodoItem({ content: 'Task A', status: 'completed' })).toBe(true);
+      expect(isTodoItem({ content: 'Task B', status: 'in_progress', activeForm: 'Working on B' })).toBe(true);
+      expect(isTodoItem({ content: 'Task C', status: 'pending' })).toBe(true);
+    });
+
+    it('should return false for missing content', () => {
+      expect(isTodoItem({ status: 'pending' })).toBe(false);
+    });
+
+    it('should return false for missing status', () => {
+      expect(isTodoItem({ content: 'Task A' })).toBe(false);
+    });
+
+    it('should return false for invalid status', () => {
+      expect(isTodoItem({ content: 'Task A', status: 'invalid' })).toBe(false);
+    });
+
+    it('should return false for null', () => {
+      expect(isTodoItem(null)).toBe(false);
+    });
+
+    it('should return false for non-object', () => {
+      expect(isTodoItem('string')).toBe(false);
+      expect(isTodoItem(123)).toBe(false);
+    });
+  });
+
+  describe('extractLatestTodos', () => {
+    it('should return empty array when no TodoWrite entries', () => {
+      const log: ActivityEntry[] = [
+        { type: 'tool_complete', timestamp: Date.now(), tool: 'Read' },
+        { type: 'thinking', timestamp: Date.now() },
+      ];
+      expect(extractLatestTodos(log)).toEqual([]);
+    });
+
+    it('should return todos from most recent tool_complete', () => {
+      const log: ActivityEntry[] = [
+        {
+          type: 'tool_complete',
+          timestamp: Date.now() - 1000,
+          tool: 'TodoWrite',
+          toolInput: { todos: [{ content: 'Old task', status: 'pending' }] },
+        },
+        {
+          type: 'tool_complete',
+          timestamp: Date.now(),
+          tool: 'TodoWrite',
+          toolInput: { todos: [{ content: 'New task', status: 'completed' }] },
+        },
+      ];
+      const result = extractLatestTodos(log);
+      expect(result).toHaveLength(1);
+      expect(result[0].content).toBe('New task');
+    });
+
+    it('should handle case-insensitive tool name matching', () => {
+      const log: ActivityEntry[] = [
+        {
+          type: 'tool_complete',
+          timestamp: Date.now(),
+          tool: 'todowrite',  // lowercase
+          toolInput: { todos: [{ content: 'Task', status: 'pending' }] },
+        },
+      ];
+      expect(extractLatestTodos(log)).toHaveLength(1);
+    });
+
+    it('should prefer tool_complete over tool_start', () => {
+      const log: ActivityEntry[] = [
+        {
+          type: 'tool_start',
+          timestamp: Date.now(),
+          tool: 'TodoWrite',
+          toolInput: { todos: [{ content: 'Start task', status: 'pending' }] },
+        },
+        {
+          type: 'tool_complete',
+          timestamp: Date.now() - 500,
+          tool: 'TodoWrite',
+          toolInput: { todos: [{ content: 'Complete task', status: 'completed' }] },
+        },
+      ];
+      const result = extractLatestTodos(log);
+      expect(result[0].content).toBe('Complete task');
+    });
+
+    it('should fallback to tool_start if no complete entry', () => {
+      const log: ActivityEntry[] = [
+        {
+          type: 'tool_start',
+          timestamp: Date.now(),
+          tool: 'TodoWrite',
+          toolInput: { todos: [{ content: 'Started task', status: 'in_progress' }] },
+        },
+      ];
+      const result = extractLatestTodos(log);
+      expect(result).toHaveLength(1);
+      expect(result[0].content).toBe('Started task');
+    });
+
+    it('should filter out malformed todo items', () => {
+      const log: ActivityEntry[] = [
+        {
+          type: 'tool_complete',
+          timestamp: Date.now(),
+          tool: 'TodoWrite',
+          toolInput: {
+            todos: [
+              { content: 'Valid', status: 'pending' },
+              { invalid: 'data' },  // Missing required fields
+              { content: 'Also valid', status: 'completed' },
+            ],
+          },
+        },
+      ];
+      const result = extractLatestTodos(log);
+      expect(result).toHaveLength(2);
+    });
+  });
+
+  describe('formatTodoListDisplay', () => {
+    it('should return empty string for empty array', () => {
+      expect(formatTodoListDisplay([])).toBe('');
+    });
+
+    it('should show all items when they fit within limit', () => {
+      const todos: TodoItem[] = [
+        { content: 'Task A', status: 'completed' },
+        { content: 'Task B', status: 'in_progress', activeForm: 'Working on B' },
+        { content: 'Task C', status: 'pending' },
+      ];
+      const result = formatTodoListDisplay(todos);
+      expect(result).toContain(':clipboard: *Tasks (1/3)*');
+      expect(result).toContain(':ballot_box_with_check: ~Task A~');
+      expect(result).toContain(':arrow_right: *Working on B*');
+      expect(result).toContain(':white_large_square: Task C');
+    });
+
+    it('should show checkmark when all completed', () => {
+      const todos: TodoItem[] = [
+        { content: 'Task A', status: 'completed' },
+        { content: 'Task B', status: 'completed' },
+      ];
+      const result = formatTodoListDisplay(todos);
+      expect(result).toContain(':clipboard: *Tasks (2/2)* :white_check_mark:');
+    });
+
+    it('should fallback to content when activeForm is missing', () => {
+      const todos: TodoItem[] = [
+        { content: 'Task without activeForm', status: 'in_progress' },
+      ];
+      const result = formatTodoListDisplay(todos);
+      expect(result).toContain(':arrow_right: *Task without activeForm*');
+    });
+
+    it('should truncate long task text to 50 chars', () => {
+      const todos: TodoItem[] = [
+        { content: 'This is a very long task description that exceeds fifty characters easily', status: 'pending' },
+      ];
+      const result = formatTodoListDisplay(todos);
+      expect(result).toContain('...');
+      // The truncated text should be within 50 chars
+      const lines = result.split('\n');
+      const taskLine = lines.find(l => l.includes(':white_large_square:'));
+      expect(taskLine).toBeDefined();
+      expect(taskLine!.length).toBeLessThan(80);
+    });
+
+    it('should show truncation summaries when list is large', () => {
+      // Create a large list that will be truncated
+      const todos: TodoItem[] = [
+        ...Array(10).fill(null).map((_, i) => ({ content: `Completed task ${i + 1}`, status: 'completed' as const })),
+        { content: 'In progress', status: 'in_progress' as const, activeForm: 'Working...' },
+        ...Array(10).fill(null).map((_, i) => ({ content: `Pending task ${i + 1}`, status: 'pending' as const })),
+      ];
+      const result = formatTodoListDisplay(todos, 300);  // Smaller limit to force truncation
+      expect(result).toContain('more completed');
+      expect(result).toContain('more pending');
+    });
+
+    it('should show divider when no in_progress items', () => {
+      const todos: TodoItem[] = [
+        { content: 'Completed A', status: 'completed' },
+        { content: 'Completed B', status: 'completed' },
+        { content: 'Pending A', status: 'pending' },
+        { content: 'Pending B', status: 'pending' },
+      ];
+      const result = formatTodoListDisplay(todos);
+      // When no in_progress, should show divider between completed and pending
+      expect(result).toContain('────');
+    });
+
+    it('should not show divider when in_progress items exist', () => {
+      const todos: TodoItem[] = [
+        { content: 'Completed A', status: 'completed' },
+        { content: 'In progress', status: 'in_progress', activeForm: 'Working' },
+        { content: 'Pending A', status: 'pending' },
+      ];
+      const result = formatTodoListDisplay(todos);
+      expect(result).not.toContain('────');
+    });
+  });
+
+  describe('formatToolDetails for TodoWrite', () => {
+    it('should show breakdown for mixed status todos', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'TodoWrite',
+        toolInput: {
+          todos: [
+            { content: 'Task A', status: 'completed' },
+            { content: 'Task B', status: 'completed' },
+            { content: 'Task C', status: 'in_progress', activeForm: 'Working on C' },
+            { content: 'Task D', status: 'pending' },
+          ],
+        },
+        durationMs: 100,
+      });
+      expect(details).toContain('✓ 2 completed');
+      expect(details).toContain('→ Working on C');
+      expect(details).toContain('☐ 1 pending');
+    });
+
+    it('should show "All tasks completed" when all done', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'TodoWrite',
+        toolInput: {
+          todos: [
+            { content: 'Task A', status: 'completed' },
+            { content: 'Task B', status: 'completed' },
+          ],
+        },
+        durationMs: 100,
+      });
+      expect(details).toContain('All tasks completed');
+    });
+
+    it('should show all in_progress items individually', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'TodoWrite',
+        toolInput: {
+          todos: [
+            { content: 'Task A', status: 'in_progress', activeForm: 'Working A' },
+            { content: 'Task B', status: 'in_progress', activeForm: 'Working B' },
+            { content: 'Task C', status: 'pending' },
+          ],
+        },
+        durationMs: 100,
+      });
+      expect(details).toContain('→ Working A');
+      expect(details).toContain('→ Working B');
+    });
+
+    it('should fallback to content when activeForm missing', () => {
+      const details = formatToolDetails({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'TodoWrite',
+        toolInput: {
+          todos: [
+            { content: 'Task without activeForm', status: 'in_progress' },
+          ],
+        },
+        durationMs: 100,
+      });
+      expect(details).toContain('→ Task without activeForm');
+    });
+  });
+
+  describe('buildCombinedStatusBlocks with todos', () => {
+    it('should not add todo section when no TodoWrite entries', () => {
+      const blocks = buildCombinedStatusBlocks({
+        activityLog: [{ type: 'thinking', timestamp: Date.now() }],
+        inProgress: null,
+        status: 'complete',
+        mode: 'default',
+        elapsedMs: 1000,
+        conversationKey: 'test',
+      });
+      // Should not have a divider block (which would indicate todo section)
+      const hasDivider = blocks.some(b => b.type === 'divider');
+      expect(hasDivider).toBe(false);
+    });
+
+    it('should add todo section and divider when TodoWrite entries exist', () => {
+      const blocks = buildCombinedStatusBlocks({
+        activityLog: [
+          {
+            type: 'tool_complete',
+            timestamp: Date.now(),
+            tool: 'TodoWrite',
+            toolInput: {
+              todos: [
+                { content: 'Task A', status: 'completed' },
+                { content: 'Task B', status: 'in_progress', activeForm: 'Working on B' },
+              ],
+            },
+          },
+        ],
+        inProgress: null,
+        status: 'complete',
+        mode: 'default',
+        elapsedMs: 1000,
+        conversationKey: 'test',
+      });
+      // First block should be the todo section
+      expect(blocks[0].type).toBe('section');
+      expect((blocks[0] as any).text.text).toContain(':clipboard: *Tasks');
+      // Second block should be divider
+      expect(blocks[1].type).toBe('divider');
     });
   });
 
