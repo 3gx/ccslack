@@ -37,6 +37,7 @@ export interface CommandResult {
   handled: boolean;
   response?: string;
   blocks?: Block[];
+  isError?: boolean;  // true if this is an error response
   sessionUpdate?: Partial<Session>;
   // For /wait command - rate limit stress test
   waitTest?: {
@@ -180,6 +181,7 @@ export function parseCommand(
       return {
         handled: true,
         response: `Unknown command: \`/${command}\`\nType \`/help\` for available commands.`,
+        isError: true,
       };
   }
 }
@@ -226,6 +228,7 @@ function handleSetCurrentPath(session: Session): CommandResult {
     return {
       handled: true,
       response: `❌ Working directory already locked: \`${session.configuredPath}\`\n\nThis cannot be changed. If you need a different directory, use a different channel.`,
+      isError: true,
     };
   }
 
@@ -257,6 +260,7 @@ function handleCd(pathArg: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `❌ \`/cd\` is disabled after path locked.\n\nWorking directory is locked to: \`${session.configuredPath}\`\n\nUse \`/ls [path]\` to explore other directories.`,
+      isError: true,
     };
   }
 
@@ -284,6 +288,7 @@ function handleCd(pathArg: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `❌ Directory does not exist: \`${targetPath}\``,
+      isError: true,
     };
   }
 
@@ -293,6 +298,7 @@ function handleCd(pathArg: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `❌ Not a directory: \`${targetPath}\``,
+      isError: true,
     };
   }
 
@@ -303,6 +309,7 @@ function handleCd(pathArg: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `❌ Cannot access directory: \`${targetPath}\`\n\nPermission denied or directory not readable.`,
+      isError: true,
     };
   }
 
@@ -340,6 +347,7 @@ function handleLs(pathArg: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `❌ Directory does not exist: \`${targetDir}\``,
+      isError: true,
     };
   }
 
@@ -350,12 +358,14 @@ function handleLs(pathArg: string, session: Session): CommandResult {
       return {
         handled: true,
         response: `❌ Not a directory: \`${targetDir}\``,
+        isError: true,
       };
     }
   } catch (error) {
     return {
       handled: true,
       response: `❌ Cannot access: \`${targetDir}\`\n\n${error instanceof Error ? error.message : String(error)}`,
+      isError: true,
     };
   }
 
@@ -382,6 +392,7 @@ function handleLs(pathArg: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `❌ Cannot read directory: ${error instanceof Error ? error.message : String(error)}`,
+      isError: true,
     };
   }
 }
@@ -419,6 +430,7 @@ function handleContext(session: Session): CommandResult {
     return {
       handled: true,
       response: 'No context data available. Run a query first.',
+      isError: true,
     };
   }
 
@@ -455,6 +467,7 @@ function handleMode(modeArg: string, session: Session): CommandResult {
   return {
     handled: true,
     response: `❌ Unknown mode \`${modeArg}\`. Usage: \`/mode [plan|bypass|ask|edit]\``,
+    isError: true,
   };
 }
 
@@ -468,6 +481,7 @@ function handleWatch(session: Session, threadTs?: string): CommandResult {
     return {
       handled: true,
       response: ':warning: `/watch` can only be used in the main channel, not in threads.',
+      isError: true,
     };
   }
 
@@ -475,6 +489,7 @@ function handleWatch(session: Session, threadTs?: string): CommandResult {
     return {
       handled: true,
       response: 'No active session. Start a conversation first.',
+      isError: true,
     };
   }
 
@@ -528,6 +543,7 @@ function handleFastForward(session: Session, threadTs?: string): CommandResult {
     return {
       handled: true,
       response: ':warning: `/ff` can only be used in the main channel, not in threads.',
+      isError: true,
     };
   }
 
@@ -535,6 +551,7 @@ function handleFastForward(session: Session, threadTs?: string): CommandResult {
     return {
       handled: true,
       response: 'No active session. Start a conversation first.',
+      isError: true,
     };
   }
 
@@ -553,6 +570,7 @@ function handleFork(session: Session): CommandResult {
     return {
       handled: true,
       response: 'No active session. Start a conversation first.',
+      isError: true,
     };
   }
 
@@ -581,6 +599,7 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
       handled: true,
       response:
         'Usage: `/resume <session-id>`\n\nGet the session ID by typing `/status` in Claude Code',
+      isError: true,
     };
   }
 
@@ -590,6 +609,7 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
     return {
       handled: true,
       response: `:x: Invalid session ID format: \`${sessionId}\``,
+      isError: true,
     };
   }
 
@@ -599,6 +619,7 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
     return {
       handled: true,
       response: `:x: Session file not found for \`${sessionId}\`\n\nThe session may have been created on a different machine.`,
+      isError: true,
     };
   }
 
@@ -652,6 +673,7 @@ function handleWait(secondsArg: string): CommandResult {
       handled: true,
       response:
         'Usage: `/wait <seconds>` (1-300)\n\nThis command tests Slack rate limits by updating the spinner every second for X seconds.',
+      isError: true,
     };
   }
 
@@ -691,6 +713,7 @@ function handleCompact(session: Session): CommandResult {
     return {
       handled: true,
       response: 'No active session to compact. Start a conversation first.',
+      isError: true,
     };
   }
 
@@ -710,6 +733,7 @@ function handleClear(session: Session): CommandResult {
     return {
       handled: true,
       response: 'No active session to clear. Start a conversation first.',
+      isError: true,
     };
   }
 
@@ -745,6 +769,7 @@ function handleMaxThinkingTokens(args: string, session: Session): CommandResult 
     return {
       handled: true,
       response: 'Invalid value. Please provide a number (0 to disable, or 1,024-128,000).',
+      isError: true,
     };
   }
 
@@ -760,12 +785,14 @@ function handleMaxThinkingTokens(args: string, session: Session): CommandResult 
     return {
       handled: true,
       response: `Invalid value. Minimum is ${THINKING_TOKENS_MIN.toLocaleString()} tokens (or 0 to disable).`,
+      isError: true,
     };
   }
   if (value > THINKING_TOKENS_MAX) {
     return {
       handled: true,
       response: `Invalid value. Maximum is ${THINKING_TOKENS_MAX.toLocaleString()} tokens.`,
+      isError: true,
     };
   }
 
@@ -799,6 +826,7 @@ function handleUpdateRate(args: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `Invalid value. Please provide a number between ${UPDATE_RATE_MIN} and ${UPDATE_RATE_MAX} seconds.`,
+      isError: true,
     };
   }
 
@@ -807,12 +835,14 @@ function handleUpdateRate(args: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `Invalid value. Minimum is ${UPDATE_RATE_MIN} second.`,
+      isError: true,
     };
   }
   if (value > UPDATE_RATE_MAX) {
     return {
       handled: true,
       response: `Invalid value. Maximum is ${UPDATE_RATE_MAX} seconds.`,
+      isError: true,
     };
   }
 
@@ -845,6 +875,7 @@ function handleMessageSize(args: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `Invalid number. Usage: /message-size <${MESSAGE_SIZE_MIN}-${MESSAGE_SIZE_MAX}> (default=${MESSAGE_SIZE_DEFAULT})`,
+      isError: true,
     };
   }
 
@@ -853,6 +884,7 @@ function handleMessageSize(args: string, session: Session): CommandResult {
     return {
       handled: true,
       response: `Value must be between ${MESSAGE_SIZE_MIN} and ${MESSAGE_SIZE_MAX}. Default is ${MESSAGE_SIZE_DEFAULT}.`,
+      isError: true,
     };
   }
 
@@ -902,6 +934,7 @@ function handleStripEmptyTag(args: string, session: Session): CommandResult {
   return {
     handled: true,
     response: 'Invalid value. Usage: `/strip-empty-tag [true|false]`',
+    isError: true,
   };
 }
 
@@ -913,6 +946,7 @@ function handleShowPlan(session: Session): CommandResult {
     return {
       handled: true,
       response: '❌ No plan file found. A plan is created when using plan mode.',
+      isError: true,
     };
   }
 

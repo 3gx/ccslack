@@ -926,4 +926,176 @@ describe('slack-bot command handlers', () => {
       busyConversations.delete(conversationKey);
     });
   });
+
+  describe('command error emoji handling', () => {
+    it('should add :x: emoji when unknown command is used', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /unknown-cmd', channel: 'C123', ts: 'msg1' },
+        client: mockClient,
+      });
+
+      // Should post error message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('Unknown command') })
+      );
+
+      // Should add :x: emoji
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg1',
+        name: 'x',
+      });
+    });
+
+    it('should add :x: emoji when /mode has invalid argument', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /mode invalid', channel: 'C123', ts: 'msg2' },
+        client: mockClient,
+      });
+
+      // Should post error message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('Unknown mode') })
+      );
+
+      // Should add :x: emoji
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg2',
+        name: 'x',
+      });
+    });
+
+    it('should add :x: emoji for inline mode error', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /mode invalid do something', channel: 'C123', ts: 'msg3' },
+        client: mockClient,
+      });
+
+      // Should post error message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('Unknown mode') })
+      );
+
+      // Should add :x: emoji
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg3',
+        name: 'x',
+      });
+    });
+
+    it('should NOT add :x: emoji for successful /help command', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'test-session',
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /help', channel: 'C123', ts: 'msg4' },
+        client: mockClient,
+      });
+
+      // Should post help message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('Available Commands') })
+      );
+
+      // Should NOT add :x: emoji (filter out eyes reaction, check no x reaction)
+      const xReactionCalls = mockClient.reactions.add.mock.calls.filter(
+        (call: any[]) => call[0]?.name === 'x'
+      );
+      expect(xReactionCalls.length).toBe(0);
+    });
+
+    it('should add :x: emoji for /watch with no session', async () => {
+      const handler = registeredHandlers['event_app_mention'];
+      const mockClient = createMockSlackClient();
+
+      // Mock session without session ID
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: null,
+        workingDir: '/test',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      await handler({
+        event: { user: 'U123', text: '<@BOT123> /watch', channel: 'C123', ts: 'msg5' },
+        client: mockClient,
+      });
+
+      // Should post error message
+      expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('No active session') })
+      );
+
+      // Should add :x: emoji
+      expect(mockClient.reactions.add).toHaveBeenCalledWith({
+        channel: 'C123',
+        timestamp: 'msg5',
+        name: 'x',
+      });
+    });
+  });
 });

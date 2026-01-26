@@ -2701,6 +2701,8 @@ async function handleMessage(params: {
       try {
         await client.reactions.remove({ channel: channelId, timestamp: originalTs, name: 'eyes' });
       } catch { /* ignore */ }
+      // Add :x: emoji to indicate error
+      await addReaction(client, channelId, originalTs, 'x');
     }
     return;
   }
@@ -3018,6 +3020,10 @@ async function handleMessage(params: {
           thread_ts: effectiveThreadTs,
           text: `❌ Plan file not found at \`${commandResult.planFilePath}\``,
         });
+        // Add :x: emoji for plan file read error
+        if (originalTs) {
+          await addReaction(client, channelId, originalTs, 'x');
+        }
       }
     } else if (commandResult.response) {
       await client.chat.postMessage({
@@ -3037,6 +3043,10 @@ async function handleMessage(params: {
         });
       } catch (error) {
         // Ignore errors
+      }
+      // Add :x: emoji if command resulted in error
+      if (commandResult.isError) {
+        await addReaction(client, channelId, originalTs, 'x');
       }
     }
 

@@ -1191,4 +1191,130 @@ describe('commands', () => {
       expect(result.error).toBeUndefined();
     });
   });
+
+  describe('command error flags', () => {
+    it('should return isError: true for unknown command', () => {
+      const result = parseCommand('/unknown-cmd', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('Unknown command');
+    });
+
+    it('should return isError: true for invalid /mode argument', () => {
+      const result = parseCommand('/mode invalid', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('Unknown mode');
+    });
+
+    it('should NOT return isError for successful /help command', () => {
+      const result = parseCommand('/help', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('should return isError: true for /watch from thread', () => {
+      const result = parseCommand('/watch', mockSession, 'thread-ts-123');
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('main channel');
+    });
+
+    it('should return isError: true for /watch with no session', () => {
+      const noSessionMock = { ...mockSession, sessionId: '' };
+      const result = parseCommand('/watch', noSessionMock);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('No active session');
+    });
+
+    it('should return isError: true for /ff from thread', () => {
+      const result = parseCommand('/ff', mockSession, 'thread-ts-123');
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('main channel');
+    });
+
+    it('should return isError: true for invalid /max-thinking-tokens value', () => {
+      const result = parseCommand('/max-thinking-tokens abc', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+    });
+
+    it('should return isError: true for /max-thinking-tokens below minimum', () => {
+      const result = parseCommand('/max-thinking-tokens 100', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('Minimum');
+    });
+
+    it('should return isError: true for /max-thinking-tokens above maximum', () => {
+      const result = parseCommand('/max-thinking-tokens 999999', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('Maximum');
+    });
+
+    it('should NOT return isError for valid /max-thinking-tokens', () => {
+      const result = parseCommand('/max-thinking-tokens 10000', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('should return isError: true for invalid /update-rate value', () => {
+      const result = parseCommand('/update-rate 99', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+    });
+
+    it('should return isError: true for /context with no data', () => {
+      const noUsageSession = { ...mockSession, lastUsage: undefined };
+      const result = parseCommand('/context', noUsageSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('No context data');
+    });
+
+    it('should return isError: true for /compact with no session', () => {
+      const noSessionMock = { ...mockSession, sessionId: '' };
+      const result = parseCommand('/compact', noSessionMock);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+    });
+
+    it('should return isError: true for /clear with no session', () => {
+      const noSessionMock = { ...mockSession, sessionId: '' };
+      const result = parseCommand('/clear', noSessionMock);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+    });
+
+    it('should return isError: true for /show-plan with no plan file', () => {
+      const noPlanSession = { ...mockSession, planFilePath: undefined };
+      const result = parseCommand('/show-plan', noPlanSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('No plan file');
+    });
+
+    it('should return isError: true for /resume with invalid format', () => {
+      const result = parseCommand('/resume invalid-format', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('Invalid session ID');
+    });
+
+    it('should return isError: true for invalid /strip-empty-tag value', () => {
+      const result = parseCommand('/strip-empty-tag maybe', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('Invalid value');
+    });
+
+    it('should NOT return isError for valid /strip-empty-tag true', () => {
+      const result = parseCommand('/strip-empty-tag true', mockSession);
+      expect(result.handled).toBe(true);
+      expect(result.isError).toBeUndefined();
+    });
+  });
 });
