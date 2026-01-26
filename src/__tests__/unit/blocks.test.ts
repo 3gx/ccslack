@@ -2433,6 +2433,33 @@ describe('blocks', () => {
       expect(lines[1]).toContain('Mode changed to *bypassPermissions*');
       expect(lines[2]).toContain('Read');
     });
+
+    it('should format context_cleared entry as separator line', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'context_cleared' },
+        { timestamp: Date.now(), type: 'mode_changed', mode: 'bypassPermissions' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain('────── Context Cleared ──────');
+    });
+
+    it('should show context_cleared before mode_changed in plan approval flow', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'ExitPlanMode' },
+        { timestamp: Date.now(), type: 'context_cleared' },
+        { timestamp: Date.now(), type: 'mode_changed', mode: 'bypassPermissions' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      const lines = text.split('\n').filter(l => l.trim());
+      // Find context_cleared and mode_changed indices
+      const contextClearedIndex = lines.findIndex(l => l.includes('Context Cleared'));
+      const modeChangedIndex = lines.findIndex(l => l.includes('Mode changed'));
+      expect(contextClearedIndex).toBeGreaterThan(-1);
+      expect(modeChangedIndex).toBeGreaterThan(-1);
+      expect(contextClearedIndex).toBeLessThan(modeChangedIndex);
+    });
   });
 
   describe('buildLiveActivityBlocks', () => {

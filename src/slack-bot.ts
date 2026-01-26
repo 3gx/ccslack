@@ -217,6 +217,8 @@ interface PendingPlanApproval {
   originalTs: string;
   channelId: string;
   threadTs?: string;
+  statusMsgTs?: string;           // Reuse status message after approval
+  activityLog?: ActivityEntry[];  // Continue activity log after approval
 }
 export const pendingPlanApprovals = new Map<string, PendingPlanApproval>();
 
@@ -2407,6 +2409,8 @@ async function showPlanApprovalUI(params: {
       originalTs,
       channelId,
       threadTs,
+      statusMsgTs,                              // Reuse status message after approval
+      activityLog: [...processingState.activityLog], // Snapshot current log for continuation
     });
   }
 }
@@ -2421,8 +2425,10 @@ async function handleMessage(params: {
   client: any;
   skipConcurrentCheck?: boolean;
   files?: SlackFile[];
+  statusMsgTs?: string;           // Existing status message to reuse (for plan approval continuation)
+  activityLog?: ActivityEntry[];  // Activity log to continue from (for plan approval continuation)
 }) {
-  const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck, files } = params;
+  const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck, files, statusMsgTs: existingStatusMsgTs, activityLog: existingActivityLog } = params;
 
   // Always respond in threads - use originalTs as thread parent when in main channel
   const effectiveThreadTs = threadTs || originalTs;
@@ -3025,7 +3031,8 @@ async function handleMessage(params: {
     startTime,
     lastUpdateTime: 0,
     updateRateSeconds: session.updateRateSeconds ?? UPDATE_RATE_DEFAULT,
-    activityLog: [
+    // Continue from existing log (for plan approval continuation), or fresh start
+    activityLog: existingActivityLog || [
       // Add starting entry so it persists in the log (not a fallback that disappears)
       { timestamp: startTime, type: 'starting' },
     ],
@@ -3075,39 +3082,81 @@ async function handleMessage(params: {
 
   // Post single combined message (activity log + status panel)
   // Activity log at top, status panel with abort button at bottom
-  let statusMsgTs: string | undefined;
-  try {
-    const combinedResult = await withSlackRetry(async () =>
-      client.chat.postMessage({
-        channel: channelId,
-        thread_ts: effectiveThreadTs,
-        blocks: buildCombinedStatusBlocks({
-          activityLog: processingState.activityLog,
-          inProgress: true,
-          status: 'starting',
-          mode: session.mode,
-          toolsCompleted: 0,
-          elapsedMs: 0,
-          conversationKey,
-          spinner: SPINNER_FRAMES[0],  // Show spinner immediately
-          sessionId: session.sessionId || undefined,  // Initial session ID (may be null for new sessions)
-        }),
-        text: 'Claude is starting...',
-      })
-    );
-    statusMsgTs = (combinedResult as { ts?: string }).ts;
-    // Set thread parent to status message for activity thread replies
-    if (statusMsgTs) {
+  let statusMsgTs: string | undefined = existingStatusMsgTs;
+
+  if (statusMsgTs) {
+    // REUSE existing status message - update it instead of creating new
+    try {
+      await withSlackRetry(async () =>
+        client.chat.update({
+          channel: channelId,
+          ts: statusMsgTs,
+          blocks: buildCombinedStatusBlocks({
+            activityLog: processingState.activityLog,
+            inProgress: true,
+            status: 'starting',
+            mode: session.mode,
+            toolsCompleted: 0,
+            elapsedMs: 0,
+            conversationKey,
+            spinner: SPINNER_FRAMES[0],  // Show spinner immediately
+            sessionId: session.sessionId || undefined,
+          }),
+          text: 'Claude is continuing...',
+        })
+      );
       processingState.threadParentTs = statusMsgTs;
+    } catch (error: any) {
+      // Fallback if message deleted - warn user and create new at bottom
+      if (error.data?.error === 'message_not_found') {
+        console.warn('[StatusMessage] Original status message was deleted, creating new one');
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: effectiveThreadTs,
+          text: ':warning: Original status message was deleted. Creating new status message below.',
+        });
+        statusMsgTs = undefined;  // Will create new below
+      } else {
+        throw error;
+      }
     }
-  } catch (error) {
-    console.error('Error posting combined status message:', error);
-    // Fallback: use original user message as thread parent if status fails
-    processingState.threadParentTs = originalTs || null;
   }
 
-  // Post starting entry to thread (activity thread reply)
-  if (processingState.threadParentTs) {
+  if (!statusMsgTs) {
+    // CREATE new status message (original behavior)
+    try {
+      const combinedResult = await withSlackRetry(async () =>
+        client.chat.postMessage({
+          channel: channelId,
+          thread_ts: effectiveThreadTs,
+          blocks: buildCombinedStatusBlocks({
+            activityLog: processingState.activityLog,
+            inProgress: true,
+            status: 'starting',
+            mode: session.mode,
+            toolsCompleted: 0,
+            elapsedMs: 0,
+            conversationKey,
+            spinner: SPINNER_FRAMES[0],  // Show spinner immediately
+            sessionId: session.sessionId || undefined,  // Initial session ID (may be null for new sessions)
+          }),
+          text: 'Claude is starting...',
+        })
+      );
+      statusMsgTs = (combinedResult as { ts?: string }).ts;
+      // Set thread parent to status message for activity thread replies
+      if (statusMsgTs) {
+        processingState.threadParentTs = statusMsgTs;
+      }
+    } catch (error) {
+      console.error('Error posting combined status message:', error);
+      // Fallback: use original user message as thread parent if status fails
+      processingState.threadParentTs = originalTs || null;
+    }
+  }
+
+  // Post starting entry to thread (activity thread reply) - ONLY if NOT reusing status message
+  if (processingState.threadParentTs && !existingStatusMsgTs) {
     postStartingToThread(client, channelId, processingState.threadParentTs).catch(err => {
       console.error('[Activity Thread] Failed to post starting entry:', err);
     });
@@ -5365,6 +5414,12 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
   const bodyWithChannel = body as any;
   // Get effective thread from button message context (button is already in a thread)
   const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
+
+  // Build activity log with context_cleared and mode_changed entries
+  let activityLog = pending?.activityLog ? [...pending.activityLog] : [];
+  activityLog.push({ timestamp: Date.now(), type: 'context_cleared' });
+  activityLog.push({ timestamp: Date.now(), type: 'mode_changed', mode: 'bypassPermissions' });
+
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
@@ -5375,6 +5430,8 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
     threadTs,
     client,
     skipConcurrentCheck: true,
+    statusMsgTs: pending?.statusMsgTs,
+    activityLog,
   });
 });
 
@@ -5417,6 +5474,11 @@ app.action(/^plan_accept_edits_(.+)$/, async ({ action, ack, body, client }) => 
   const bodyWithChannel = body as any;
   // Get effective thread from button message context (button is already in a thread)
   const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
+
+  // Build activity log with mode_changed entry (plan → acceptEdits)
+  let activityLog = pending?.activityLog ? [...pending.activityLog] : [];
+  activityLog.push({ timestamp: Date.now(), type: 'mode_changed', mode: 'acceptEdits' });
+
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
@@ -5425,6 +5487,8 @@ app.action(/^plan_accept_edits_(.+)$/, async ({ action, ack, body, client }) => 
     threadTs,
     client,
     skipConcurrentCheck: true,
+    statusMsgTs: pending?.statusMsgTs,
+    activityLog,
   });
 });
 
@@ -5467,6 +5531,11 @@ app.action(/^plan_bypass_(.+)$/, async ({ action, ack, body, client }) => {
   const bodyWithChannel = body as any;
   // Get effective thread from button message context (button is already in a thread)
   const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
+
+  // Build activity log with mode_changed entry (plan → bypassPermissions)
+  let activityLog = pending?.activityLog ? [...pending.activityLog] : [];
+  activityLog.push({ timestamp: Date.now(), type: 'mode_changed', mode: 'bypassPermissions' });
+
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
@@ -5475,6 +5544,8 @@ app.action(/^plan_bypass_(.+)$/, async ({ action, ack, body, client }) => {
     threadTs,
     client,
     skipConcurrentCheck: true,
+    statusMsgTs: pending?.statusMsgTs,
+    activityLog,
   });
 });
 
@@ -5517,6 +5588,11 @@ app.action(/^plan_manual_(.+)$/, async ({ action, ack, body, client }) => {
   const bodyWithChannel = body as any;
   // Get effective thread from button message context (button is already in a thread)
   const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
+
+  // Build activity log with mode_changed entry (plan → default)
+  let activityLog = pending?.activityLog ? [...pending.activityLog] : [];
+  activityLog.push({ timestamp: Date.now(), type: 'mode_changed', mode: 'default' });
+
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
@@ -5525,6 +5601,8 @@ app.action(/^plan_manual_(.+)$/, async ({ action, ack, body, client }) => {
     threadTs,
     client,
     skipConcurrentCheck: true,
+    statusMsgTs: pending?.statusMsgTs,
+    activityLog,
   });
 });
 
@@ -5561,6 +5639,10 @@ app.action(/^plan_reject_(.+)$/, async ({ action, ack, body, client }) => {
   const bodyWithChannel = body as any;
   // Get effective thread from button message context (button is already in a thread)
   const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
+
+  // Reuse activity log (no mode_changed since staying in plan mode)
+  const activityLog = pending?.activityLog ? [...pending.activityLog] : [];
+
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
@@ -5569,6 +5651,8 @@ app.action(/^plan_reject_(.+)$/, async ({ action, ack, body, client }) => {
     threadTs,
     client,
     skipConcurrentCheck: true,
+    statusMsgTs: pending?.statusMsgTs,
+    activityLog,
   });
 });
 

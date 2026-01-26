@@ -795,4 +795,79 @@ describe('ExitPlanMode interrupt handling', () => {
     );
     expect(approvalButtonCall).toBeDefined();
   });
+
+  it('should store statusMsgTs and activityLog in pendingPlanApprovals', async () => {
+    const { pendingPlanApprovals } = await import('../../slack-bot.js');
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    // Return a predictable ts for status message
+    mockClient.chat.postMessage.mockResolvedValue({ ok: true, ts: 'status-msg-ts' });
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    const mockInterrupt = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'new-session', model: 'claude-sonnet' };
+
+        // ExitPlanMode tool
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', name: 'ExitPlanMode' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '{}' },
+          },
+        };
+
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_stop', index: 0 },
+        };
+
+        yield { type: 'result', result: 'Done', usage: { input_tokens: 100, output_tokens: 50 } };
+      },
+      interrupt: mockInterrupt,
+    } as any);
+
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> implement feature', channel: 'C123', ts: 'msg1' },
+      client: mockClient,
+    });
+
+    // REAL TEST: Verify pendingPlanApprovals stores statusMsgTs and activityLog
+    const pending = pendingPlanApprovals.get('C123');
+    expect(pending).toBeDefined();
+    expect(pending?.statusMsgTs).toBe('status-msg-ts');
+    expect(pending?.activityLog).toBeDefined();
+    expect(Array.isArray(pending?.activityLog)).toBe(true);
+    // Should have at least a starting entry and ExitPlanMode tool_complete
+    expect(pending?.activityLog?.length).toBeGreaterThanOrEqual(1);
+    // Check that we have the ExitPlanMode tool_complete entry
+    const exitPlanEntry = pending?.activityLog?.find(
+      (e: any) => e.type === 'tool_complete' && e.tool === 'ExitPlanMode'
+    );
+    expect(exitPlanEntry).toBeDefined();
+  });
 });

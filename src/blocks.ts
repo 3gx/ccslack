@@ -1363,7 +1363,7 @@ export function buildPathSetupBlocks(): Block[] {
 // Activity entry type (mirrors session-manager.ts)
 export interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed' | 'context_cleared';
   tool?: string;
   durationMs?: number;
   message?: string;
@@ -2542,6 +2542,9 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
       case 'mode_changed':
         lines.push(`:gear: Mode changed to *${entry.mode}*`);
         break;
+      case 'context_cleared':
+        lines.push('────── Context Cleared ──────');
+        break;
       case 'aborted':
         lines.push(':octagonal_sign: *Aborted by user*');
         break;
@@ -2729,6 +2732,9 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
         break;
       case 'mode_changed':
         lines.push(`:gear: *Mode changed* → \`${entry.mode}\``);
+        break;
+      case 'context_cleared':
+        lines.push('────── Context Cleared ──────');
         break;
       case 'aborted':
         lines.push(':octagonal_sign: *Aborted by user*');
