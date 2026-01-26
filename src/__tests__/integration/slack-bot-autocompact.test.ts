@@ -399,9 +399,8 @@ describe('auto-compact notification', () => {
     let postMessageCallCount = 0;
     mockClient.chat.postMessage.mockImplementation(async (params: any) => {
       postMessageCallCount++;
-      // Rate limit the auto-compact notification on first attempt
-      // Calls: 1=status, 2=activity thread, 3=back-link thread reply, 4=auto-compact
-      if (params.text?.includes('Auto-compacting context') && postMessageCallCount <= 4) {
+      // Rate limit the auto-compact notification on first attempt (call 3 = status, activity, then auto-compact)
+      if (params.text?.includes('Auto-compacting context') && postMessageCallCount <= 3) {
         const rateLimitError = new Error('ratelimited') as any;
         rateLimitError.data = { error: 'ratelimited' };
         throw rateLimitError;

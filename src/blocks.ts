@@ -1387,8 +1387,6 @@ export interface ActivityEntry {
   toolOutputTruncated?: boolean;     // True if output was truncated
   toolIsError?: boolean;             // True if tool returned error
   toolErrorMessage?: string;         // Error message if failed
-  // Bidirectional permalink
-  userInputPermalink?: string;       // Link back to user's original message
 }
 
 // Constants for activity log display
@@ -2189,13 +2187,6 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
 
   const lines: string[] = [];
 
-  // Always show user input permalink at the top (before rolling window truncation)
-  // Extract from starting entry which is always entries[0]
-  const startingEntry = entries.find(e => e.type === 'starting');
-  if (startingEntry?.userInputPermalink) {
-    lines.push(`<${startingEntry.userInputPermalink}|:leftwards_arrow_with_hook:>`);
-  }
-
   // Show truncation notice if in rolling window mode
   if (entries.length > MAX_LIVE_ENTRIES) {
     const hiddenCount = entries.length - ROLLING_WINDOW_SIZE;
@@ -2213,7 +2204,6 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
   for (const entry of displayEntries) {
     switch (entry.type) {
       case 'starting':
-        // Link is shown at the top of activity log (before rolling window)
         lines.push(':brain: *Analyzing request...*');
         break;
       case 'thinking':
@@ -2326,32 +2316,17 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
     lines.push(':brain: Analyzing request...');
   }
 
-  // Extract permalink line (if present) before joining - it must always stay at top
-  let permalinkLine: string | null = null;
-  if (startingEntry?.userInputPermalink && lines.length > 0 && lines[0].includes(':leftwards_arrow_with_hook:')) {
-    permalinkLine = lines.shift() || null;
-  }
-
   let result = lines.join('\n');
 
   // Truncate from start if exceeds maxChars (keep most recent)
-  // Account for permalink line length when calculating available space
-  const permalinkLength = permalinkLine ? permalinkLine.length + 1 : 0; // +1 for newline
-  const availableChars = maxChars - permalinkLength;
-
-  if (result.length > availableChars) {
-    const excess = result.length - availableChars + 50; // Room for "..." prefix
+  if (result.length > maxChars) {
+    const excess = result.length - maxChars + 50; // Room for "..." prefix
     const breakPoint = result.indexOf('\n', excess);
     if (breakPoint > 0) {
       result = '...\n' + result.substring(breakPoint + 1);
     } else {
-      result = '...' + result.substring(result.length - availableChars + 3);
+      result = '...' + result.substring(result.length - maxChars + 3);
     }
-  }
-
-  // Prepend permalink line back at top (always visible)
-  if (permalinkLine) {
-    result = permalinkLine + '\n' + result;
   }
 
   return result;
@@ -2487,16 +2462,9 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
 
   const lines: string[] = [];
 
-  // Always show user input permalink at the top
-  const startingEntry = entries.find(e => e.type === 'starting');
-  if (startingEntry?.userInputPermalink) {
-    lines.push(`<${startingEntry.userInputPermalink}|:leftwards_arrow_with_hook:>`);
-  }
-
   for (const entry of entries) {
     switch (entry.type) {
       case 'starting':
-        // Link is shown at the top of activity log
         lines.push(':brain: *Analyzing request...*');
         break;
       case 'tool_start':

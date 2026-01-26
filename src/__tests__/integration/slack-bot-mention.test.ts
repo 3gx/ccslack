@@ -622,62 +622,6 @@ describe('slack-bot mention handlers', () => {
       expect(mockClient.reactions.add).not.toHaveBeenCalled();
     });
 
-    it('should allow edited main channel message that is thread parent (ts === thread_ts)', async () => {
-      const handler = registeredHandlers['event_app_mention'];
-      const mockClient = createMockSlackClient();
-
-      // Set up session so the message gets processed
-      vi.mocked(getSession).mockReturnValue({
-        sessionId: 'test-session',
-        workingDir: '/test',
-        mode: 'plan',
-        createdAt: Date.now(),
-        lastActiveAt: Date.now(),
-        pathConfigured: true,
-        configuredPath: '/test/dir',
-        configuredBy: 'U123',
-        configuredAt: Date.now(),
-      });
-
-      // When a main channel message is edited after it has replies,
-      // Slack sets thread_ts = ts (the message IS the thread parent)
-      await handler({
-        event: {
-          user: 'U123',
-          text: '<@BOT123> revised message',
-          channel: 'C123',
-          ts: 'parent123',
-          thread_ts: 'parent123', // Same as ts = thread parent being edited
-        },
-        client: mockClient,
-      });
-
-      // Should NOT post rejection message
-      expect(mockClient.chat.postMessage).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: expect.stringContaining('@bot can only be mentioned in the main channel'),
-        })
-      );
-
-      // Should proceed with processing - eyes reaction added
-      expect(mockClient.reactions.add).toHaveBeenCalledWith({
-        channel: 'C123',
-        timestamp: 'parent123',
-        name: 'eyes',
-      });
-
-      // Should start Claude query with threadTs undefined (creates NEW response thread)
-      expect(startClaudeQuery).toHaveBeenCalledWith(
-        'revised message',
-        expect.objectContaining({
-          slackContext: expect.objectContaining({
-            channel: 'C123',
-            threadTs: undefined, // NOT 'parent123' - should create new thread
-          }),
-        })
-      );
-    });
-
     it('should reject @bot mentions with no message content', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();

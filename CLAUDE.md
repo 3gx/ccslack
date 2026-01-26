@@ -208,8 +208,8 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 - `/watch` starts watching a session for terminal updates
 - `/stop-watching` stops watching the terminal session
 - `/fork` provides terminal command to fork session
+- `/ff` (fast-forward) command and then `/watch`
 - Terminal watcher polls session JSONL files and posts new messages to Slack
-- `/ff` command is disabled (returns unknown command error)
 
 ## Common Issues
 
@@ -264,4 +264,3 @@ If both `canUseTool` and MCP `approve_action` show prompts:
 | `/show-plan` | - | Display current plan file content in thread |
 | `/wait` | `<seconds>` | Rate limit stress test (1-300 seconds) |
 
-**Note:** `/ff` (fast-forward) command is disabled and returns "Unknown command" error.

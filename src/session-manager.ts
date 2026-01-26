@@ -156,8 +156,6 @@ export interface ActivityEntry {
   toolOutputTruncated?: boolean;     // True if output was truncated
   toolIsError?: boolean;             // True if tool returned error
   toolErrorMessage?: string;         // Error message if failed
-  // Bidirectional permalink
-  userInputPermalink?: string;       // Link back to user's original message
 }
 
 /**

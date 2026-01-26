@@ -966,11 +966,14 @@ async function runCompactSession(
 /**
  * Clear session - clears conversation history and starts fresh
  * Sends /clear as prompt to resumed session and tracks progress
+ * @param postingThreadTs - Where to post messages (effectiveThreadTs)
+ * @param sessionThreadTs - Original thread context for session management
  */
 async function runClearSession(
   client: any,
   channelId: string,
-  threadTs: string | undefined,
+  postingThreadTs: string | undefined,
+  sessionThreadTs: string | undefined,
   session: Session,
   originalTs: string | undefined
 ): Promise<void> {
@@ -994,7 +997,7 @@ async function runClearSession(
   const statusMsg = (await withSlackRetry(() =>
     client.chat.postMessage({
       channel: channelId,
-      thread_ts: threadTs,
+      thread_ts: postingThreadTs,
       blocks: buildStatusPanelBlocks({
         status: 'thinking',
         mode: session.mode,
@@ -1116,10 +1119,10 @@ async function runClearSession(
     });
 
     // Stop terminal watcher if active (session is being cleared)
-    onSessionCleared(channelId, threadTs);
+    onSessionCleared(channelId, sessionThreadTs);
 
     // Clear synced message UUIDs (for /ff resumability)
-    await clearSyncedMessageUuids(channelId, threadTs);
+    await clearSyncedMessageUuids(channelId, sessionThreadTs);
 
     console.log(`[Clear] Session cleared. Previous sessions tracked: ${previousIds.length}`);
 
@@ -1143,7 +1146,7 @@ async function runClearSession(
     // Post success message
     await client.chat.postMessage({
       channel: channelId,
-      thread_ts: threadTs,
+      thread_ts: postingThreadTs,
       text: `:wastebasket: *Session history cleared*\nStarting fresh. Your next message begins a new conversation.\nDuration: ${(elapsed / 1000).toFixed(1)}s`,
     });
 
@@ -1152,7 +1155,7 @@ async function runClearSession(
     if (updatedSession) {
       await client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: postingThreadTs,
         blocks: buildStatusDisplayBlocks({
           sessionId: updatedSession.sessionId,
           mode: updatedSession.mode,
@@ -2090,8 +2093,7 @@ app.event('app_mention', async ({ event, client }) => {
     }
 
     // Reject @bot mentions in threads - only main channel allowed
-    // Allow if ts === thread_ts (message is thread parent being edited, not a reply)
-    if (event.thread_ts && event.thread_ts !== event.ts) {
+    if (event.thread_ts) {
       await client.chat.postMessage({
         channel: event.channel,
         thread_ts: event.thread_ts,
@@ -2120,16 +2122,12 @@ app.event('app_mention', async ({ event, client }) => {
     // Extract files from event (if any)
     const eventFiles = (event as any).files as SlackFile[] | undefined;
 
-    // When ts === thread_ts, message is thread parent being edited - treat as new message
-    // Don't pass threadTs so handleMessage creates a fresh response thread
-    const isEditedThreadParent = event.thread_ts && event.thread_ts === event.ts;
-
     await handleMessage({
       channelId: event.channel,
       userId: event.user,
       userText,
       originalTs: event.ts,
-      threadTs: isEditedThreadParent ? undefined : event.thread_ts,
+      threadTs: event.thread_ts, // Only set if already in a thread
       client,
       files: eventFiles,
     });
@@ -2392,6 +2390,10 @@ async function handleMessage(params: {
   files?: SlackFile[];
 }) {
   const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck, files } = params;
+
+  // Always respond in threads - use originalTs as thread parent when in main channel
+  const effectiveThreadTs = threadTs || originalTs;
+
   const conversationKey = getConversationKey(channelId, threadTs);
   // Activity log key must be unique per message (not per conversation)
   // For threads: threadTs is unique; for main channel: use originalTs
@@ -2414,7 +2416,7 @@ async function handleMessage(params: {
       console.log(`[TerminalWatcher] Blocked message while watching: ${conversationKey}`);
       await client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: effectiveThreadTs,
         text: ':warning: Cannot run this while watching terminal.\nUse `/stop-watching` first, or click the *Stop Watching* button.',
       });
       return;
@@ -2495,7 +2497,7 @@ async function handleMessage(params: {
       await withSlackRetry(() =>
         client.chat.postMessage({
           channel: channelId,
-          thread_ts: threadTs,
+          thread_ts: effectiveThreadTs,
           text: forkMessage,
         })
       );
@@ -2557,7 +2559,7 @@ async function handleMessage(params: {
     await withSlackRetry(() =>
       client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: effectiveThreadTs,
         blocks: buildModelSelectionBlocks(models, session.model),
         text: 'Select model',
       })
@@ -2580,13 +2582,13 @@ async function handleMessage(params: {
 
   // Handle /compact command (session compaction)
   if (commandResult.compactSession) {
-    if (await checkBusyAndRespond(client, channelId, threadTs, conversationKey)) {
+    if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey)) {
       return;
     }
     await runCompactSession(
       client,
       channelId,
-      threadTs,
+      effectiveThreadTs,
       session,
       originalTs
     );
@@ -2595,13 +2597,14 @@ async function handleMessage(params: {
 
   // Handle /clear command (clear session history)
   if (commandResult.clearSession) {
-    if (await checkBusyAndRespond(client, channelId, threadTs, conversationKey)) {
+    if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey)) {
       return;
     }
     await runClearSession(
       client,
       channelId,
-      threadTs,
+      effectiveThreadTs,  // Where to post messages
+      threadTs,           // Original thread context for session management
       session,
       originalTs
     );
@@ -2678,7 +2681,7 @@ async function handleMessage(params: {
     if (commandResult.blocks) {
       // For /watch command: anchor posted to main channel (no thread_ts)
       // Activity will post as thread replies to the anchor
-      const postToThread = commandResult.startTerminalWatch ? undefined : threadTs;
+      const postToThread = commandResult.startTerminalWatch ? undefined : effectiveThreadTs;
       const response = await client.chat.postMessage({
         channel: channelId,
         thread_ts: postToThread,
@@ -2736,14 +2739,14 @@ async function handleMessage(params: {
       const stopped = stopWatching(channelId, threadTs);
       await client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: effectiveThreadTs,
         text: stopped
           ? ':white_check_mark: Stopped watching terminal session.'
           : ':information_source: No active terminal watcher in this conversation.',
       });
     } else if (commandResult.fastForward && session?.sessionId) {
       // Fast-forward: sync missed terminal messages and start watching
-      await handleFastForwardSync(client, channelId, threadTs, session, userId);
+      await handleFastForwardSync(client, channelId, effectiveThreadTs, session, userId);
     } else if (commandResult.showPlan && commandResult.planFilePath) {
       // /show-plan command: post plan file content to thread
       try {
@@ -2756,7 +2759,7 @@ async function handleMessage(params: {
           channelId,
           planContent,
           `${headerText}\n\n${slackFormatted}`,
-          threadTs,
+          effectiveThreadTs,
           userId,
           liveConfig.threadCharLimit,
           liveConfig.stripEmptyTag
@@ -2764,14 +2767,14 @@ async function handleMessage(params: {
       } catch (e) {
         await client.chat.postMessage({
           channel: channelId,
-          thread_ts: threadTs,
+          thread_ts: effectiveThreadTs,
           text: `❌ Plan file not found at \`${commandResult.planFilePath}\``,
         });
       }
     } else if (commandResult.response) {
       await client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: effectiveThreadTs,
         text: commandResult.response,
       });
     }
@@ -2796,7 +2799,7 @@ async function handleMessage(params: {
   if (!session.pathConfigured) {
     await client.chat.postMessage({
       channel: channelId,
-      thread_ts: threadTs,
+      thread_ts: effectiveThreadTs,
       blocks: buildPathSetupBlocks(),
       text: 'Please set working directory first: /path /your/project/path',
     });
@@ -2828,7 +2831,7 @@ async function handleMessage(params: {
 
       await client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: effectiveThreadTs,
         blocks: buildModelDeprecatedBlocks(session.model, models),
         text: 'Your selected model is no longer available. Please select a new model.',
       });
@@ -2875,7 +2878,7 @@ async function handleMessage(params: {
       // Show warning with Cancel/Proceed buttons
       await client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: effectiveThreadTs,
         blocks: buildConcurrentWarningBlocks(concurrentCheck.pid!, session.sessionId),
         text: `Warning: This session is currently active in your terminal (PID: ${concurrentCheck.pid})`,
       });
@@ -2898,7 +2901,7 @@ async function handleMessage(params: {
   }
 
   // Check if conversation is busy before starting query
-  if (await checkBusyAndRespond(client, channelId, threadTs, conversationKey)) {
+  if (await checkBusyAndRespond(client, channelId, effectiveThreadTs, conversationKey)) {
     return;
   }
 
@@ -2958,7 +2961,7 @@ async function handleMessage(params: {
     const combinedResult = await withSlackRetry(async () =>
       client.chat.postMessage({
         channel: channelId,
-        thread_ts: threadTs,
+        thread_ts: effectiveThreadTs,
         blocks: buildCombinedStatusBlocks({
           activityLog: processingState.activityLog,
           inProgress: true,
@@ -2991,35 +2994,6 @@ async function handleMessage(params: {
     });
   }
 
-  // Fetch permalink to user's original message for back-navigation in activity log header
-  if (originalTs) {
-    getMessagePermalink(client, channelId, originalTs).then(userInputPermalink => {
-      // Update the 'starting' entry with the permalink
-      const startingEntry = processingState.activityLog.find(e => e.type === 'starting');
-      if (startingEntry) {
-        startingEntry.userInputPermalink = userInputPermalink;
-      }
-    }).catch(error => {
-      console.error('[Permalink] Failed to get user input permalink:', error);
-    });
-  }
-
-  // Post thread reply to user's message with link to bot's response
-  if (statusMsgTs && originalTs) {
-    getMessagePermalink(client, channelId, statusMsgTs).then(async (botResponsePermalink) => {
-      await withSlackRetry(() =>
-        client.chat.postMessage({
-          channel: channelId,
-          thread_ts: originalTs,  // Reply to user's original message
-          text: `_Response: <${botResponsePermalink}|view>_`,
-        })
-      );
-      console.log(`[Permalink] Posted back-link to user message ${originalTs}`);
-    }).catch(error => {
-      console.error('[Permalink] Failed to post back-link:', error);
-    });
-  }
-
   // Spinner timer - declared outside try block so it can be cleaned up in finally
   let spinnerTimer: NodeJS.Timeout | undefined;
 
@@ -3034,7 +3008,7 @@ async function handleMessage(params: {
         return handleAskUserQuestion(
           toolInput,
           channelId,
-          threadTs,
+          effectiveThreadTs,
           client,
           () => currentResponse,           // Getter for current segment response
           () => { currentResponse = ''; },  // Clear current segment after posting
@@ -3072,7 +3046,7 @@ async function handleMessage(params: {
           channelId,
           strippedResponse,
           slackResponse,
-          threadTs,
+          effectiveThreadTs,
           undefined,  // userId
           liveConfig.threadCharLimit,
           liveConfig.stripEmptyTag
@@ -3092,7 +3066,7 @@ async function handleMessage(params: {
       const result = await withSlackRetry(() =>
         client.chat.postMessage({
           channel: channelId,
-          thread_ts: threadTs,
+          thread_ts: effectiveThreadTs,
           blocks: buildToolApprovalBlocks({ approvalId, toolName, toolInput }),
           text: `Claude wants to use ${toolName}. Approve?`,
         })
@@ -3106,11 +3080,11 @@ async function handleMessage(params: {
           resolve,
           messageTs: (result as { ts?: string }).ts!,
           channelId,
-          threadTs,
+          threadTs: effectiveThreadTs,
         });
 
         // Start reminder interval (4 hours) with 7-day expiry
-        startToolApprovalReminder(approvalId, toolName, channelId, client, threadTs);
+        startToolApprovalReminder(approvalId, toolName, channelId, client, effectiveThreadTs);
       });
     };
 
@@ -3152,7 +3126,7 @@ async function handleMessage(params: {
       maxThinkingTokens,  // Extended thinking budget
       slackContext: {
         channel: channelId,
-        threadTs,
+        threadTs: effectiveThreadTs,
         user: userId ?? 'unknown',
       },
     });
@@ -3478,7 +3452,7 @@ async function handleMessage(params: {
               channelId,
               strippedResponse,
               prefixedResponse,
-              threadTs,
+              effectiveThreadTs,
               userId,
               liveConfig.threadCharLimit,
               liveConfig.stripEmptyTag,
@@ -3673,7 +3647,7 @@ async function handleMessage(params: {
         try {
           await client.chat.postMessage({
             channel: channelId,
-            thread_ts: threadTs,
+            thread_ts: effectiveThreadTs,
             text: ':warning: Rate limited by Slack, retrying...',
           });
         } catch (err) {
@@ -4353,7 +4327,7 @@ async function handleMessage(params: {
       await showPlanApprovalUI({
         client,
         channelId,
-        threadTs,
+        threadTs: effectiveThreadTs,
         userId,
         conversationKey,
         planFilePath: processingState.planFilePath,
@@ -4440,7 +4414,7 @@ async function handleMessage(params: {
       await showPlanApprovalUI({
         client,
         channelId,
-        threadTs,
+        threadTs: effectiveThreadTs,
         userId,
         conversationKey,
         planFilePath: processingState.planFilePath,
@@ -4548,11 +4522,8 @@ async function handleMessage(params: {
       }
     }
 
-    await client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: `Error: ${error.message}`,
-    });
+    // Note: Error already posted to activity thread and status message above
+    // No additional error posting needed here
   } finally {
     // Clear spinner timer to prevent memory leak (important if error occurs before normal cleanup)
     if (spinnerTimer) {
@@ -5240,13 +5211,15 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
   }
 
   const bodyWithChannel = body as any;
+  // Get effective thread from button message context (button is already in a thread)
+  const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
     userText: planFilePath
       ? `Execute the plan at ${planFilePath}`
       : 'Yes, proceed with the plan.',
-    originalTs: threadTs,
+    originalTs: effectiveThreadTs,
     threadTs,
     client,
     skipConcurrentCheck: true,
@@ -5274,11 +5247,13 @@ app.action(/^plan_accept_edits_(.+)$/, async ({ action, ack, body, client }) => 
   }
 
   const bodyWithChannel = body as any;
+  // Get effective thread from button message context (button is already in a thread)
+  const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
     userText: 'Yes, proceed with the plan.',
-    originalTs: threadTs,
+    originalTs: effectiveThreadTs,
     threadTs,
     client,
     skipConcurrentCheck: true,
@@ -5306,11 +5281,13 @@ app.action(/^plan_bypass_(.+)$/, async ({ action, ack, body, client }) => {
   }
 
   const bodyWithChannel = body as any;
+  // Get effective thread from button message context (button is already in a thread)
+  const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
     userText: 'Yes, proceed with the plan.',
-    originalTs: threadTs,
+    originalTs: effectiveThreadTs,
     threadTs,
     client,
     skipConcurrentCheck: true,
@@ -5338,11 +5315,13 @@ app.action(/^plan_manual_(.+)$/, async ({ action, ack, body, client }) => {
   }
 
   const bodyWithChannel = body as any;
+  // Get effective thread from button message context (button is already in a thread)
+  const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
     userText: 'Yes, proceed with the plan.',
-    originalTs: threadTs,
+    originalTs: effectiveThreadTs,
     threadTs,
     client,
     skipConcurrentCheck: true,
@@ -5364,11 +5343,13 @@ app.action(/^plan_reject_(.+)$/, async ({ action, ack, body, client }) => {
 
   // Keep mode as plan, send rejection message to Claude
   const bodyWithChannel = body as any;
+  // Get effective thread from button message context (button is already in a thread)
+  const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
   await handleMessage({
     channelId,
     userId: bodyWithChannel.user?.id,
     userText: 'No, I want to change the plan. Please wait for my feedback.',
-    originalTs: threadTs,
+    originalTs: effectiveThreadTs,
     threadTs,
     client,
     skipConcurrentCheck: true,

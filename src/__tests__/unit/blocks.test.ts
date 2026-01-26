@@ -2713,104 +2713,6 @@ describe('blocks', () => {
     });
   });
 
-  describe('buildActivityLogText with userInputPermalink', () => {
-    it('should show permalink at top when starting entry has userInputPermalink', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting', userInputPermalink: 'https://slack.com/archives/C123/p1234567890' },
-        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
-      ];
-      const text = buildActivityLogText(entries, true);
-      // Permalink should be at the very top
-      expect(text.startsWith('<https://slack.com/archives/C123/p1234567890|:leftwards_arrow_with_hook:>')).toBe(true);
-      // Should also contain the activity entries
-      expect(text).toContain(':brain: *Analyzing request...*');
-      expect(text).toContain(':white_check_mark: *Read*');
-    });
-
-    it('should not show permalink line when userInputPermalink is undefined', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting' },
-        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
-      ];
-      const text = buildActivityLogText(entries, true);
-      // Should start with brain emoji, not a link
-      expect(text.startsWith(':brain:')).toBe(true);
-      expect(text).not.toContain(':leftwards_arrow_with_hook:');
-    });
-
-    it('should keep permalink at top even when rolling window kicks in', () => {
-      // Create 350 entries to trigger rolling window (MAX_LIVE_ENTRIES = 300)
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting', userInputPermalink: 'https://slack.com/archives/C123/p9999' },
-      ];
-      for (let i = 0; i < 350; i++) {
-        entries.push({ timestamp: Date.now(), type: 'tool_complete', tool: `Tool${i}`, durationMs: 100 });
-      }
-      const text = buildActivityLogText(entries, true);
-      // Permalink should STILL be at the very top, even though starting entry is outside rolling window
-      expect(text.startsWith('<https://slack.com/archives/C123/p9999|:leftwards_arrow_with_hook:>')).toBe(true);
-      // Should show truncation notice after the permalink
-      expect(text).toContain('earlier entries');
-      // Starting entry itself should NOT appear (it's outside the rolling window)
-      expect(text).not.toContain(':brain: *Analyzing request...*');
-      // Should show recent tools (last 20)
-      expect(text).toContain('Tool349');
-      expect(text).toContain('Tool330');
-    });
-
-    it('should not show duplicate permalink in starting entry', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting', userInputPermalink: 'https://slack.com/archives/C123/p1234' },
-      ];
-      const text = buildActivityLogText(entries, true);
-      // Link should appear only once (at the top)
-      const linkCount = (text.match(/:leftwards_arrow_with_hook:/g) || []).length;
-      expect(linkCount).toBe(1);
-    });
-
-    it('should keep permalink at top even when maxChars truncation kicks in', () => {
-      // Create entries that will exceed maxChars limit
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting', userInputPermalink: 'https://slack.com/archives/C123/p8888' },
-      ];
-      // Add enough tool entries to exceed 300 chars
-      for (let i = 0; i < 20; i++) {
-        entries.push({ timestamp: Date.now(), type: 'tool_complete', tool: `LongToolName${i}`, durationMs: 100 });
-      }
-      // Use a small maxChars to trigger truncation
-      const text = buildActivityLogText(entries, true, 300);
-      // Permalink should STILL be at the very top, even after maxChars truncation
-      expect(text.startsWith('<https://slack.com/archives/C123/p8888|:leftwards_arrow_with_hook:>')).toBe(true);
-      // Should show truncation indicator
-      expect(text).toContain('...');
-      // Should show recent tools
-      expect(text).toContain('LongToolName19');
-    });
-
-    it('should keep permalink at top with ACTIVITY_LOG_MAX_CHARS (1000)', () => {
-      // Simulate realistic scenario with many tool completions
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting', userInputPermalink: 'https://slack.com/archives/C123/p7777' },
-      ];
-      // Add many entries with long output hints to exceed 1000 chars
-      for (let i = 0; i < 30; i++) {
-        entries.push({
-          timestamp: Date.now(),
-          type: 'tool_complete',
-          tool: 'Read',
-          durationMs: 100,
-          toolOutputPreview: 'This is a long output preview that takes up space in the activity log display',
-        });
-      }
-      // Use ACTIVITY_LOG_MAX_CHARS (1000) as the limit
-      const text = buildActivityLogText(entries, true, 1000);
-      // Permalink should STILL be at the very top
-      expect(text.startsWith('<https://slack.com/archives/C123/p7777|:leftwards_arrow_with_hook:>')).toBe(true);
-      // Total length should not exceed maxChars
-      expect(text.length).toBeLessThanOrEqual(1000);
-    });
-  });
-
   describe('buildCombinedStatusBlocks', () => {
     const baseParams = {
       status: 'starting' as const,
@@ -3854,27 +3756,6 @@ describe('blocks', () => {
       const text = formatThreadActivityBatch(entries);
       expect(text).toContain(':octagonal_sign:');
       expect(text).toContain('Aborted by user');
-    });
-
-    it('should show permalink at top when starting entry has userInputPermalink', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting', userInputPermalink: 'https://slack.com/archives/C123/p5555' },
-        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
-      ];
-      const text = formatThreadActivityBatch(entries);
-      // Permalink should be at the very top
-      expect(text.startsWith('<https://slack.com/archives/C123/p5555|:leftwards_arrow_with_hook:>')).toBe(true);
-      // Should also contain the activity entries
-      expect(text).toContain(':brain: *Analyzing request...*');
-    });
-
-    it('should not show permalink when userInputPermalink is undefined', () => {
-      const entries: ActivityEntry[] = [
-        { timestamp: Date.now(), type: 'starting' },
-      ];
-      const text = formatThreadActivityBatch(entries);
-      expect(text.startsWith(':brain:')).toBe(true);
-      expect(text).not.toContain(':leftwards_arrow_with_hook:');
     });
   });
 
