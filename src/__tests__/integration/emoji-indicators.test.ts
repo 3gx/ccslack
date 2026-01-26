@@ -387,4 +387,174 @@ describe('emoji-indicators integration tests', () => {
       expect(resolvePromise).toHaveBeenCalledWith('Option A');
     });
   });
+
+  describe('mode picker emoji handling', () => {
+    it('mode button click: removes both :question: and :eyes:', async () => {
+      const { pendingModeSelections } = await import('../../slack-bot.js');
+      const handler = registeredHandlers['action_^mode_(plan|default|bypassPermissions|acceptEdits)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Set up pending mode selection with originalTs
+      pendingModeSelections.set('picker-msg-123', {
+        originalTs: 'user-msg-123',
+        channelId: 'C123',
+        threadTs: undefined,
+      });
+
+      await handler({
+        action: { action_id: 'mode_plan' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'picker-msg-123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Should remove both :question: and :eyes: emojis
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-123',
+          name: 'question',
+        })
+      );
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-123',
+          name: 'eyes',
+        })
+      );
+      // Verify pending entry is cleaned up
+      expect(pendingModeSelections.has('picker-msg-123')).toBe(false);
+    });
+
+    it('mode button click in thread: handles thread-aware emoji cleanup', async () => {
+      const { pendingModeSelections } = await import('../../slack-bot.js');
+      const handler = registeredHandlers['action_^mode_(plan|default|bypassPermissions|acceptEdits)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Set up pending mode selection with thread context
+      pendingModeSelections.set('picker-msg-456', {
+        originalTs: 'user-msg-456',
+        channelId: 'C123',
+        threadTs: 'thread-123',
+      });
+
+      await handler({
+        action: { action_id: 'mode_bypassPermissions' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'picker-msg-456', thread_ts: 'thread-123' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-456',
+          name: 'question',
+        })
+      );
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-456',
+          name: 'eyes',
+        })
+      );
+    });
+  });
+
+  describe('model picker emoji handling', () => {
+    it('model button click: removes both :question: and :eyes:', async () => {
+      const { pendingModelSelections } = await import('../../slack-bot.js');
+      const handler = registeredHandlers['action_^model_select_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Set up pending model selection with originalTs
+      pendingModelSelections.set('picker-msg-789', {
+        originalTs: 'user-msg-789',
+        channelId: 'C123',
+        threadTs: undefined,
+      });
+
+      await handler({
+        action: { action_id: 'model_select_claude-sonnet-4-20250514' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'picker-msg-789' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      // Should remove both :question: and :eyes: emojis
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-789',
+          name: 'question',
+        })
+      );
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-789',
+          name: 'eyes',
+        })
+      );
+      // Verify pending entry is cleaned up
+      expect(pendingModelSelections.has('picker-msg-789')).toBe(false);
+    });
+
+    it('model button click in thread: handles thread-aware emoji cleanup', async () => {
+      const { pendingModelSelections } = await import('../../slack-bot.js');
+      const handler = registeredHandlers['action_^model_select_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Set up pending model selection with thread context
+      pendingModelSelections.set('picker-msg-999', {
+        originalTs: 'user-msg-999',
+        channelId: 'C123',
+        threadTs: 'thread-456',
+      });
+
+      await handler({
+        action: { action_id: 'model_select_claude-opus-4-20250514' },
+        ack,
+        body: {
+          channel: { id: 'C123' },
+          message: { ts: 'picker-msg-999', thread_ts: 'thread-456' },
+        },
+        client: mockClient,
+      });
+
+      expect(ack).toHaveBeenCalled();
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-999',
+          name: 'question',
+        })
+      );
+      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          timestamp: 'user-msg-999',
+          name: 'eyes',
+        })
+      );
+    });
+  });
 });

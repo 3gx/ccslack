@@ -36,6 +36,7 @@ import {
   formatToolName,
   getToolEmoji,
   buildModelSelectionBlocks,
+  buildModeSelectionBlocks,
   buildModelDeprecatedBlocks,
   buildStatusDisplayBlocks,
   buildSdkQuestionBlocks,
@@ -499,6 +500,15 @@ export const pendingSdkQuestions = new Map<string, PendingSdkQuestion>();
 
 // Track pending multi-select selections for SDK questions
 const pendingSdkMultiSelections = new Map<string, string[]>();
+
+// Track pending mode/model picker selections for emoji cleanup
+interface PendingPickerSelection {
+  originalTs: string;
+  channelId: string;
+  threadTs?: string;  // Thread-aware for proper cleanup
+}
+export const pendingModeSelections = new Map<string, PendingPickerSelection>();
+export const pendingModelSelections = new Map<string, PendingPickerSelection>();
 
 // Helper to get unique conversation key (channel + thread)
 function getConversationKey(channelId: string, threadTs?: string): string {
@@ -2749,26 +2759,46 @@ async function handleMessage(params: {
   // Handle /model command (async model fetch)
   if (commandResult.showModelSelection) {
     const models = await getAvailableModels();
-    await withSlackRetry(() =>
+    const response = (await withSlackRetry(() =>
       client.chat.postMessage({
         channel: channelId,
         thread_ts: effectiveThreadTs,
         blocks: buildModelSelectionBlocks(models, session.model),
         text: 'Select model',
       })
-    );
+    )) as { ts?: string };
 
-    // Remove eyes reaction
-    if (originalTs) {
-      try {
-        await client.reactions.remove({
-          channel: channelId,
-          timestamp: originalTs,
-          name: 'eyes',
-        });
-      } catch {
-        // Ignore errors
-      }
+    // Add :question: (keep :eyes: - query still active until button clicked)
+    if (originalTs && response.ts) {
+      pendingModelSelections.set(response.ts, {
+        originalTs,
+        channelId,
+        threadTs: effectiveThreadTs,
+      });
+      await addReaction(client, channelId, originalTs, 'question');
+    }
+    return;
+  }
+
+  // Handle /mode command (show mode picker)
+  if (commandResult.showModeSelection) {
+    const response = (await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: channelId,
+        thread_ts: effectiveThreadTs,
+        blocks: buildModeSelectionBlocks(session.mode),
+        text: 'Select mode',
+      })
+    )) as { ts?: string };
+
+    // Add :question: (keep :eyes: - query still active until button clicked)
+    if (originalTs && response.ts) {
+      pendingModeSelections.set(response.ts, {
+        originalTs,
+        channelId,
+        threadTs: effectiveThreadTs,
+      });
+      await addReaction(client, channelId, originalTs, 'question');
     }
     return;
   }
@@ -5321,8 +5351,19 @@ app.action(/^mode_(plan|default|bypassPermissions|acceptEdits)$/, async ({ actio
 
   const bodyWithChannel = body as any;
   const channelId = bodyWithChannel.channel?.id;
+  const messageTs = bodyWithChannel.message?.ts;
 
   console.log(`Mode button clicked: ${mode} for channel: ${channelId}`);
+
+  // Remove :question: and :eyes: emojis from original message
+  if (messageTs) {
+    const pending = pendingModeSelections.get(messageTs);
+    if (pending) {
+      await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+      await removeReaction(client, pending.channelId, pending.originalTs, 'eyes');
+      pendingModeSelections.delete(messageTs);
+    }
+  }
 
   if (channelId) {
     // Update session with new mode (thread-aware)
@@ -5373,7 +5414,19 @@ app.action(/^model_select_(.+)$/, async ({ action, ack, body, client }) => {
   const channelId = bodyWithChannel.channel?.id;
   if (!channelId) return;
 
+  const messageTs = bodyWithChannel.message?.ts;
+
   console.log(`Model button clicked: ${modelId} for channel: ${channelId}`);
+
+  // Remove :question: and :eyes: emojis from original message
+  if (messageTs) {
+    const pending = pendingModelSelections.get(messageTs);
+    if (pending) {
+      await removeReaction(client, pending.channelId, pending.originalTs, 'question');
+      await removeReaction(client, pending.channelId, pending.originalTs, 'eyes');
+      pendingModelSelections.delete(messageTs);
+    }
+  }
 
   // Check if conversation is busy - model changes don't take effect mid-turn
   // so we block them while a query is running to avoid confusion

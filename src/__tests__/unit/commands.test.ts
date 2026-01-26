@@ -107,36 +107,13 @@ describe('commands', () => {
   });
 
   describe('/mode', () => {
-    it('should show mode selection buttons with all 4 SDK modes', () => {
+    it('should return showModeSelection flag when no argument provided', () => {
       const result = parseCommand('/mode', mockSession);
 
       expect(result.handled).toBe(true);
-      expect(result.blocks).toBeDefined();
-
-      // Find actions block with buttons
-      const actionsBlock = result.blocks!.find(b => b.type === 'actions');
-      expect(actionsBlock).toBeDefined();
-      expect(actionsBlock?.elements?.length).toBe(4);
-
-      // Check button action IDs for SDK mode names
-      const actionIds = actionsBlock?.elements?.map((e: any) => e.action_id);
-      expect(actionIds).toContain('mode_plan');
-      expect(actionIds).toContain('mode_default');
-      expect(actionIds).toContain('mode_bypassPermissions');
-      expect(actionIds).toContain('mode_acceptEdits');
-    });
-
-    it('should highlight current mode button', () => {
-      const result = parseCommand('/mode', mockSession);
-      const actionsBlock = result.blocks!.find(b => b.type === 'actions');
-
-      // Plan should be primary (current mode)
-      const planButton = actionsBlock?.elements?.find((e: any) => e.action_id === 'mode_plan');
-      expect(planButton?.style).toBe('primary');
-
-      // Default should not be primary
-      const defaultButton = actionsBlock?.elements?.find((e: any) => e.action_id === 'mode_default');
-      expect(defaultButton?.style).toBeUndefined();
+      expect(result.showModeSelection).toBe(true);
+      // Blocks are now built in slack-bot.ts handler, not in commands.ts
+      expect(result.blocks).toBeUndefined();
     });
 
     it('should switch to plan mode with /mode plan', () => {

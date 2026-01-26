@@ -10,7 +10,6 @@ import {
   Block,
   buildStatusDisplayBlocks,
   buildTerminalCommandBlocks,
-  buildModeSelectionBlocks,
   buildContextDisplayBlocks,
   buildWatchingStatusSection,
 } from './blocks.js';
@@ -58,6 +57,8 @@ export interface CommandResult {
   // For /show-plan command - signals to post plan file content to thread
   showPlan?: boolean;
   planFilePath?: string;
+  // For /mode command - triggers mode selection UI (show picker)
+  showModeSelection?: boolean;
 }
 
 // Mode shortcut mapping for quick /mode <arg> switching
@@ -431,11 +432,11 @@ function handleContext(session: Session): CommandResult {
  * Shortcuts: plan, bypass, ask, edit
  */
 function handleMode(modeArg: string, session: Session): CommandResult {
-  // No argument - show picker
+  // No argument - show picker (handled in slack-bot.ts for emoji tracking)
   if (!modeArg) {
     return {
       handled: true,
-      blocks: buildModeSelectionBlocks(session.mode),
+      showModeSelection: true,
     };
   }
 
