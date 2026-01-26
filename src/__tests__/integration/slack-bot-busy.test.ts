@@ -667,4 +667,181 @@ describe('busy state handling', () => {
       name: 'eyes',
     });
   });
+
+  it('should add :x: emoji when query is blocked due to busy', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    // Mock startClaudeQuery to hang
+    let resolveQuery: () => void;
+    const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        await hangingPromise;
+        yield { type: 'result', result: 'done' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    // Start first query
+    const queryPromise = handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+      client: mockClient,
+    });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Try second query - should be blocked and get :x:
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> another question', channel: 'C123', ts: 'msg2' },
+      client: mockClient,
+    });
+
+    // Should see "I'm busy" message
+    const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+      (call: any[]) => call[0].text?.includes("I'm busy")
+    );
+    expect(busyMessages).toHaveLength(1);
+
+    // Should add :x: emoji to the blocked message
+    expect(mockClient.reactions.add).toHaveBeenCalledWith({
+      channel: 'C123',
+      timestamp: 'msg2',
+      name: 'x',
+    });
+
+    // Cleanup
+    resolveQuery!();
+    await queryPromise;
+  });
+
+  it('should add :x: emoji when /compact is blocked due to busy', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    // Mock startClaudeQuery to hang
+    let resolveQuery: () => void;
+    const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        await hangingPromise;
+        yield { type: 'result', result: 'done' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    // Start a query
+    const queryPromise = handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+      client: mockClient,
+    });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Try /compact while busy - should be blocked and get :x:
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> /compact', channel: 'C123', ts: 'compact-msg' },
+      client: mockClient,
+    });
+
+    // Should see "I'm busy" message
+    const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+      (call: any[]) => call[0].text?.includes("I'm busy")
+    );
+    expect(busyMessages).toHaveLength(1);
+
+    // Should add :x: emoji to the blocked message
+    expect(mockClient.reactions.add).toHaveBeenCalledWith({
+      channel: 'C123',
+      timestamp: 'compact-msg',
+      name: 'x',
+    });
+
+    // Cleanup
+    resolveQuery!();
+    await queryPromise;
+  });
+
+  it('should add :x: emoji when /clear is blocked due to busy', async () => {
+    const handler = registeredHandlers['event_app_mention'];
+    const mockClient = createMockSlackClient();
+
+    vi.mocked(getSession).mockReturnValue({
+      sessionId: 'test-session',
+      workingDir: '/test',
+      mode: 'plan',
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      pathConfigured: true,
+      configuredPath: '/test/dir',
+      configuredBy: 'U123',
+      configuredAt: Date.now(),
+    });
+
+    // Mock startClaudeQuery to hang
+    let resolveQuery: () => void;
+    const hangingPromise = new Promise<void>(r => { resolveQuery = r; });
+    vi.mocked(startClaudeQuery).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        await hangingPromise;
+        yield { type: 'result', result: 'done' };
+      },
+      interrupt: vi.fn(),
+    } as any);
+
+    // Start a query
+    const queryPromise = handler({
+      event: { user: 'U123', text: '<@BOT123> hello', channel: 'C123', ts: 'msg1' },
+      client: mockClient,
+    });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Try /clear while busy - should be blocked and get :x:
+    await handler({
+      event: { user: 'U123', text: '<@BOT123> /clear', channel: 'C123', ts: 'clear-msg' },
+      client: mockClient,
+    });
+
+    // Should see "I'm busy" message
+    const busyMessages = mockClient.chat.postMessage.mock.calls.filter(
+      (call: any[]) => call[0].text?.includes("I'm busy")
+    );
+    expect(busyMessages).toHaveLength(1);
+
+    // Should add :x: emoji to the blocked message
+    expect(mockClient.reactions.add).toHaveBeenCalledWith({
+      channel: 'C123',
+      timestamp: 'clear-msg',
+      name: 'x',
+    });
+
+    // Cleanup
+    resolveQuery!();
+    await queryPromise;
+  });
 });

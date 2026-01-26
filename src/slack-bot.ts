@@ -544,6 +544,8 @@ async function checkBusyAndRespond(
       } catch {
         // Ignore - reaction may already be removed
       }
+      // Add :x: to indicate request was rejected (busy)
+      await addReaction(client, channelId, originalTs, 'x');
     }
     return true; // Was busy
   }
