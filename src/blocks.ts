@@ -1794,6 +1794,9 @@ export interface CombinedStatusParams extends StatusPanelParams {
     threadTs?: string;        // Explicit threadTs for thread/channel parity
     statusMsgTs: string;
   };
+  // User mention for completion notifications (skip in DMs)
+  userId?: string;
+  mentionChannelId?: string;  // Channel ID to check for DM (starts with 'D')
 }
 
 // SDK mode labels for display (shared by helper functions)
@@ -1936,7 +1939,14 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
     forkInfo,
     hasFailedUpload,
     retryUploadInfo,
+    userId,
+    mentionChannelId,
   } = params;
+
+  // Build user mention for completion notifications (skip in DMs)
+  const userMention = (userId && mentionChannelId && !mentionChannelId.startsWith('D'))
+    ? `<@${userId}> `
+    : '';
 
   const blocks: Block[] = [];
 
@@ -2020,7 +2030,18 @@ export function buildCombinedStatusBlocks(params: CombinedStatusParams): Block[]
                      outputTokens !== undefined ||
                      costUsd !== undefined;
 
-    // 2. Unified status line (context) - ALWAYS above button
+    // 2. Completion header with user mention (triggers Slack notification)
+    if (status === 'complete' && userMention) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `${userMention}:white_check_mark: *Complete*`,
+        },
+      });
+    }
+
+    // 3. Unified status line (context) - ALWAYS above button
     if (status === 'complete' || status === 'aborted' || (status === 'error' && hasStats)) {
       blocks.push({
         type: 'context',

@@ -97,6 +97,15 @@ const MAX_LIVE_ENTRIES = 300;  // Switch to rolling window if exceeded
 const ROLLING_WINDOW_SIZE = 20; // Show last N entries when in rolling mode
 const STATUS_UPDATE_INTERVAL = 1000; // TEMP: 1s for testing spinner updates
 
+/**
+ * Get user mention string for Slack messages.
+ * Skip mentions in DMs (channel IDs starting with 'D') where the user is the only participant.
+ */
+function getUserMention(userId: string | undefined, channelId: string): string {
+  if (!userId || channelId.startsWith('D')) return '';
+  return `<@${userId}> `;
+}
+
 // Processing state for real-time activity tracking
 interface ProcessingState {
   status: 'starting' | 'thinking' | 'tool' | 'complete' | 'error' | 'aborted' | 'generating';
@@ -1974,7 +1983,8 @@ async function handleAskUserQuestion(
   clearAccumulatedResponse: () => void,
   isStillStreaming: () => boolean,
   conversationKey: string,
-  originalTs?: string  // For emoji tracking
+  originalTs?: string,  // For emoji tracking
+  userId?: string       // For user mention tagging
 ): Promise<PermissionResult> {
   const input = toolInput as unknown as AskUserQuestionInput;
   const answers: Record<string, string> = {};
@@ -2019,13 +2029,14 @@ async function handleAskUserQuestion(
       multiSelect: q.multiSelect,
     });
 
-    // Post to Slack
+    // Post to Slack (include user mention for notification in channels/threads, skip in DMs)
+    const mention = getUserMention(userId, channelId);
     const result = await withSlackRetry(() =>
       client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
         blocks,
-        text: `[${q.header}] ${q.question}`,
+        text: `${mention}[${q.header}] ${q.question}`,
       })
     );
 
@@ -2352,7 +2363,8 @@ async function showPlanApprovalUI(params: {
     );
   }
 
-  // Show approval buttons
+  // Show approval buttons (include user mention for notification in channels/threads, skip in DMs)
+  const planMention = getUserMention(userId, channelId);
   try {
     await withSlackRetry(() =>
       client.chat.postMessage({
@@ -2362,7 +2374,7 @@ async function showPlanApprovalUI(params: {
           conversationKey,
           allowedPrompts: exitPlanModeInput?.allowedPrompts,
         }),
-        text: 'Would you like to proceed? Choose how to execute the plan.',
+        text: `${planMention}Would you like to proceed? Choose how to execute the plan.`,
       })
     );
 
@@ -3183,7 +3195,8 @@ async function handleMessage(params: {
           () => { currentResponse = ''; },  // Clear current segment after posting
           () => isActivelyStreaming,        // Check if still in middle of streaming
           conversationKey,
-          originalTs  // For emoji tracking
+          originalTs,  // For emoji tracking
+          userId       // For user mention tagging
         );
       }
 
@@ -3222,13 +3235,14 @@ async function handleMessage(params: {
 
       console.log(`Tool approval requested: ${toolName} (${approvalId})`);
 
-      // Post approval request to Slack with buttons
+      // Post approval request to Slack with buttons (include user mention for notification)
+      const toolMention = getUserMention(userId, channelId);
       const result = await withSlackRetry(() =>
         client.chat.postMessage({
           channel: channelId,
           thread_ts: effectiveThreadTs,
           blocks: buildToolApprovalBlocks({ approvalId, toolName, toolInput }),
-          text: `Claude wants to use ${toolName}. Approve?`,
+          text: `${toolMention}Claude wants to use ${toolName}. Approve?`,
         })
       );
 
@@ -4373,14 +4387,19 @@ async function handleMessage(params: {
                     statusMsgTs: statusMsgTs!,
                   }
                 : undefined,
+              // User mention for completion notification (triggers @mention in Slack)
+              userId,
+              mentionChannelId: channelId,
             });
 
+            // Include user mention in completion text for notification (skip in DMs)
+            const completeMention = getUserMention(userId, channelId);
             await withSlackRetry(() =>
               client.chat.update({
                 channel: channelId,
                 ts: statusMsgTs,
                 blocks: completionBlocks,
-                text: 'Complete',
+                text: `${completeMention}Complete`,
               })
             );
           } catch (error) {

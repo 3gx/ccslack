@@ -934,8 +934,9 @@ describe('slack-bot mention handlers', () => {
       // Actions block is optional on completion (only present with Fork or retry buttons)
 
       // No spinner block in completion (spinner only during in-progress)
-      // Completion should have exactly 3 blocks: activity + stats + actions
-      expect(completionBlocks.length).toBe(3);
+      // Completion should have exactly 4 blocks: activity + user mention header + stats + actions
+      // (user mention header added when userId is present and channel is not DM)
+      expect(completionBlocks.length).toBe(4);
     });
   });
 
