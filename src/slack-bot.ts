@@ -106,6 +106,106 @@ function getUserMention(userId: string | undefined, channelId: string): string {
   return `<@${userId}> `;
 }
 
+// Track recent DM notifications per user for debouncing
+const recentDmNotifications = new Map<string, number>(); // userId -> lastNotifyTime
+export const DM_DEBOUNCE_MS = 15000; // 15 seconds
+
+/** Clear debounce state - exported for testing */
+export function clearDmNotificationDebounce(): void {
+  recentDmNotifications.clear();
+}
+
+/**
+ * Send a DM notification to user with permalink to the thread.
+ * This triggers unread indicator on DM without polluting main channel.
+ *
+ * Features:
+ * - 15-second debouncing per user to prevent spam
+ * - Skips for DM channels (no need to DM about a DM)
+ * - Skips for bot users (can't DM bots)
+ * - Silently fails - DM notification is nice-to-have, not critical
+ */
+export async function sendDmNotification(params: {
+  client: any;
+  userId: string;
+  channelId: string;
+  messageTs: string;
+  emoji: string;
+  title: string;
+  subtitle?: string;
+}): Promise<void> {
+  const { client, userId, channelId, messageTs, emoji, title, subtitle } = params;
+
+  // Skip for DMs - no need to DM about a DM
+  if (!userId || channelId.startsWith('D')) return;
+
+  // Debounce: skip if notified this user within last 15 seconds
+  const now = Date.now();
+  const lastNotify = recentDmNotifications.get(userId) || 0;
+  if (now - lastNotify < DM_DEBOUNCE_MS) {
+    return; // Skip - too recent
+  }
+
+  try {
+    // Check if user is a bot (can't DM bots)
+    try {
+      const userInfo = await client.users.info({ user: userId });
+      if (userInfo.ok && userInfo.user?.is_bot) {
+        return; // Skip silently for bots
+      }
+    } catch {
+      // If we can't check, proceed anyway - will fail silently if bot
+    }
+
+    // Get channel name for friendly message
+    let channelName = 'the channel';
+    try {
+      const channelInfo = await client.conversations.info({ channel: channelId });
+      if (channelInfo.ok && channelInfo.channel?.name) {
+        channelName = `#${channelInfo.channel.name}`;
+      }
+    } catch {
+      // Use fallback name
+    }
+
+    // Get permalink to the message
+    const permalink = await getMessagePermalink(client, channelId, messageTs);
+
+    // Open DM channel with user
+    const dmResult = await client.conversations.open({ users: userId });
+    if (!dmResult.ok || !dmResult.channel?.id) return;
+
+    // Send DM with permalink button
+    await withSlackRetry(() =>
+      client.chat.postMessage({
+        channel: dmResult.channel.id,
+        text: `${emoji} ${title} in ${channelName}`,
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `${emoji} *${title}* in ${channelName}${subtitle ? `\n${subtitle}` : ''}`,
+            },
+            accessory: {
+              type: 'button',
+              text: { type: 'plain_text', text: 'View →', emoji: true },
+              url: permalink,
+              action_id: 'dm_notification_view', // Required but unused (link button)
+            },
+          },
+        ],
+      })
+    );
+
+    // Update debounce tracker
+    recentDmNotifications.set(userId, now);
+  } catch (error) {
+    // Silently fail - don't block main notification flow
+    console.error('Failed to send DM notification:', error);
+  }
+}
+
 // Processing state for real-time activity tracking
 interface ProcessingState {
   status: 'starting' | 'thinking' | 'tool' | 'complete' | 'error' | 'aborted' | 'generating';
@@ -2042,6 +2142,18 @@ async function handleAskUserQuestion(
       })
     );
 
+    // Send DM notification for question
+    if (userId) {
+      await sendDmNotification({
+        client,
+        userId,
+        channelId,
+        messageTs: (result as { ts?: string }).ts!,
+        emoji: '❓',
+        title: 'Question needs your input',
+      });
+    }
+
     // Add :question: emoji to show user input needed
     if (originalTs) {
       await addReaction(client, channelId, originalTs, 'question');
@@ -2395,7 +2507,7 @@ async function showPlanApprovalUI(params: {
   // Show approval buttons (include user mention for notification in channels/threads, skip in DMs)
   const planMention = getUserMention(userId, channelId);
   try {
-    await withSlackRetry(() =>
+    const planApprovalResult = await withSlackRetry(() =>
       client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
@@ -2408,6 +2520,18 @@ async function showPlanApprovalUI(params: {
         text: `${planMention}Would you like to proceed? Choose how to execute the plan.`,
       })
     );
+
+    // Send DM notification for plan approval
+    if (userId) {
+      await sendDmNotification({
+        client,
+        userId,
+        channelId,
+        messageTs: (planApprovalResult as { ts?: string }).ts!,
+        emoji: '📋',
+        title: 'Plan ready for review',
+      });
+    }
 
     // Add :question: emoji to show user input needed for plan approval
     if (originalTs) {
@@ -3280,6 +3404,19 @@ async function handleMessage(params: {
           text: `${toolMention}Claude wants to use ${toolName}. Approve?`,
         })
       );
+
+      // Send DM notification for tool approval
+      if (userId) {
+        await sendDmNotification({
+          client,
+          userId,
+          channelId,
+          messageTs: (result as { ts?: string }).ts!,
+          emoji: '🔧',
+          title: 'Tool approval needed',
+          subtitle: `Claude wants to use: ${toolName}`,
+        });
+      }
 
       // Add :question: emoji to show user input needed
       if (originalTs) {
@@ -4437,6 +4574,18 @@ async function handleMessage(params: {
                 text: `${completeMention}Complete`,
               })
             );
+
+            // Send DM notification for completion
+            if (userId) {
+              await sendDmNotification({
+                client,
+                userId,
+                channelId,
+                messageTs: statusMsgTs,
+                emoji: '✅',
+                title: 'Query completed',
+              });
+            }
           } catch (error) {
             console.error('Error updating to complete:', error);
           }
