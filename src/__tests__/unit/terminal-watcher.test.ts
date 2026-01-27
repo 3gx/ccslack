@@ -35,7 +35,7 @@ vi.mock('../../session-manager.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../session-manager.js')>();
   return {
     ...actual,
-    getSession: vi.fn(() => ({ threadCharLimit: 500, stripEmptyTag: false })),
+    getSession: vi.fn(() => ({ threadCharLimit: 500 })),
     getThreadSession: vi.fn(() => null),
     saveMessageMapping: vi.fn(),
     saveSession: vi.fn(),  // For planFilePath persistence
@@ -462,8 +462,7 @@ describe('terminal-watcher', () => {
         expect.stringContaining('Terminal Output'),  // prefix + slackText
         undefined,  // threadTs
         undefined,  // userId
-        500,  // charLimit from session
-        false  // stripEmptyTag
+        500  // charLimit from session
         // forkInfo and isFinalSegment removed - Fork button now on activity message
       );
     });

@@ -9,7 +9,6 @@ import { Session, PermissionMode } from './session-manager.js';
 import {
   Block,
   buildStatusDisplayBlocks,
-  buildTerminalCommandBlocks,
   buildContextDisplayBlocks,
   buildWatchingStatusSection,
 } from './blocks.js';
@@ -39,10 +38,6 @@ export interface CommandResult {
   blocks?: Block[];
   isError?: boolean;  // true if this is an error response
   sessionUpdate?: Partial<Session>;
-  // For /wait command - rate limit stress test
-  waitTest?: {
-    seconds: number;
-  };
   // For /model command - triggers model selection UI (async fetch in handler)
   showModelSelection?: boolean;
   // For /compact command - triggers session compaction
@@ -146,18 +141,16 @@ export function parseCommand(
       return handleSetCurrentPath(session);
     case 'cd':
       return handleCd(argString, session);
+    case 'cwd':
+      return handleCwd(session);
     case 'ls':
       return handleLs(argString, session);
     case 'watch':
       return handleWatch(session, threadTs);
     case 'stop-watching':
       return handleStopWatching();
-    case 'fork':
-      return handleFork(session);
     case 'resume':
       return handleResume(argString, session);
-    case 'wait':
-      return handleWait(argString);
     case 'model':
       return handleModel(argString);
     case 'compact':
@@ -170,8 +163,6 @@ export function parseCommand(
       return handleUpdateRate(argString, session);
     case 'message-size':
       return handleMessageSize(argString, session);
-    case 'strip-empty-tag':
-      return handleStripEmptyTag(argString, session);
     case 'show-plan':
       return handleShowPlan(session);
     case 'ff':
@@ -194,6 +185,7 @@ function handleHelp(): CommandResult {
 \`/help\` - Show this help message
 \`/ls [path]\` - List files in directory (relative or absolute)
 \`/cd [path]\` - Change directory (only before path locked)
+\`/cwd\` - Show current working directory
 \`/set-current-path\` - Lock current directory (one-time only)
 \`/status\` - Show session info (ID, mode, directory, context)
 \`/context\` - Show context window usage
@@ -203,15 +195,12 @@ function handleHelp(): CommandResult {
 \`/max-thinking-tokens [n]\` - Set thinking budget (0=disable, 1024-128000, default=31999)
 \`/update-rate [n]\` - Set status update interval (1-10 seconds, default=3)
 \`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
-\`/strip-empty-tag [true|false]\` - Strip bare \`\`\` wrappers (default=false)
 \`/watch\` - Get command to continue session in terminal and watch for activity
 \`/stop-watching\` - Stop watching terminal session
 \`/ff\` - Sync missed terminal messages and start watching (main channel only)
-\`/fork\` - Get command to fork session to terminal
 \`/resume <id>\` - Resume a terminal session in Slack
 \`/compact\` - Compact session to reduce context size
-\`/clear\` - Clear session history (start fresh)
-\`/wait <sec>\` - Rate limit test (1-300 seconds)`;
+\`/clear\` - Clear session history (start fresh)`;
 
   return {
     handled: true,
@@ -398,6 +387,24 @@ function handleLs(pathArg: string, session: Session): CommandResult {
 }
 
 /**
+ * /cwd - Show current working directory
+ */
+function handleCwd(session: Session | null): CommandResult {
+  if (!session?.workingDir) {
+    return {
+      handled: true,
+      response: 'No working directory set. Use `/cd <path>` or `/resume <session-id>` first.',
+      isError: true,
+    };
+  }
+
+  return {
+    handled: true,
+    response: `Current working directory:\n\`${session.workingDir}\``,
+  };
+}
+
+/**
  * /status - Show session status
  */
 function handleStatus(session: Session): CommandResult {
@@ -415,7 +422,6 @@ function handleStatus(session: Session): CommandResult {
       maxThinkingTokens: session.maxThinkingTokens,
       updateRateSeconds: session.updateRateSeconds,
       messageSize: session.threadCharLimit,
-      stripEmptyTag: session.stripEmptyTag,
       planFilePath: session.planFilePath,
       planPresentationCount: session.planPresentationCount,
     }),
@@ -563,33 +569,6 @@ function handleFastForward(session: Session, threadTs?: string): CommandResult {
 }
 
 /**
- * /fork - Show command to fork session in terminal
- */
-function handleFork(session: Session): CommandResult {
-  if (!session.sessionId) {
-    return {
-      handled: true,
-      response: 'No active session. Start a conversation first.',
-      isError: true,
-    };
-  }
-
-  const command = `claude --resume ${session.sessionId} --fork-session`;
-
-  return {
-    handled: true,
-    blocks: buildTerminalCommandBlocks({
-      title: 'Fork to Terminal',
-      description: 'Run this command to create a new branch from your session:',
-      command,
-      workingDir: session.workingDir,
-      sessionId: session.sessionId,
-      note: 'This creates a new session. The original Slack session remains unchanged.',
-    }),
-  };
-}
-
-/**
  * /resume <session-id> - Resume a terminal session in Slack
  * Auto-syncs working directory from session file and locks path.
  */
@@ -670,28 +649,6 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
     handled: true,
     response,
     sessionUpdate,
-  };
-}
-
-/**
- * /wait <seconds> - Rate limit stress test
- * Updates spinner for X seconds to test Slack API limits
- */
-function handleWait(secondsArg: string): CommandResult {
-  const seconds = parseInt(secondsArg, 10);
-
-  if (isNaN(seconds) || seconds < 1 || seconds > 300) {
-    return {
-      handled: true,
-      response:
-        'Usage: `/wait <seconds>` (1-300)\n\nThis command tests Slack rate limits by updating the spinner every second for X seconds.',
-      isError: true,
-    };
-  }
-
-  return {
-    handled: true,
-    waitTest: { seconds },
   };
 }
 
@@ -905,48 +862,6 @@ function handleMessageSize(args: string, session: Session): CommandResult {
     handled: true,
     response: `Message size limit set to ${value}.`,
     sessionUpdate: { threadCharLimit: value },
-  };
-}
-
-/**
- * /strip-empty-tag [true|false] - Control stripping of bare ``` wrappers
- * - No args: Show current value
- * - true: Strip bare ``` wrappers (Case C logic from stripMarkdownCodeFence)
- * - false: Don't strip bare ``` wrappers (default)
- */
-function handleStripEmptyTag(args: string, session: Session): CommandResult {
-  // No args - show current value
-  if (!args.trim()) {
-    const current = session.stripEmptyTag;
-    if (current === true) {
-      return { handled: true, response: 'Strip empty tag: enabled' };
-    } else {
-      return { handled: true, response: 'Strip empty tag: disabled (default)' };
-    }
-  }
-
-  // Parse boolean value
-  const value = args.trim().toLowerCase();
-  if (value === 'true' || value === '1' || value === 'on' || value === 'yes') {
-    return {
-      handled: true,
-      response: 'Strip empty tag enabled. Bare ``` wrappers will be stripped.',
-      sessionUpdate: { stripEmptyTag: true },
-    };
-  }
-  if (value === 'false' || value === '0' || value === 'off' || value === 'no') {
-    return {
-      handled: true,
-      response: 'Strip empty tag disabled. Bare ``` wrappers will be preserved.',
-      sessionUpdate: { stripEmptyTag: false },
-    };
-  }
-
-  // Invalid value
-  return {
-    handled: true,
-    response: 'Invalid value. Usage: `/strip-empty-tag [true|false]`',
-    isError: true,
   };
 }
 

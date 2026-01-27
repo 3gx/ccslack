@@ -188,34 +188,15 @@ export function formatTimeRemaining(ms: number): string {
 }
 
 /**
- * Options for stripMarkdownCodeFence function.
- */
-export interface StripMarkdownCodeFenceOptions {
-  /**
-   * Whether to strip bare ``` wrappers (Case C).
-   * - false (default): Don't strip bare ``` wrappers
-   * - true: Strip bare ``` wrappers using nested fence analysis
-   */
-  stripEmptyTag?: boolean;
-}
-
-/**
  * Strip markdown code fence wrapper if present.
  *
  * Case A: Explicit ```markdown or ```md tag → Always strip
  * Case B: Code blocks with language tags (```python, etc.) → Never strip
- * Case C: Empty ``` (bare fence) → Depends on stripEmptyTag option
- *         - stripEmptyTag=false (default): Don't strip
- *         - stripEmptyTag=true: Strip using nested fence analysis
+ * Case C: Empty ``` (bare fence) → Don't strip (preserve as-is)
  *
  * @param content - The content to process
- * @param options - Options for stripping behavior
  */
-export function stripMarkdownCodeFence(
-  content: string,
-  options?: StripMarkdownCodeFenceOptions
-): string {
-  const { stripEmptyTag = false } = options ?? {};
+export function stripMarkdownCodeFence(content: string): string {
   // Must start with ``` and end with ``` on its own line
   if (!content.startsWith('```')) return content;
   if (!/\n```\s*$/.test(content)) return content;
@@ -245,40 +226,8 @@ export function stripMarkdownCodeFence(
     return content;
   }
 
-  // CASE C: Empty tag → check stripEmptyTag option
-  // If stripEmptyTag is false (default), don't strip bare ``` wrappers
-  if (!stripEmptyTag) {
-    return content;
-  }
-
-  // stripEmptyTag is true → analyze nested fence structure
-  const afterFirstLine = content.slice(firstNewline + 1);
-
-  // Find all fences at line start (including closing fence)
-  const fenceMatches = [...afterFirstLine.matchAll(/^(```\w*)/gm)];
-
-  // 5.a: Check SECOND fence (first fence in afterFirstLine)
-  if (fenceMatches.length > 0) {
-    const secondFenceTag = fenceMatches[0][1].slice(3); // Remove ``` prefix
-    if (secondFenceTag) {
-      // Second fence has a tag → STRIP
-      return extractInner() ?? content;
-    }
-  }
-
-  // 5.b: Second fence has no tag (or doesn't exist)
-  // Check second-to-last fence (one before the closing fence)
-  if (fenceMatches.length >= 2) {
-    // Last fence is the closing ```, second-to-last is fenceMatches[length-2]
-    const secondToLastFenceTag = fenceMatches[fenceMatches.length - 2][1].slice(3);
-    if (secondToLastFenceTag) {
-      // Second-to-last has a tag → DON'T strip (unusual structure)
-      return content;
-    }
-  }
-
-  // Second-to-last has no tag (or doesn't exist) → STRIP
-  return extractInner() ?? content;
+  // CASE C: Empty tag (bare fence) → don't strip
+  return content;
 }
 
 /**

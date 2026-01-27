@@ -384,9 +384,7 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
     }
 
     // Assistant output with real content: full bot fidelity with .md + .png
-    const strippedMarkdown = stripMarkdownCodeFence(rawText, {
-      stripEmptyTag: session?.stripEmptyTag
-    });
+    const strippedMarkdown = stripMarkdownCodeFence(rawText);
     const slackText = markdownToSlack(strippedMarkdown);
     const prefix = ':outbox_tray: *Terminal Output*\n';
 
@@ -398,8 +396,7 @@ export async function postTerminalMessage(state: WatchState, msg: SessionFileMes
         prefix + slackText,
         state.threadTs,
         state.userId,  // For ephemeral error notifications (may be undefined)
-        charLimit,
-        session?.stripEmptyTag
+        charLimit
         // Note: Fork button now on activity message, not response
       );
 
@@ -492,8 +489,7 @@ async function displayPlanContent(
       ':clipboard: *Plan (from terminal)*\n' + slackFormatted,
       state.threadTs,
       state.userId,
-      charLimit,
-      session?.stripEmptyTag
+      charLimit
     );
   } catch (e) {
     console.error('[TerminalWatcher] Failed to read plan file:', e);

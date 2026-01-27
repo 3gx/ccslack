@@ -59,8 +59,6 @@ export interface Session {
   updateRateSeconds?: number;  // undefined = 3 (default), range 1-10
   // Message size limit configuration
   threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
-  // Strip empty code fence tag configuration
-  stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
   // Persistent plan file path for plan mode (detected from tool usage)
   planFilePath?: string | null;
   // Count of plan presentations in current session (for emoji tracking)
@@ -111,8 +109,6 @@ export interface ThreadSession {
   updateRateSeconds?: number;  // undefined = 3 (default), range 1-10
   // Message size limit configuration (inherited from channel)
   threadCharLimit?: number;  // undefined = 500 (default), range 100-36000
-  // Strip empty code fence tag configuration (inherited from channel)
-  stripEmptyTag?: boolean;  // undefined = false (default), true = strip bare ``` wrappers
   // Persistent plan file path for plan mode (NOT inherited - each thread has its own)
   planFilePath?: string | null;
   // Count of plan presentations in current session (for emoji tracking)
@@ -290,7 +286,6 @@ export async function saveSession(channelId: string, session: Partial<Session>):
       maxThinkingTokens: existing?.maxThinkingTokens,  // Preserve thinking token config
       updateRateSeconds: existing?.updateRateSeconds,  // Preserve update rate config
       threadCharLimit: existing?.threadCharLimit,  // Preserve thread char limit config
-      stripEmptyTag: existing?.stripEmptyTag,  // Preserve strip empty tag config
       planFilePath: existing?.planFilePath,  // Preserve plan file path for plan mode
       threads: existing?.threads,  // Preserve existing threads
       messageMap: existing?.messageMap,  // Preserve message mappings for point-in-time forking
@@ -371,8 +366,6 @@ export async function saveThreadSession(
       maxThinkingTokens: existingThread?.maxThinkingTokens ?? store.channels[channelId].maxThinkingTokens,
       // Inherit thread char limit config from channel
       threadCharLimit: existingThread?.threadCharLimit ?? store.channels[channelId].threadCharLimit,
-      // Inherit strip empty tag config from channel
-      stripEmptyTag: existingThread?.stripEmptyTag ?? store.channels[channelId].stripEmptyTag,
       // NOT inherited - each thread has its own plan file path
       planFilePath: existingThread?.planFilePath,
       ...session,
@@ -442,8 +435,6 @@ export async function getOrCreateThreadSession(
     updateRateSeconds: mainSession?.updateRateSeconds,
     // Inherit thread char limit config from main session
     threadCharLimit: mainSession?.threadCharLimit,
-    // Inherit strip empty tag config from main session
-    stripEmptyTag: mainSession?.stripEmptyTag,
   };
 
   // Save the new thread session

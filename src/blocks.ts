@@ -380,7 +380,6 @@ export interface StatusDisplayParams {
   maxThinkingTokens?: number;  // undefined = default (31,999), 0 = disabled
   updateRateSeconds?: number;  // undefined = 3 (default), range 1-10
   messageSize?: number;        // undefined = 500 (default), range 100-36000
-  stripEmptyTag?: boolean;     // undefined = false (default), true = strip bare ``` wrappers
   planFilePath?: string | null;  // Plan file path for plan mode
   planPresentationCount?: number;  // Count of plan presentations in current session
 }
@@ -394,7 +393,7 @@ const UPDATE_RATE_DEFAULT = 3;
  * Build blocks for /status command response.
  */
 export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
-  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens, updateRateSeconds, messageSize, stripEmptyTag, planFilePath, planPresentationCount } = params;
+  const { sessionId, mode, workingDir, lastActiveAt, pathConfigured, configuredBy, configuredAt, lastUsage, maxThinkingTokens, updateRateSeconds, messageSize, planFilePath, planPresentationCount } = params;
 
   // SDK mode emojis for display
   const modeEmoji: Record<PermissionMode, string> = {
@@ -453,13 +452,6 @@ export function buildStatusDisplayBlocks(params: StatusDisplayParams): Block[] {
     statusLines.push(`*Message Size:* ${MESSAGE_SIZE_DEFAULT} (default)`);
   } else {
     statusLines.push(`*Message Size:* ${messageSize.toLocaleString()}`);
-  }
-
-  // Add strip empty tag info
-  if (stripEmptyTag === true) {
-    statusLines.push(`*Strip Empty Tag:* enabled`);
-  } else {
-    statusLines.push(`*Strip Empty Tag:* disabled (default)`);
   }
 
   if (pathConfigured) {
@@ -599,53 +591,6 @@ export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
       }],
     },
   ];
-}
-
-export interface TerminalCommandParams {
-  title: string;
-  description: string;
-  command: string;
-  workingDir: string;
-  sessionId: string;
-  note?: string;
-}
-
-/**
- * Build blocks for /continue and /fork command responses.
- */
-export function buildTerminalCommandBlocks(params: TerminalCommandParams): Block[] {
-  const { title, description, command, workingDir, sessionId, note } = params;
-
-  const blocks: Block[] = [
-    {
-      type: "header",
-      text: { type: "plain_text", text: title },
-    },
-    {
-      type: "section",
-      text: { type: "mrkdwn", text: description },
-    },
-    {
-      type: "section",
-      text: { type: "mrkdwn", text: "```" + command + "```" },
-    },
-    {
-      type: "context",
-      elements: [{
-        type: "mrkdwn",
-        text: `:file_folder: Working directory: \`${workingDir}\`\n:key: Session: \`${sessionId}\``,
-      }],
-    },
-  ];
-
-  if (note) {
-    blocks.push({
-      type: "context",
-      elements: [{ type: "mrkdwn", text: `:bulb: ${note}` }],
-    });
-  }
-
-  return blocks;
 }
 
 /**

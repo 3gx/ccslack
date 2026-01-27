@@ -61,7 +61,6 @@ describe('commands', () => {
       expect(result.response).toContain('/mode');
       expect(result.response).toContain('/watch');
       expect(result.response).toContain('/stop-watching');
-      expect(result.response).toContain('/fork');
       expect(result.response).toContain('/resume');
     });
   });
@@ -401,44 +400,6 @@ describe('commands', () => {
 
       expect(result.response).toContain('/stop-watching');
       expect(result.response).toContain('Stop watching terminal session');
-    });
-  });
-
-  describe('/fork', () => {
-    it('should return error when no session ID', () => {
-      const sessionWithoutId: Session = { ...mockSession, sessionId: null };
-      const result = parseCommand('/fork', sessionWithoutId);
-
-      expect(result.handled).toBe(true);
-      expect(result.response).toContain('No active session');
-    });
-
-    it('should show terminal command blocks with fork flag', () => {
-      const result = parseCommand('/fork', mockSession);
-
-      expect(result.handled).toBe(true);
-      expect(result.blocks).toBeDefined();
-
-      // Check header
-      const headerBlock = result.blocks![0];
-      expect(headerBlock.text?.text).toBe('Fork to Terminal');
-    });
-
-    it('should include --fork-session flag in command', () => {
-      const result = parseCommand('/fork', mockSession);
-      const commandBlock = result.blocks!.find(b => b.text?.text?.includes('claude --resume'));
-
-      expect(commandBlock).toBeDefined();
-      expect(commandBlock?.text?.text).toContain('--fork-session');
-    });
-
-    it('should include note about new session', () => {
-      const result = parseCommand('/fork', mockSession);
-      const noteBlock = result.blocks!.find(b =>
-        b.type === 'context' && b.elements?.[0]?.text?.includes('new session')
-      );
-
-      expect(noteBlock).toBeDefined();
     });
   });
 
@@ -976,84 +937,26 @@ describe('commands', () => {
     });
   });
 
-  describe('/strip-empty-tag', () => {
-    it('should show default value (disabled) when not set', () => {
-      const result = parseCommand('/strip-empty-tag', mockSession);
+  describe('/cwd', () => {
+    it('should return error when no working directory', () => {
+      const sessionWithoutDir: Session = { ...mockSession, workingDir: '' };
+      const result = parseCommand('/cwd', sessionWithoutDir);
       expect(result.handled).toBe(true);
-      expect(result.response).toContain('disabled');
-      expect(result.response).toContain('default');
+      expect(result.isError).toBe(true);
+      expect(result.response).toContain('No working directory set');
     });
 
-    it('should show enabled when set to true', () => {
-      const sessionWithStrip: Session = { ...mockSession, stripEmptyTag: true };
-      const result = parseCommand('/strip-empty-tag', sessionWithStrip);
+    it('should return current working directory', () => {
+      const result = parseCommand('/cwd', mockSession);
       expect(result.handled).toBe(true);
-      expect(result.response).toContain('enabled');
-      expect(result.response).not.toContain('default');
-    });
-
-    it('should accept true value', () => {
-      const result = parseCommand('/strip-empty-tag true', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.sessionUpdate?.stripEmptyTag).toBe(true);
-      expect(result.response).toContain('enabled');
-    });
-
-    it('should accept false value', () => {
-      const sessionWithStrip: Session = { ...mockSession, stripEmptyTag: true };
-      const result = parseCommand('/strip-empty-tag false', sessionWithStrip);
-      expect(result.handled).toBe(true);
-      expect(result.sessionUpdate?.stripEmptyTag).toBe(false);
-      expect(result.response).toContain('disabled');
-    });
-
-    it('should accept 1 as true', () => {
-      const result = parseCommand('/strip-empty-tag 1', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.sessionUpdate?.stripEmptyTag).toBe(true);
-    });
-
-    it('should accept 0 as false', () => {
-      const result = parseCommand('/strip-empty-tag 0', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.sessionUpdate?.stripEmptyTag).toBe(false);
-    });
-
-    it('should accept on as true', () => {
-      const result = parseCommand('/strip-empty-tag on', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.sessionUpdate?.stripEmptyTag).toBe(true);
-    });
-
-    it('should accept off as false', () => {
-      const result = parseCommand('/strip-empty-tag off', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.sessionUpdate?.stripEmptyTag).toBe(false);
-    });
-
-    it('should accept yes as true', () => {
-      const result = parseCommand('/strip-empty-tag yes', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.sessionUpdate?.stripEmptyTag).toBe(true);
-    });
-
-    it('should accept no as false', () => {
-      const result = parseCommand('/strip-empty-tag no', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.sessionUpdate?.stripEmptyTag).toBe(false);
-    });
-
-    it('should reject invalid input', () => {
-      const result = parseCommand('/strip-empty-tag invalid', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.response).toContain('Invalid value');
-      expect(result.sessionUpdate).toBeUndefined();
+      expect(result.isError).toBeUndefined();
+      expect(result.response).toContain('Current working directory');
+      expect(result.response).toContain(mockSession.workingDir);
     });
 
     it('should appear in /help output', () => {
       const result = parseCommand('/help', mockSession);
-      expect(result.response).toContain('/strip-empty-tag');
-      expect(result.response).toContain('true|false');
+      expect(result.response).toContain('/cwd');
     });
   });
 
@@ -1302,19 +1205,6 @@ describe('commands', () => {
       expect(result.handled).toBe(true);
       expect(result.isError).toBe(true);
       expect(result.response).toContain('Invalid session ID');
-    });
-
-    it('should return isError: true for invalid /strip-empty-tag value', () => {
-      const result = parseCommand('/strip-empty-tag maybe', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.isError).toBe(true);
-      expect(result.response).toContain('Invalid value');
-    });
-
-    it('should NOT return isError for valid /strip-empty-tag true', () => {
-      const result = parseCommand('/strip-empty-tag true', mockSession);
-      expect(result.handled).toBe(true);
-      expect(result.isError).toBeUndefined();
     });
   });
 });

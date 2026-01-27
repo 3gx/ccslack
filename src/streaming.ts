@@ -438,13 +438,12 @@ export async function uploadMarkdownWithResponse(
   slackFormattedResponse: string,
   threadTs?: string,
   userId?: string,
-  threadCharLimit?: number,
-  stripEmptyTag?: boolean
+  threadCharLimit?: number
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[] } | null> {
   const limit = threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
 
   // Strip markdown code fence wrapper if present (e.g., ```markdown ... ```)
-  const cleanMarkdown = stripMarkdownCodeFence(markdown, { stripEmptyTag });
+  const cleanMarkdown = stripMarkdownCodeFence(markdown);
 
   try {
     // Step 1: Post formatted text (truncated if needed)
@@ -525,13 +524,12 @@ export async function uploadMarkdownAndPngWithResponse(
   threadTs?: string,
   userId?: string,
   threadCharLimit?: number,
-  stripEmptyTag?: boolean,
   mappingInfo?: MappingInfo
 ): Promise<{ ts?: string; postedMessages?: { ts: string }[]; uploadSucceeded?: boolean } | null> {
   const limit = threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
 
   // Strip markdown code fence wrapper if present (e.g., ```markdown ... ```)
-  const cleanMarkdown = stripMarkdownCodeFence(markdown, { stripEmptyTag });
+  const cleanMarkdown = stripMarkdownCodeFence(markdown);
 
   try {
     // Step 1: Prepare text (truncated if needed)

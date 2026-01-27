@@ -29,10 +29,9 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 │                                          ↓                                   │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │  Command Parser (commands.ts)                                        │   │
-│  │  /status, /mode, /model, /cd, /ls, /set-current-path, /context,      │   │
-│  │  /watch, /stop-watching, /fork, /resume, /clear, /compact,           │   │
-│  │  /max-thinking-tokens, /update-rate, /message-size, /strip-empty-tag,│   │
-│  │  /show-plan, /wait, /help                                            │   │
+│  │  /status, /mode, /model, /cd, /cwd, /ls, /set-current-path, /context,│   │
+│  │  /watch, /stop-watching, /ff, /resume, /clear, /compact,             │   │
+│  │  /max-thinking-tokens, /update-rate, /message-size, /show-plan, /help│   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │                                          ↓                                   │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
@@ -118,7 +117,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 
 ### Session Manager (`src/session-manager.ts`)
 - Persists sessions to `sessions.json`
-- **Session interface**: `sessionId`, `previousSessionIds`, `workingDir`, `mode`, `model`, `pathConfigured`, `configuredPath`, `configuredBy`, `configuredAt`, `lastUsage`, `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `stripEmptyTag`, `planFilePath`, `syncedMessageUuids`, `slackOriginatedUserUuids`
+- **Session interface**: `sessionId`, `previousSessionIds`, `workingDir`, `mode`, `model`, `pathConfigured`, `configuredPath`, `configuredBy`, `configuredAt`, `lastUsage`, `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `planFilePath`, `syncedMessageUuids`, `slackOriginatedUserUuids`
 - **LastUsage interface**: `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `contextWindow`, `model`, `maxOutputTokens`
 - **ThreadSession interface**: Inherits from Session, adds `forkedFrom`, `forkedFromThreadTs`, `resumeSessionAtMessageId`
 - **Message mapping**: `SlackMessageMapping` links Slack timestamps to SDK message IDs and session IDs
@@ -147,7 +146,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 
 ### Commands (`src/commands.ts`)
 - Parses slash commands from user messages
-- Implements: `/help`, `/status`, `/context`, `/mode`, `/model`, `/cd`, `/ls`, `/set-current-path`, `/watch`, `/stop-watching`, `/fork`, `/ff`, `/resume`, `/clear`, `/compact`, `/max-thinking-tokens`, `/update-rate`, `/message-size`, `/strip-empty-tag`, `/show-plan`, `/wait`
+- Implements: `/help`, `/status`, `/context`, `/mode`, `/model`, `/cd`, `/cwd`, `/ls`, `/set-current-path`, `/watch`, `/stop-watching`, `/ff`, `/resume`, `/clear`, `/compact`, `/max-thinking-tokens`, `/update-rate`, `/message-size`, `/show-plan`
 
 ### Error Handling (`src/errors.ts`)
 - `SlackBotError` class with typed error codes
@@ -266,7 +265,6 @@ Sessions are stored in `sessions.json`:
       "maxThinkingTokens": 31999,
       "updateRateSeconds": 3,
       "threadCharLimit": 500,
-      "stripEmptyTag": false,
       "planFilePath": null,
       "lastUsage": {
         "inputTokens": 5000,
@@ -308,7 +306,6 @@ Sessions are stored in `sessions.json`:
           "maxThinkingTokens": 31999,
           "updateRateSeconds": 3,
           "threadCharLimit": 500,
-          "stripEmptyTag": false,
           "planFilePath": null
         }
       },
@@ -329,7 +326,6 @@ Note: Activity logs are stored in memory during processing only and are NOT pers
 - **activityLogs**: In-memory only during processing (not persisted to sessions.json)
 - **pathConfigured**: Immutable after first set - prevents accidental working directory changes
 - **threadCharLimit**: Message size limit before response truncation (default 500)
-- **stripEmptyTag**: Whether to strip bare ``` wrappers (default false)
 - **planFilePath**: Persistent plan file path for plan mode (detected from tool usage)
 
 ## Real-Time Updates Architecture
@@ -549,11 +545,11 @@ make clean              # Remove dist/ and coverage/
 | `@claude /mode [plan\|bypass\|ask\|edit]` | Show mode picker or switch directly |
 | `@claude /model` | Show model selection buttons |
 | `@claude /cd <dir>` | Change working directory (before lock) |
+| `@claude /cwd` | Show current working directory |
 | `@claude /ls [path]` | List files in directory |
 | `@claude /set-current-path` | Lock current directory (one-time) |
 | `@claude /watch` | Start watching session for terminal updates |
 | `@claude /stop-watching` | Stop watching terminal session |
-| `@claude /fork` | Get terminal fork command |
 | `@claude /ff` | Fast-forward sync missed terminal messages (main channel only) |
 | `@claude /resume <id>` | Resume a terminal session in Slack (UUID format) |
 | `@claude /clear` | Clear conversation history |
@@ -561,9 +557,7 @@ make clean              # Remove dist/ and coverage/
 | `@claude /max-thinking-tokens [tokens]` | Set extended thinking budget (0=disable, 1024-128000, default=31999) |
 | `@claude /update-rate [1-10]` | Set status update interval (default 3s) |
 | `@claude /message-size [100-36000]` | Set message size limit (default 500) |
-| `@claude /strip-empty-tag [true\|false]` | Strip bare ``` wrappers (default false) |
 | `@claude /show-plan` | Display current plan file content in thread |
-| `@claude /wait <1-300>` | Rate limit stress test |
 
 ## Session Cleanup
 

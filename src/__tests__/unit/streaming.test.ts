@@ -645,8 +645,7 @@ describe('streaming', () => {
         'Response text',
         'thread123',
         'U456',
-        500,
-        false
+        500
       );
 
       expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
@@ -674,8 +673,7 @@ describe('streaming', () => {
         'Response text',
         'thread123',
         'U456',
-        500,
-        false
+        500
       );
 
       expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
@@ -711,7 +709,6 @@ describe('streaming', () => {
         'thread123',
         'U456',
         500,
-        false,
         { sdkMessageId: 'msg_uuid_abc123', sessionId: 'session_xyz789' }  // mappingInfo
       );
 
@@ -738,7 +735,6 @@ describe('streaming', () => {
         'thread123',
         'U456',
         500,
-        false,
         undefined  // No mappingInfo
       );
 
@@ -761,7 +757,6 @@ describe('streaming', () => {
         'thread123',
         'U456',
         500,
-        false,
         { sdkMessageId: 'msg_uuid_abc123', sessionId: 'session_xyz789' }  // mappingInfo
       );
 

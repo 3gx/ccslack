@@ -517,7 +517,6 @@ function getLiveSessionConfig(channelId: string, threadTs?: string) {
   return {
     updateRateSeconds: session?.updateRateSeconds ?? UPDATE_RATE_DEFAULT,
     threadCharLimit: session?.threadCharLimit ?? MESSAGE_SIZE_DEFAULT,
-    stripEmptyTag: session?.stripEmptyTag ?? false,
   };
 }
 
@@ -554,145 +553,6 @@ async function checkBusyAndRespond(
     return true; // Was busy
   }
   return false; // Not busy
-}
-
-/**
- * Rate limit stress test - updates spinner for X seconds
- * Tests Slack API rate limits by making continuous updates
- */
-async function runWaitTest(
-  client: any,
-  channelId: string,
-  threadTs: string | undefined,
-  seconds: number,
-  mode: PermissionMode,
-  originalTs: string | undefined
-): Promise<void> {
-  const startTime = Date.now();
-  let spinnerIndex = 0;
-  let rateLimitHits = 0;
-  let updateCount = 0;
-
-  // Remove eyes reaction first
-  if (originalTs) {
-    try {
-      await client.reactions.remove({
-        channel: channelId,
-        timestamp: originalTs,
-        name: 'eyes',
-      });
-    } catch {
-      // Ignore
-    }
-  }
-
-  // Post initial status panel
-  const statusMsg = (await withSlackRetry(() =>
-    client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      blocks: buildStatusPanelBlocks({
-        status: 'thinking',
-        mode,
-        toolsCompleted: 0,
-        elapsedMs: 0,
-        conversationKey: `wait_test_${channelId}`,
-        spinner: SPINNER_FRAMES[0],
-      }),
-      text: `Rate limit test: ${seconds}s`,
-    })
-  )) as { ts?: string };
-
-  const statusMsgTs = statusMsg.ts!;
-  console.log(`[WaitTest] Started ${seconds}s test, status msg: ${statusMsgTs}`);
-
-  // Create a promise that resolves when the test is complete
-  await new Promise<void>((resolve) => {
-    const updateInterval = setInterval(async () => {
-      const elapsed = Date.now() - startTime;
-      const elapsedSec = elapsed / 1000;
-
-      // Check if done
-      if (elapsedSec >= seconds) {
-        clearInterval(updateInterval);
-
-        // Final update - completion
-        try {
-          await withSlackRetry(() =>
-            client.chat.update({
-              channel: channelId,
-              ts: statusMsgTs,
-              blocks: buildStatusPanelBlocks({
-                status: 'complete',
-                mode,
-                toolsCompleted: updateCount,
-                elapsedMs: elapsed,
-                conversationKey: `wait_test_${channelId}`,
-              }),
-              text: `Rate limit test complete`,
-            })
-          );
-
-          // Post summary
-          await client.chat.postMessage({
-            channel: channelId,
-            thread_ts: threadTs,
-            text:
-              `:white_check_mark: *Wait test complete*\n` +
-              `Duration: ${seconds}s\n` +
-              `Updates attempted: ${updateCount}\n` +
-              `Rate limit hits: ${rateLimitHits}`,
-          });
-        } catch (err) {
-          console.error('[WaitTest] Final update error:', err);
-        }
-
-        console.log(
-          `[WaitTest] Complete - ${updateCount} updates, ${rateLimitHits} rate limits`
-        );
-        resolve();
-        return;
-      }
-
-      // Update spinner
-      spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
-      const spinner = SPINNER_FRAMES[spinnerIndex];
-      updateCount++;
-
-      try {
-        await withSlackRetry(() =>
-          client.chat.update({
-            channel: channelId,
-            ts: statusMsgTs,
-            blocks: buildStatusPanelBlocks({
-              status: 'thinking',
-              mode,
-              toolsCompleted: updateCount,
-              elapsedMs: elapsed,
-              conversationKey: `wait_test_${channelId}`,
-              spinner,
-            }),
-            text: `Rate limit test: ${elapsedSec.toFixed(1)}s / ${seconds}s`,
-          })
-        );
-      } catch (err: unknown) {
-        // Log rate limit specifically
-        if (
-          err &&
-          typeof err === 'object' &&
-          'code' in err &&
-          err.code === 'slack_webapi_platform_error'
-        ) {
-          rateLimitHits++;
-          console.log(
-            `[WaitTest] Rate limit hit #${rateLimitHits} at ${elapsedSec.toFixed(1)}s`
-          );
-        } else {
-          console.error('[WaitTest] Update error:', err);
-        }
-      }
-    }, STATUS_UPDATE_INTERVAL);
-  });
 }
 
 /**
@@ -1631,7 +1491,6 @@ async function createForkFromMessage(params: {
     maxThinkingTokens: mainSession?.maxThinkingTokens,
     updateRateSeconds: mainSession?.updateRateSeconds,
     threadCharLimit: mainSession?.threadCharLimit,
-    stripEmptyTag: mainSession?.stripEmptyTag,
     planFilePath: null,  // Don't inherit plan from parent
   });
 
@@ -1797,7 +1656,6 @@ async function createForkToChannel(params: {
     maxThinkingTokens: mainSession?.maxThinkingTokens,
     updateRateSeconds: mainSession?.updateRateSeconds,
     threadCharLimit: mainSession?.threadCharLimit,
-    stripEmptyTag: mainSession?.stripEmptyTag,
     // Fork tracking (for restoring Fork here button if this channel is deleted)
     forkedFromChannelId: sourceChannelId,
     forkedFromMessageTs: sourceMessageTs,
@@ -2140,8 +1998,7 @@ async function handleAskUserQuestion(
       slackResponse,
       threadTs,
       undefined,  // userId
-      liveConfig.threadCharLimit,
-      liveConfig.stripEmptyTag
+      liveConfig.threadCharLimit
       // Note: Fork button now on activity message, not response
     );
 
@@ -2469,8 +2326,7 @@ async function showPlanApprovalUI(params: {
         slackFormatted,
         threadTs,
         userId,
-        liveConfig.threadCharLimit,
-        liveConfig.stripEmptyTag
+        liveConfig.threadCharLimit
         // Note: Fork button now on activity message, not response
       );
     } catch (e) {
@@ -2750,19 +2606,6 @@ async function handleMessage(params: {
   // Check for slash commands (e.g., /status, /mode, /continue)
   const commandResult = parseCommand(textToProcess, session, threadTs);
 
-  // Handle /wait command (rate limit stress test)
-  if (commandResult.waitTest) {
-    await runWaitTest(
-      client,
-      channelId,
-      threadTs,
-      commandResult.waitTest.seconds,
-      session.mode,
-      originalTs
-    );
-    return;
-  }
-
   // Handle /model command (async model fetch)
   if (commandResult.showModelSelection) {
     const models = await getAvailableModels();
@@ -3012,8 +2855,7 @@ async function handleMessage(params: {
           `${headerText}\n\n${slackFormatted}`,
           effectiveThreadTs,
           userId,
-          liveConfig.threadCharLimit,
-          liveConfig.stripEmptyTag
+          liveConfig.threadCharLimit
         );
         // Add :page_with_curl: emoji to indicate plan shown (matches plan mode behavior)
         if (originalTs) {
@@ -3357,9 +3199,7 @@ async function handleMessage(params: {
         console.log(`Posting current segment response (${currentResponse.length} chars) before tool approval`);
 
         const liveConfig = getLiveSessionConfig(channelId, threadTs);
-        const strippedResponse = stripMarkdownCodeFence(currentResponse, {
-          stripEmptyTag: liveConfig.stripEmptyTag,
-        });
+        const strippedResponse = stripMarkdownCodeFence(currentResponse);
         const slackResponse = markdownToSlack(strippedResponse);
 
         await uploadMarkdownAndPngWithResponse(
@@ -3369,8 +3209,7 @@ async function handleMessage(params: {
           slackResponse,
           effectiveThreadTs,
           undefined,  // userId
-          liveConfig.threadCharLimit,
-          liveConfig.stripEmptyTag
+          liveConfig.threadCharLimit
           // Note: Fork button now on activity message, not response
         );
 
@@ -3752,9 +3591,7 @@ async function handleMessage(params: {
       // skipPosting: skip main channel post, but ALWAYS post to activity thread
       if (currentResponse.trim() && !isAborted(conversationKey)) {
         const liveConfig = getLiveSessionConfig(channelId, threadTs);
-        const strippedResponse = stripMarkdownCodeFence(currentResponse, {
-          stripEmptyTag: liveConfig.stripEmptyTag,
-        });
+        const strippedResponse = stripMarkdownCodeFence(currentResponse);
 
         // 1. Main channel post - ONLY when NOT skipPosting
         if (!skipPosting) {
@@ -3778,7 +3615,6 @@ async function handleMessage(params: {
               effectiveThreadTs,
               userId,
               liveConfig.threadCharLimit,
-              liveConfig.stripEmptyTag,
               mappingInfo  // immediate mapping save
               // Note: Fork button now on activity message, not response
             );

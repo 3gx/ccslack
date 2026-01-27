@@ -8,7 +8,6 @@ import {
   buildContextDisplayBlocks,
   computeAutoCompactThreshold,
   DEFAULT_CONTEXT_WINDOW,
-  buildTerminalCommandBlocks,
   buildModeSelectionBlocks,
   buildModelSelectionBlocks,
   buildModelDeprecatedBlocks,
@@ -628,48 +627,6 @@ describe('blocks', () => {
   describe('DEFAULT_CONTEXT_WINDOW', () => {
     it('should be 200000 (all current Claude models)', () => {
       expect(DEFAULT_CONTEXT_WINDOW).toBe(200000);
-    });
-  });
-
-  describe('buildTerminalCommandBlocks', () => {
-    it('should show command in code block', () => {
-      const blocks = buildTerminalCommandBlocks({
-        title: 'Continue in Terminal',
-        description: 'Run this command:',
-        command: 'claude --resume abc-123',
-        workingDir: '/test',
-        sessionId: 'abc-123',
-      });
-
-      expect(blocks.length).toBeGreaterThanOrEqual(3);
-      expect(blocks[0].type).toBe('header');
-      expect(blocks[2].text?.text).toContain('claude --resume abc-123');
-    });
-
-    it('should include note when provided', () => {
-      const blocks = buildTerminalCommandBlocks({
-        title: 'Fork to Terminal',
-        description: 'Run this command:',
-        command: 'claude --resume abc --fork',
-        workingDir: '/test',
-        sessionId: 'abc',
-        note: 'Creates a new session branch',
-      });
-
-      expect(blocks.length).toBe(5);
-      expect(blocks[4].elements?.[0].text).toContain('Creates a new session branch');
-    });
-
-    it('should show working directory in context', () => {
-      const blocks = buildTerminalCommandBlocks({
-        title: 'Continue',
-        description: 'Run this:',
-        command: 'claude --resume xyz',
-        workingDir: '/home/user/project',
-        sessionId: 'xyz',
-      });
-
-      expect(blocks[3].elements?.[0].text).toContain('/home/user/project');
     });
   });
 

@@ -72,7 +72,7 @@ src/
 - "Fork here" button creates new channel with point-in-time forked session
 - Session includes: `sessionId`, `workingDir`, `mode`, `model`, timestamps
 - Channel sessions include `messageMap` for Slack ts → SDK message ID mapping
-- Session configuration: `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `stripEmptyTag`, `lastUsage`, `planFilePath`
+- Session configuration: `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `lastUsage`, `planFilePath`
 - `lastUsage` cleared on `/clear` to show fresh state in `/status` and `/context`
 
 ### Session Cleanup
@@ -172,12 +172,6 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 - Set via `/message-size <chars>` command
 - Shown in `/status` output
 
-### Strip Empty Tag Configuration
-- `stripEmptyTag` controls stripping of bare ``` wrappers
-- Values: `undefined` or `false` = preserve (default), `true` = strip
-- Set via `/strip-empty-tag [true|false]` command
-- Shown in `/status` output
-
 ### Activity Log and Generating Entries
 - Real-time activity tracking via `ActivityEntry` type
 - Entry types: `starting`, `thinking`, `tool_start`, `tool_complete`, `error`, `generating`, `aborted`, `mode_changed`
@@ -195,8 +189,7 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 ### Terminal Integration
 - `/watch` starts watching a session for terminal updates
 - `/stop-watching` stops watching the terminal session
-- `/fork` provides terminal command to fork session
-- `/ff` (fast-forward) command and then `/watch`
+- `/ff` (fast-forward) command syncs missed messages and starts watching
 - Terminal watcher polls session JSONL files and posts new messages to Slack
 
 ## Common Issues
@@ -232,17 +225,15 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 | `/max-thinking-tokens` | `[n]` | Set thinking budget (0=disable, 1024-128000, default=31999) |
 | `/update-rate` | `[n]` | Set status update interval (1-10 seconds, default=3) |
 | `/message-size` | `[n]` | Set message size limit (100-36000, default=500) |
-| `/strip-empty-tag` | `[true\|false]` | Strip bare ``` wrappers (default=false) |
 | `/ls` | `[path]` | List files in directory |
 | `/cd` | `[path]` | Change directory (disabled after path locked) |
+| `/cwd` | - | Show current working directory |
 | `/set-current-path` | - | Lock current directory (one-time, cannot be changed) |
 | `/watch` | - | Start watching session for terminal updates (main channel only) |
 | `/stop-watching` | - | Stop watching terminal session |
-| `/fork` | - | Get terminal command to fork session |
 | `/ff` | - | Fast-forward sync missed terminal messages (main channel only) |
 | `/resume` | `<session-id>` | Resume a terminal session in Slack (UUID format required) |
 | `/compact` | - | Compact session to reduce context size |
 | `/clear` | - | Clear session history and start fresh |
 | `/show-plan` | - | Display current plan file content in thread |
-| `/wait` | `<seconds>` | Rate limit stress test (1-300 seconds) |
 

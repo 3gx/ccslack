@@ -61,8 +61,6 @@ export interface SyncOptions {
   postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage, isLastMessage?: boolean) => Promise<boolean>;
   /** Character limit for text responses */
   charLimit?: number;
-  /** Whether to strip empty code fence wrappers */
-  stripEmptyTag?: boolean;
   /** Activity message ts per turn (for update-in-place). Key: userInput UUID, Value: Slack ts */
   activityMessages?: Map<string, string>;
   /** Callback when plan file path detected */
@@ -174,7 +172,6 @@ export async function syncMessagesFromOffset(
     pacingDelayMs = 0,
     postTextMessage,
     charLimit = MESSAGE_SIZE_DEFAULT,
-    stripEmptyTag = false,
     activityMessages,
     onPlanFileDetected,
     onExitPlanMode,
@@ -288,7 +285,7 @@ export async function syncMessagesFromOffset(
       turnActivity,
       alreadyPosted,
       messageMap,
-      { charLimit, stripEmptyTag, infiniteRetry, postTextMessage, activityMessages, onPlanFileDetected, onExitPlanMode },
+      { charLimit, infiniteRetry, postTextMessage, activityMessages, onPlanFileDetected, onExitPlanMode },
       isFinalTurn
     );
 
@@ -391,7 +388,6 @@ async function postTurn(
   _messageMap: Record<string, SlackMessageMapping>,  // Kept for signature compatibility
   options: {
     charLimit: number;
-    stripEmptyTag?: boolean;
     infiniteRetry?: boolean;
     postTextMessage?: (state: MessageSyncState, msg: SessionFileMessage, isLastMessage?: boolean) => Promise<boolean>;
     activityMessages?: Map<string, string>;
@@ -401,7 +397,7 @@ async function postTurn(
   isFinalTurn: boolean = false
 ): Promise<{ success: boolean; postedUuids: string[] }> {
   const postedUuids: string[] = [];
-  const { charLimit, stripEmptyTag, infiniteRetry = false, postTextMessage, activityMessages, onPlanFileDetected, onExitPlanMode } = options;
+  const { charLimit, infiniteRetry = false, postTextMessage, activityMessages, onPlanFileDetected, onExitPlanMode } = options;
   const turnKey = turn.userInput.uuid;
   const turnStartTime = new Date(turn.userInput.timestamp).getTime();
 
@@ -538,7 +534,7 @@ async function postTurn(
           textSuccess = await postTextMessage(state, segment.textOutput, isLastMessage);
         }
       } else {
-        const textResult = await postTextResponse(state, segment.textOutput, { charLimit, stripEmptyTag }, infiniteRetry);
+        const textResult = await postTextResponse(state, segment.textOutput, { charLimit }, infiniteRetry);
         textSuccess = !!textResult?.ts;
 
         if (textResult?.ts) {
@@ -866,7 +862,7 @@ async function updateActivitySummary(
 async function postTextResponse(
   state: MessageSyncState,
   msg: SessionFileMessage,
-  options: { charLimit: number; stripEmptyTag?: boolean },
+  options: { charLimit: number },
   infiniteRetry: boolean
 ): Promise<{ ts: string } | null> {
   const textContent = extractTextContent(msg);
