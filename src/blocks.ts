@@ -2294,6 +2294,11 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
       case 'context_cleared':
         lines.push('────── Context Cleared ──────');
         break;
+      case 'session_changed':
+        if (entry.previousSessionId) {
+          lines.push(`:bookmark: Previous session: \`${entry.previousSessionId}\``);
+        }
+        break;
       case 'aborted':
         lines.push(':octagonal_sign: *Aborted by user*');
         break;

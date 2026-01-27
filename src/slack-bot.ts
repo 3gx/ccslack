@@ -3218,6 +3218,16 @@ async function handleMessage(params: {
     compactIsManual: false,  // auto-compact
   };
 
+  // Sync special entries from existingActivityLog to activityBatch for thread posting
+  // These entries (session_changed, context_cleared, mode_changed) need to appear in thread
+  if (existingActivityLog) {
+    for (const entry of existingActivityLog) {
+      if (entry.type === 'session_changed' || entry.type === 'context_cleared' || entry.type === 'mode_changed') {
+        processingState.activityBatch.push(entry);
+      }
+    }
+  }
+
   // Add mode_changed entry if inline mode was used
   if (inlineModeChanged) {
     const modeEntry: ActivityEntry = {

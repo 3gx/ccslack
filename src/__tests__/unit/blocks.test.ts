@@ -2309,6 +2309,47 @@ describe('blocks', () => {
       expect(modeChangedIndex).toBeGreaterThan(-1);
       expect(contextClearedIndex).toBeLessThan(modeChangedIndex);
     });
+
+    it('should format session_changed entry with bookmark emoji and session ID', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'session_changed', previousSessionId: '550e8400-e29b-41d4-a716-446655440000' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(':bookmark:');
+      expect(text).toContain('Previous session:');
+      expect(text).toContain('`550e8400-e29b-41d4-a716-446655440000`');
+    });
+
+    it('should show session_changed before context_cleared and mode_changed in plan approval flow', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'session_changed', previousSessionId: 'old-session-uuid' },
+        { timestamp: Date.now(), type: 'context_cleared' },
+        { timestamp: Date.now(), type: 'mode_changed', mode: 'bypassPermissions' },
+      ];
+      const text = buildActivityLogText(entries, true);
+      const lines = text.split('\n').filter(l => l.trim());
+      // Find indices
+      const sessionChangedIndex = lines.findIndex(l => l.includes('Previous session'));
+      const contextClearedIndex = lines.findIndex(l => l.includes('Context Cleared'));
+      const modeChangedIndex = lines.findIndex(l => l.includes('Mode changed'));
+      expect(sessionChangedIndex).toBeGreaterThan(-1);
+      expect(contextClearedIndex).toBeGreaterThan(-1);
+      expect(modeChangedIndex).toBeGreaterThan(-1);
+      expect(sessionChangedIndex).toBeLessThan(contextClearedIndex);
+      expect(contextClearedIndex).toBeLessThan(modeChangedIndex);
+    });
+
+    it('should not show session_changed entry when previousSessionId is missing', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'session_changed' }, // No previousSessionId
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).not.toContain(':bookmark:');
+      expect(text).not.toContain('Previous session');
+    });
   });
 
   describe('buildLiveActivityBlocks', () => {
@@ -3691,6 +3732,45 @@ describe('blocks', () => {
       expect(text).toContain('Analyzing request');
       expect(text).toContain('Mode changed');
       expect(text).toContain('Read');
+    });
+
+    it('should format session_changed entry with bookmark emoji and resume hint', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'session_changed', previousSessionId: '550e8400-e29b-41d4-a716-446655440000' },
+      ];
+      const text = formatThreadActivityBatch(entries);
+      expect(text).toContain(':bookmark:');
+      expect(text).toContain('*Previous session:*');
+      expect(text).toContain('`550e8400-e29b-41d4-a716-446655440000`');
+      expect(text).toContain('/resume');
+    });
+
+    it('should show session_changed before context_cleared and mode_changed in thread batch', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: 1000, type: 'session_changed', previousSessionId: 'old-session-uuid' },
+        { timestamp: 2000, type: 'context_cleared' },
+        { timestamp: 3000, type: 'mode_changed', mode: 'bypassPermissions' },
+      ];
+      const text = formatThreadActivityBatch(entries);
+      const lines = text.split('\n').filter(l => l.trim());
+      // Find indices
+      const sessionChangedIndex = lines.findIndex(l => l.includes('Previous session'));
+      const contextClearedIndex = lines.findIndex(l => l.includes('Context Cleared'));
+      const modeChangedIndex = lines.findIndex(l => l.includes('Mode changed'));
+      expect(sessionChangedIndex).toBeGreaterThan(-1);
+      expect(contextClearedIndex).toBeGreaterThan(-1);
+      expect(modeChangedIndex).toBeGreaterThan(-1);
+      expect(sessionChangedIndex).toBeLessThan(contextClearedIndex);
+      expect(contextClearedIndex).toBeLessThan(modeChangedIndex);
+    });
+
+    it('should not show session_changed entry when previousSessionId is missing', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'session_changed' }, // No previousSessionId
+      ];
+      const text = formatThreadActivityBatch(entries);
+      expect(text).not.toContain(':bookmark:');
+      expect(text).not.toContain('Previous session');
     });
   });
 
