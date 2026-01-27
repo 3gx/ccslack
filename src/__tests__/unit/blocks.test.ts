@@ -170,6 +170,55 @@ describe('blocks', () => {
       );
       expect(actionsBlock).toBeDefined();
     });
+
+    it('should include user mention in header when userId and channelId provided', () => {
+      const blocks = buildSdkQuestionBlocks({
+        question: 'Which auth method should we use?',
+        header: 'Auth method',
+        options: [
+          { label: 'OAuth', description: 'Use OAuth 2.0' },
+          { label: 'JWT', description: 'Use JSON Web Tokens' },
+        ],
+        questionId: 'askuserq_123',
+        multiSelect: false,
+        userId: 'U12345',
+        channelId: 'C67890',
+      });
+
+      expect(blocks[0].text?.text).toContain('<@U12345>');
+      expect(blocks[0].text?.text).toContain('[Auth method]');
+    });
+
+    it('should NOT include user mention for DM channels', () => {
+      const blocks = buildSdkQuestionBlocks({
+        question: 'Which auth method should we use?',
+        header: 'Auth method',
+        options: [
+          { label: 'OAuth', description: 'Use OAuth 2.0' },
+        ],
+        questionId: 'askuserq_123',
+        multiSelect: false,
+        userId: 'U12345',
+        channelId: 'D67890', // DM channel
+      });
+
+      expect(blocks[0].text?.text).not.toContain('<@U12345>');
+    });
+
+    it('should NOT include user mention when userId is not provided', () => {
+      const blocks = buildSdkQuestionBlocks({
+        question: 'Which auth method should we use?',
+        header: 'Auth method',
+        options: [
+          { label: 'OAuth', description: 'Use OAuth 2.0' },
+        ],
+        questionId: 'askuserq_123',
+        multiSelect: false,
+        channelId: 'C67890',
+      });
+
+      expect(blocks[0].text?.text).not.toContain('<@');
+    });
   });
 
   describe('buildStatusBlocks', () => {
@@ -993,6 +1042,41 @@ describe('blocks', () => {
       );
       expect(promptSection).toBeDefined();
     });
+
+    it('should include user mention in blocks when userId and channelId provided', () => {
+      const blocks = buildPlanApprovalBlocks({
+        conversationKey: 'C123',
+        userId: 'U12345',
+        channelId: 'C67890',
+      });
+
+      const mentionSection = blocks.find((b: any) =>
+        b.type === 'section' && b.text?.text?.includes('<@U12345>')
+      );
+      expect(mentionSection).toBeDefined();
+      expect(mentionSection.text.text).toContain('Plan ready for approval');
+    });
+
+    it('should NOT include user mention for DM channels (channelId starts with D)', () => {
+      const blocks = buildPlanApprovalBlocks({
+        conversationKey: 'C123',
+        userId: 'U12345',
+        channelId: 'D67890', // DM channel
+      });
+
+      const text = JSON.stringify(blocks);
+      expect(text).not.toContain('<@U12345>');
+    });
+
+    it('should NOT include user mention when userId is not provided', () => {
+      const blocks = buildPlanApprovalBlocks({
+        conversationKey: 'C123',
+        channelId: 'C67890',
+      });
+
+      const text = JSON.stringify(blocks);
+      expect(text).not.toContain('<@');
+    });
   });
 
   describe('formatToolInput', () => {
@@ -1138,6 +1222,45 @@ describe('blocks', () => {
 
       const actionsBlock = blocks.find((b: any) => b.type === 'actions');
       expect(actionsBlock.block_id).toBe('tool_approval_my-approval-id');
+    });
+
+    it('should include user mention in section when userId and channelId provided', () => {
+      const blocks = buildToolApprovalBlocks({
+        approvalId: 'test-123',
+        toolName: 'Write',
+        toolInput: { file_path: '/test.txt' },
+        userId: 'U12345',
+        channelId: 'C67890',
+      });
+
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+      expect(sectionBlock.text.text).toContain('<@U12345>');
+      expect(sectionBlock.text.text).toContain('Claude wants to use');
+    });
+
+    it('should NOT include user mention for DM channels', () => {
+      const blocks = buildToolApprovalBlocks({
+        approvalId: 'test-123',
+        toolName: 'Write',
+        toolInput: { file_path: '/test.txt' },
+        userId: 'U12345',
+        channelId: 'D67890', // DM channel
+      });
+
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+      expect(sectionBlock.text.text).not.toContain('<@U12345>');
+    });
+
+    it('should NOT include user mention when userId is not provided', () => {
+      const blocks = buildToolApprovalBlocks({
+        approvalId: 'test-123',
+        toolName: 'Write',
+        toolInput: { file_path: '/test.txt' },
+        channelId: 'C67890',
+      });
+
+      const sectionBlock = blocks.find((b: any) => b.type === 'section');
+      expect(sectionBlock.text.text).not.toContain('<@');
     });
   });
 

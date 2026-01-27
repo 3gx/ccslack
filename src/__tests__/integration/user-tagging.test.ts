@@ -252,6 +252,12 @@ describe('User tagging on notifications', () => {
 
       expect(questionCall).toBeDefined();
       expect(questionCall?.[0]?.text).toContain('<@UTEST123>');
+
+      // CRITICAL: Verify mention is in BLOCKS (not just text) - Slack requires this for notifications
+      const blocks = questionCall?.[0]?.blocks;
+      expect(blocks).toBeDefined();
+      const blocksJson = JSON.stringify(blocks);
+      expect(blocksJson).toContain('<@UTEST123>');
     });
 
     // Note: DM no-mention behavior is tested at unit level via getUserMention helper
@@ -317,6 +323,12 @@ describe('User tagging on notifications', () => {
 
       expect(approvalCall).toBeDefined();
       expect(approvalCall?.[0]?.text).toContain('<@UAPPROVAL>');
+
+      // CRITICAL: Verify mention is in BLOCKS (not just text) - Slack requires this for notifications
+      const blocks = approvalCall?.[0]?.blocks;
+      expect(blocks).toBeDefined();
+      const blocksJson = JSON.stringify(blocks);
+      expect(blocksJson).toContain('<@UAPPROVAL>');
     });
 
     // Note: DM no-mention behavior is tested at unit level via getUserMention helper
@@ -390,9 +402,15 @@ describe('User tagging on notifications', () => {
         (call: any[]) => call[0]?.text?.includes('Would you like to proceed')
       );
 
-      // Plan approval should include user mention
+      // Plan approval should include user mention in text
       if (planApprovalCall) {
         expect(planApprovalCall[0].text).toContain('<@UPLAN123>');
+
+        // CRITICAL: Verify mention is in BLOCKS (not just text) - Slack requires this for notifications
+        const blocks = planApprovalCall[0]?.blocks;
+        expect(blocks).toBeDefined();
+        const blocksJson = JSON.stringify(blocks);
+        expect(blocksJson).toContain('<@UPLAN123>');
       }
     });
   });

@@ -2027,6 +2027,8 @@ async function handleAskUserQuestion(
       options: q.options,
       questionId,
       multiSelect: q.multiSelect,
+      userId,
+      channelId,
     });
 
     // Post to Slack (include user mention for notification in channels/threads, skip in DMs)
@@ -2314,6 +2316,9 @@ async function showPlanApprovalUI(params: {
             costUsd: processingState.costUsd,
             rateLimitHits: processingState.rateLimitHits,
             sessionId: processingState.sessionId,
+            // User mention for plan ready notification
+            userId,
+            mentionChannelId: channelId,
           }),
           text: 'Plan ready for review',
         })
@@ -2373,6 +2378,8 @@ async function showPlanApprovalUI(params: {
         blocks: buildPlanApprovalBlocks({
           conversationKey,
           allowedPrompts: exitPlanModeInput?.allowedPrompts,
+          userId,
+          channelId,
         }),
         text: `${planMention}Would you like to proceed? Choose how to execute the plan.`,
       })
@@ -3241,7 +3248,7 @@ async function handleMessage(params: {
         client.chat.postMessage({
           channel: channelId,
           thread_ts: effectiveThreadTs,
-          blocks: buildToolApprovalBlocks({ approvalId, toolName, toolInput }),
+          blocks: buildToolApprovalBlocks({ approvalId, toolName, toolInput, userId, channelId }),
           text: `${toolMention}Claude wants to use ${toolName}. Approve?`,
         })
       );

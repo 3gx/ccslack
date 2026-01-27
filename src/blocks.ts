@@ -47,6 +47,8 @@ export interface SdkQuestionBlockParams {
   options: Array<{ label: string; description: string }>;
   questionId: string;
   multiSelect: boolean;
+  userId?: string;      // Optional - user to mention
+  channelId?: string;   // Optional - skip mention in DMs
 }
 
 /**
@@ -54,15 +56,16 @@ export interface SdkQuestionBlockParams {
  * Displays questions with label+description options, matching CLI fidelity.
  */
 export function buildSdkQuestionBlocks(params: SdkQuestionBlockParams): Block[] {
-  const { question, header, options, questionId, multiSelect } = params;
+  const { question, header, options, questionId, multiSelect, userId, channelId } = params;
   const blocks: Block[] = [];
+  const mention = (userId && channelId && !channelId.startsWith('D')) ? `<@${userId}> ` : '';
 
-  // Header chip + question
+  // Header chip + question WITH mention
   blocks.push({
     type: "section",
     text: {
       type: "mrkdwn",
-      text: `*[${header}]* ${question}`,
+      text: `${mention}*[${header}]* ${question}`,
     },
   });
 
@@ -599,6 +602,8 @@ export function buildContextDisplayBlocks(usage: LastUsage): Block[] {
 export interface PlanApprovalBlockParams {
   conversationKey: string;  // Used to identify the conversation for the response
   allowedPrompts?: { tool: string; prompt: string }[];  // Requested permissions from ExitPlanMode
+  userId?: string;      // Optional for backwards compat - user to mention
+  channelId?: string;   // Optional for backwards compat - skip mention in DMs
 }
 
 /**
@@ -607,8 +612,19 @@ export interface PlanApprovalBlockParams {
  * Displays requested permissions if provided.
  */
 export function buildPlanApprovalBlocks(params: PlanApprovalBlockParams): Block[] {
-  const { conversationKey, allowedPrompts } = params;
-  const blocks: Block[] = [{ type: "divider" }];
+  const { conversationKey, allowedPrompts, userId, channelId } = params;
+  const blocks: Block[] = [];
+
+  // User mention header (skip in DMs, skip if no userId)
+  const mention = (userId && channelId && !channelId.startsWith('D')) ? `<@${userId}> ` : '';
+  if (mention) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `${mention}:clipboard: *Plan ready for approval*` },
+    });
+  }
+
+  blocks.push({ type: "divider" });
 
   // Show requested permissions (matches CLI)
   if (allowedPrompts && allowedPrompts.length > 0) {
@@ -831,6 +847,8 @@ export interface ToolApprovalBlockParams {
   approvalId: string;
   toolName: string;
   toolInput: Record<string, unknown>;
+  userId?: string;      // Optional - user to mention
+  channelId?: string;   // Optional - skip mention in DMs
 }
 
 /**
@@ -847,8 +865,9 @@ export function formatToolInput(input: Record<string, unknown>): string {
  * Shown when in default mode and Claude wants to use a tool.
  */
 export function buildToolApprovalBlocks(params: ToolApprovalBlockParams): Block[] {
-  const { approvalId, toolName, toolInput } = params;
+  const { approvalId, toolName, toolInput, userId, channelId } = params;
   const inputPreview = formatToolInput(toolInput);
+  const mention = (userId && channelId && !channelId.startsWith('D')) ? `<@${userId}> ` : '';
 
   return [
     { type: 'divider' },
@@ -856,7 +875,7 @@ export function buildToolApprovalBlocks(params: ToolApprovalBlockParams): Block[
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Claude wants to use:* \`${toolName}\`\n\`\`\`${inputPreview}\`\`\``,
+        text: `${mention}*Claude wants to use:* \`${toolName}\`\n\`\`\`${inputPreview}\`\`\``,
       },
     },
     {
