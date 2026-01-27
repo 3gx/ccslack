@@ -629,8 +629,14 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
   const isNewChannel = !session?.pathConfigured;
   const pathChanged = session?.pathConfigured && session.configuredPath !== workingDir;
 
-  // Build response message
-  let response = `Resuming session \`${sessionId}\` in \`${workingDir}\`\n`;
+  // Build response message - show old session if being replaced
+  let response = '';
+  const oldSessionId = session?.sessionId;
+  if (oldSessionId && oldSessionId !== sessionId) {
+    response += `:bookmark: Previous session: \`${oldSessionId}\`\n_Use_ \`/resume ${oldSessionId}\` _to return_\n\n`;
+  }
+
+  response += `Resuming session \`${sessionId}\` in \`${workingDir}\`\n`;
 
   if (isNewChannel) {
     response += `Path locked to \`${workingDir}\`\n`;
@@ -640,13 +646,19 @@ function handleResume(sessionId: string, session: Session | null): CommandResult
 
   response += '\nYour next message will continue this session.';
 
-  // Build session update
+  // Build session update - track previous session ID
+  const previousIds = session?.previousSessionIds ?? [];
+  if (oldSessionId && oldSessionId !== sessionId) {
+    previousIds.push(oldSessionId);
+  }
+
   const sessionUpdate: Partial<Session> = {
     sessionId,
     workingDir,
     pathConfigured: true,
     configuredPath: workingDir,
     planFilePath,
+    previousSessionIds: previousIds,
   };
 
   // Set configuredAt only for new channels

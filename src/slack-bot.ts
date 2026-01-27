@@ -1237,11 +1237,15 @@ async function runClearSession(
       })
     );
 
-    // Post success message
+    // Post success message (include old session ID so user can /resume back)
+    const oldSessionId = session.sessionId;
+    const previousSessionLine = oldSessionId
+      ? `\n:bookmark: Previous session: \`${oldSessionId}\`\n_Use_ \`/resume ${oldSessionId}\` _to return_`
+      : '';
     await client.chat.postMessage({
       channel: channelId,
       thread_ts: postingThreadTs,
-      text: `:wastebasket: *Session history cleared*\nStarting fresh. Your next message begins a new conversation.\nDuration: ${(elapsed / 1000).toFixed(1)}s`,
+      text: `:wastebasket: *Session history cleared*${previousSessionLine}\n\nStarting fresh. Your next message begins a new conversation.\nDuration: ${(elapsed / 1000).toFixed(1)}s`,
     });
 
     // Show current configuration after clear
@@ -5275,31 +5279,51 @@ app.action(/^plan_clear_bypass_(.+)$/, async ({ action, ack, body, client }) => 
 
   await updateApprovalMessage(body, client, '✅ Clearing context and proceeding with bypass mode...');
 
+  // Get old session info before clearing
+  const oldSession = threadTs
+    ? getThreadSession(channelId, threadTs)
+    : getSession(channelId);
+  const oldSessionId = oldSession?.sessionId;
+
   // Get plan file path before clearing (from activeQuery's processingState)
   const activeQuery = activeQueries.get(conversationKey);
   let planFilePath = activeQuery?.processingState?.planFilePath;
 
   // Fallback: read from persisted session if activeQuery cleanup already happened
   if (!planFilePath) {
-    const session = threadTs
-      ? getThreadSession(channelId, threadTs)
-      : getSession(channelId);
-    planFilePath = session?.planFilePath || null;
+    planFilePath = oldSession?.planFilePath || null;
   }
 
   // Clear session (set sessionId to null) and set bypass mode (thread-aware)
+  // Track previous session ID so user can /resume back
+  const previousIds = oldSession?.previousSessionIds ?? [];
+  if (oldSessionId) {
+    previousIds.push(oldSessionId);
+  }
+
   if (threadTs) {
-    await saveThreadSession(channelId, threadTs, { sessionId: null, mode: 'bypassPermissions' });
+    await saveThreadSession(channelId, threadTs, {
+      sessionId: null,
+      mode: 'bypassPermissions',
+      previousSessionIds: previousIds,
+    });
   } else {
-    await saveSession(channelId, { sessionId: null, mode: 'bypassPermissions' });
+    await saveSession(channelId, {
+      sessionId: null,
+      mode: 'bypassPermissions',
+      previousSessionIds: previousIds,
+    });
   }
 
   const bodyWithChannel = body as any;
   // Get effective thread from button message context (button is already in a thread)
   const effectiveThreadTs = threadTs || bodyWithChannel.message?.thread_ts || bodyWithChannel.message?.ts;
 
-  // Build activity log with context_cleared and mode_changed entries
+  // Build activity log with session_changed, context_cleared, and mode_changed entries
   let activityLog = pending?.activityLog ? [...pending.activityLog] : [];
+  if (oldSessionId) {
+    activityLog.push({ timestamp: Date.now(), type: 'session_changed', previousSessionId: oldSessionId });
+  }
   activityLog.push({ timestamp: Date.now(), type: 'context_cleared' });
   activityLog.push({ timestamp: Date.now(), type: 'mode_changed', mode: 'bypassPermissions' });
 

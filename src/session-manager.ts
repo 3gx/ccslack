@@ -121,6 +121,8 @@ export interface ThreadSession {
   syncedMessageUuids?: string[];
   // UUIDs of user messages that originated from Slack bot (to skip in /ff)
   slackOriginatedUserUuids?: string[];
+  // Previous session IDs (for /resume back after /clear or session change)
+  previousSessionIds?: string[];
 }
 
 /**
@@ -128,7 +130,7 @@ export interface ThreadSession {
  */
 export interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed' | 'context_cleared';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed' | 'context_cleared' | 'session_changed';
   tool?: string;
   durationMs?: number;
   message?: string;
@@ -161,6 +163,7 @@ export interface ActivityEntry {
   toolIsError?: boolean;             // True if tool returned error
   toolErrorMessage?: string;         // Error message if failed
   mode?: string;                     // For mode_changed entries
+  previousSessionId?: string;        // For session_changed entries
 }
 
 /**

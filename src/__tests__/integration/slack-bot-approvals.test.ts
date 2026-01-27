@@ -141,7 +141,7 @@ describe('slack-bot approval handlers', () => {
 
       expect(ack).toHaveBeenCalled();
       // Should clear session (sessionId: null) AND set bypass mode - thread context uses saveThreadSession
-      expect(saveThreadSession).toHaveBeenCalledWith('C123', 'thread456', { sessionId: null, mode: 'bypassPermissions' });
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', 'thread456', { sessionId: null, mode: 'bypassPermissions', previousSessionIds: [] });
       expect(mockClient.chat.update).toHaveBeenCalledWith(
         expect.objectContaining({
           channel: 'C123',

@@ -381,7 +381,7 @@ describe('slack-bot button handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
-      expect(saveSession).toHaveBeenCalledWith('C123', { sessionId: null, mode: 'bypassPermissions' });
+      expect(saveSession).toHaveBeenCalledWith('C123', { sessionId: null, mode: 'bypassPermissions', previousSessionIds: ['test-session'] });
       expect(saveThreadSession).not.toHaveBeenCalled();
     });
 
@@ -415,8 +415,8 @@ describe('slack-bot button handlers', () => {
       });
 
       expect(ack).toHaveBeenCalled();
-      expect(saveThreadSession).toHaveBeenCalledWith('C123', '1234567890.123456', { sessionId: null, mode: 'bypassPermissions' });
-      expect(saveSession).not.toHaveBeenCalledWith('C123', { sessionId: null, mode: 'bypassPermissions' });
+      expect(saveThreadSession).toHaveBeenCalledWith('C123', '1234567890.123456', { sessionId: null, mode: 'bypassPermissions', previousSessionIds: [] });
+      expect(saveSession).not.toHaveBeenCalledWith('C123', { sessionId: null, mode: 'bypassPermissions', previousSessionIds: [] });
     });
 
     it('plan_accept_edits should save to thread session when in thread', async () => {

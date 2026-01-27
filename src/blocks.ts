@@ -1110,7 +1110,7 @@ export function buildPathSetupBlocks(): Block[] {
 // Activity entry type (mirrors session-manager.ts)
 export interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed' | 'context_cleared';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed' | 'context_cleared' | 'session_changed';
   tool?: string;
   durationMs?: number;
   message?: string;
@@ -1142,6 +1142,7 @@ export interface ActivityEntry {
   toolIsError?: boolean;             // True if tool returned error
   toolErrorMessage?: string;         // Error message if failed
   mode?: string;                     // For mode_changed entries
+  previousSessionId?: string;        // For session_changed entries
 }
 
 // Constants for activity log display
@@ -2483,6 +2484,12 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
         break;
       case 'context_cleared':
         lines.push('────── Context Cleared ──────');
+        break;
+      case 'session_changed':
+        if (entry.previousSessionId) {
+          lines.push(`:bookmark: *Previous session:* \`${entry.previousSessionId}\``);
+          lines.push('• _Use_ `/resume` _to return to this session_');
+        }
         break;
       case 'aborted':
         lines.push(':octagonal_sign: *Aborted by user*');
