@@ -217,7 +217,7 @@ describe('sendDmNotification', () => {
     expect(mockClient.conversations.open).not.toHaveBeenCalled();
   });
 
-  it('should debounce notifications within 15 seconds', async () => {
+  it('should debounce notifications of same type within 15 seconds', async () => {
     // First call - should send
     await sendDmNotification({
       client: mockClient,
@@ -225,23 +225,50 @@ describe('sendDmNotification', () => {
       channelId: 'C456',
       messageTs: '123.456',
       emoji: '✅',
-      title: 'First notification',
+      title: 'Query completed',
     });
 
     expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
 
-    // Second call within debounce window - should skip
+    // Second call within debounce window with SAME title - should skip
     await sendDmNotification({
       client: mockClient,
       userId: 'U123',
       channelId: 'C456',
       messageTs: '123.457',
-      emoji: '🔧',
-      title: 'Second notification',
+      emoji: '✅',
+      title: 'Query completed',
     });
 
-    // Should still be 1 call (second was skipped)
+    // Should still be 1 call (second was skipped due to same title)
     expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('should allow different notification types within debounce window', async () => {
+    // Query completed notification
+    await sendDmNotification({
+      client: mockClient,
+      userId: 'U123',
+      channelId: 'C456',
+      messageTs: '123.456',
+      emoji: '✅',
+      title: 'Query completed',
+    });
+
+    expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
+
+    // Question notification with DIFFERENT title - should NOT be debounced
+    await sendDmNotification({
+      client: mockClient,
+      userId: 'U123',
+      channelId: 'C456',
+      messageTs: '123.457',
+      emoji: '❓',
+      title: 'Question needs your input',
+    });
+
+    // Both should have sent (different notification types)
+    expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(2);
   });
 
   it('should allow notifications after debounce window expires', async () => {

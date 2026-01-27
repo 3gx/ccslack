@@ -106,8 +106,8 @@ function getUserMention(userId: string | undefined, channelId: string): string {
   return `<@${userId}> `;
 }
 
-// Track recent DM notifications per user for debouncing
-const recentDmNotifications = new Map<string, number>(); // userId -> lastNotifyTime
+// Track recent DM notifications per user+type for debouncing
+const recentDmNotifications = new Map<string, number>(); // `${userId}:${title}` -> lastNotifyTime
 export const DM_DEBOUNCE_MS = 15000; // 15 seconds
 
 /** Clear debounce state - exported for testing */
@@ -139,9 +139,10 @@ export async function sendDmNotification(params: {
   // Skip for DMs - no need to DM about a DM
   if (!userId || channelId.startsWith('D')) return;
 
-  // Debounce: skip if notified this user within last 15 seconds
+  // Debounce: skip if notified this user with same notification type within last 15 seconds
   const now = Date.now();
-  const lastNotify = recentDmNotifications.get(userId) || 0;
+  const debounceKey = `${userId}:${title}`;
+  const lastNotify = recentDmNotifications.get(debounceKey) || 0;
   if (now - lastNotify < DM_DEBOUNCE_MS) {
     return; // Skip - too recent
   }
@@ -199,7 +200,7 @@ export async function sendDmNotification(params: {
     );
 
     // Update debounce tracker
-    recentDmNotifications.set(userId, now);
+    recentDmNotifications.set(debounceKey, now);
   } catch (error) {
     // Silently fail - don't block main notification flow
     console.error('Failed to send DM notification:', error);
