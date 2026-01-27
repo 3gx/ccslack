@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { parseCommand, extractInlineMode } from '../../commands.js';
+import { parseCommand, extractInlineMode, extractMentionMode, extractFirstMentionId } from '../../commands.js';
 import { Session } from '../../session-manager.js';
 
 // Mock session-reader for /resume tests
@@ -1205,6 +1205,133 @@ describe('commands', () => {
       expect(result.handled).toBe(true);
       expect(result.isError).toBe(true);
       expect(result.response).toContain('Invalid session ID');
+    });
+  });
+
+  describe('extractMentionMode', () => {
+    const botUserId = 'U12345BOT';
+
+    it('should extract /mode when directly after @bot', () => {
+      const result = extractMentionMode(`<@${botUserId}> /mode plan do something`, botUserId);
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('do something');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should extract /mode when @bot is in middle of text', () => {
+      const result = extractMentionMode(`hello <@${botUserId}> /mode plan world`, botUserId);
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('hello world');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should extract /mode when @bot /mode is at end', () => {
+      const result = extractMentionMode(`do this <@${botUserId}> /mode bypass`, botUserId);
+      expect(result.mode).toBe('bypassPermissions');
+      expect(result.remainingText).toBe('do this');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should NOT match /mode when text between @bot and /mode', () => {
+      const result = extractMentionMode(`<@${botUserId}> blah /mode plan`, botUserId);
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('blah /mode plan');  // /mode stays in text
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should NOT match /mode without @bot before it', () => {
+      const result = extractMentionMode('what does /mode plan do', botUserId);
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('what does /mode plan do');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should use LAST @bot /mode when multiple exist', () => {
+      const result = extractMentionMode(
+        `<@${botUserId}> /mode plan then <@${botUserId}> /mode bypass`,
+        botUserId
+      );
+      expect(result.mode).toBe('bypassPermissions');
+      expect(result.remainingText).toBe('then');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should error if last @bot /mode is invalid', () => {
+      const result = extractMentionMode(
+        `<@${botUserId}> /mode plan <@${botUserId}> /mode invalid`,
+        botUserId
+      );
+      expect(result.mode).toBeUndefined();
+      expect(result.error).toContain('Unknown mode');
+      expect(result.error).toContain('invalid');
+    });
+
+    it('should use last valid mode even if earlier ones are invalid', () => {
+      const result = extractMentionMode(
+        `<@${botUserId}> /mode invalid <@${botUserId}> /mode plan`,
+        botUserId
+      );
+      expect(result.mode).toBe('plan');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should strip all @bot mentions from remaining text', () => {
+      const result = extractMentionMode(
+        `hey <@OTHER123> <@${botUserId}> /mode plan do stuff`,
+        botUserId
+      );
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('hey do stuff');  // Both mentions stripped
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should NOT match /moderation', () => {
+      const result = extractMentionMode(`<@${botUserId}> /moderation policy`, botUserId);
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('/moderation policy');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should NOT match /mode without argument', () => {
+      const result = extractMentionMode(`<@${botUserId}> /mode`, botUserId);
+      expect(result.mode).toBeUndefined();
+      expect(result.remainingText).toBe('/mode');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should be case insensitive for mode', () => {
+      const result = extractMentionMode(`<@${botUserId}> /MODE PLAN test`, botUserId);
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('test');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should handle no spaces between @bot and /mode', () => {
+      const result = extractMentionMode(`<@${botUserId}>/mode plan test`, botUserId);
+      expect(result.mode).toBe('plan');
+      expect(result.remainingText).toBe('test');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should only match OUR bot ID, not other bots', () => {
+      const result = extractMentionMode(`<@OTHER123> /mode plan <@${botUserId}> hello`, botUserId);
+      expect(result.mode).toBeUndefined();  // /mode follows OTHER, not our bot
+      expect(result.remainingText).toBe('/mode plan hello');
+      expect(result.error).toBeUndefined();
+    });
+  });
+
+  describe('extractFirstMentionId', () => {
+    it('should extract first mention ID', () => {
+      expect(extractFirstMentionId('<@U12345> hello')).toBe('U12345');
+    });
+
+    it('should return undefined for no mentions', () => {
+      expect(extractFirstMentionId('hello world')).toBeUndefined();
+    });
+
+    it('should handle multiple mentions', () => {
+      expect(extractFirstMentionId('<@FIRST> <@SECOND>')).toBe('FIRST');
     });
   });
 });

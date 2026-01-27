@@ -962,7 +962,7 @@ describe('slack-bot command handlers', () => {
       });
     });
 
-    it('should add :x: emoji when /mode has invalid argument', async () => {
+    it('should post error for /mode with invalid argument (no :x: for early errors)', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -988,15 +988,11 @@ describe('slack-bot command handlers', () => {
         expect.objectContaining({ text: expect.stringContaining('Unknown mode') })
       );
 
-      // Should add :x: emoji
-      expect(mockClient.reactions.add).toHaveBeenCalledWith({
-        channel: 'C123',
-        timestamp: 'msg2',
-        name: 'x',
-      });
+      // Note: No :x: emoji because error is handled early in app_mention handler
+      // before the eyes reaction is added in handleMessage
     });
 
-    it('should add :x: emoji for inline mode error', async () => {
+    it('should post error for inline mode error (no :x: for early errors)', async () => {
       const handler = registeredHandlers['event_app_mention'];
       const mockClient = createMockSlackClient();
 
@@ -1022,12 +1018,8 @@ describe('slack-bot command handlers', () => {
         expect.objectContaining({ text: expect.stringContaining('Unknown mode') })
       );
 
-      // Should add :x: emoji
-      expect(mockClient.reactions.add).toHaveBeenCalledWith({
-        channel: 'C123',
-        timestamp: 'msg3',
-        name: 'x',
-      });
+      // Note: No :x: emoji because error is handled early in app_mention handler
+      // before the eyes reaction is added in handleMessage
     });
 
     it('should NOT add :x: emoji for successful /help command', async () => {

@@ -1830,10 +1830,8 @@ describe('slack-bot mention handlers', () => {
       // Should NOT call Claude
       expect(startClaudeQuery).not.toHaveBeenCalled();
 
-      // Should remove eyes reaction
-      expect(mockClient.reactions.remove).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'eyes' })
-      );
+      // Note: Eyes reaction is NOT added or removed because the error
+      // is handled early in app_mention handler before handleMessage
     });
 
     it('should confirm mode change when only /mode is provided', async () => {

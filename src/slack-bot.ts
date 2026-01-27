@@ -59,7 +59,7 @@ import { uploadMarkdownAndPngWithResponse, extractTailWithFormatting, uploadFile
 import { markAborted, isAborted, clearAborted } from './abort-tracker.js';
 import { markFfAborted, isFfAborted, clearFfAborted } from './ff-abort-tracker.js';
 import { markdownToSlack, formatTimeRemaining, stripMarkdownCodeFence } from './utils.js';
-import { parseCommand, extractInlineMode, UPDATE_RATE_DEFAULT, MESSAGE_SIZE_DEFAULT, THINKING_MESSAGE_SIZE } from './commands.js';
+import { parseCommand, extractInlineMode, extractMentionMode, extractFirstMentionId, UPDATE_RATE_DEFAULT, MESSAGE_SIZE_DEFAULT, THINKING_MESSAGE_SIZE } from './commands.js';
 import { toUserMessage, SlackBotError, Errors } from './errors.js';
 import { processSlackFiles, SlackFile } from './file-handler.js';
 import { buildMessageContent, ContentBlock } from './content-builder.js';
@@ -2078,7 +2078,7 @@ const app = new App({
 });
 
 // Handle @mentions in channels
-app.event('app_mention', async ({ event, client }) => {
+app.event('app_mention', async ({ event, client, context }) => {
   try {
     // ONLY respond in channels (IDs start with 'C')
     // Reject DMs ('D'), group DMs ('G')
@@ -2101,15 +2101,38 @@ app.event('app_mention', async ({ event, client }) => {
       return;
     }
 
-    // Remove the @mention from the text and normalize spaces
-    const userText = event.text
-      .replace(/<@[A-Z0-9]+>/g, '')
-      .replace(/\s+/g, ' ')  // Normalize multiple spaces to single
-      .trim();
+    // Get bot user ID with fallback (context or context.botUserId may be undefined)
+    const botUserId = context?.botUserId ?? extractFirstMentionId(event.text);
+
+    // Extract @bot /mode pattern and strip mentions
+    const mentionModeResult = botUserId
+      ? extractMentionMode(event.text, botUserId)
+      : { remainingText: event.text.replace(/<@[A-Z0-9]+>/g, '').replace(/\s+/g, ' ').trim() };
+    const userText = mentionModeResult.remainingText;
 
     console.log(`Received mention from ${event.user}: ${userText}`);
 
-    // Reject empty messages
+    // Handle mode extraction error early
+    if (mentionModeResult.error) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        text: `❌ ${mentionModeResult.error}`,
+      });
+      return;
+    }
+
+    // Handle mode-only case: @bot /mode <mode> with no additional text
+    // This should confirm the mode change without requiring a query
+    if (mentionModeResult.mode && !userText) {
+      await saveSession(event.channel, { mode: mentionModeResult.mode });
+      await client.chat.postMessage({
+        channel: event.channel,
+        text: `Mode set to \`${mentionModeResult.mode}\``,
+      });
+      return;
+    }
+
+    // Reject empty messages (no mode extracted and no text)
     if (!userText) {
       await client.chat.postMessage({
         channel: event.channel,
@@ -2129,6 +2152,7 @@ app.event('app_mention', async ({ event, client }) => {
       threadTs: event.thread_ts, // Only set if already in a thread
       client,
       files: eventFiles,
+      inlineMode: mentionModeResult.mode,  // Pass mode from @bot /mode extraction
     });
   } catch (error) {
     // NEVER let errors crash the bot - always report gracefully
@@ -2417,8 +2441,9 @@ async function handleMessage(params: {
   files?: SlackFile[];
   statusMsgTs?: string;           // Existing status message to reuse (for plan approval continuation)
   activityLog?: ActivityEntry[];  // Activity log to continue from (for plan approval continuation)
+  inlineMode?: PermissionMode;    // Mode from @bot /mode extraction
 }) {
-  const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck, files, statusMsgTs: existingStatusMsgTs, activityLog: existingActivityLog } = params;
+  const { channelId, userId, userText, originalTs, threadTs, client, skipConcurrentCheck, files, statusMsgTs: existingStatusMsgTs, activityLog: existingActivityLog, inlineMode } = params;
 
   // Always respond in threads - use originalTs as thread parent when in main channel
   const effectiveThreadTs = threadTs || originalTs;
@@ -2567,7 +2592,10 @@ async function handleMessage(params: {
   }
 
   // Extract inline /mode command (e.g., "@bot /mode plan do something")
-  const inlineModeResult = extractInlineMode(userText);
+  // Skip if mode already extracted from @bot /mode pattern in app_mention handler
+  const inlineModeResult = inlineMode !== undefined
+    ? { mode: inlineMode, remainingText: userText }
+    : extractInlineMode(userText);
 
   if (inlineModeResult.error) {
     await withSlackRetry(() =>

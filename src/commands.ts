@@ -71,6 +71,83 @@ export interface InlineModeResult {
   error?: string;             // Error message if invalid
 }
 
+export interface MentionModeResult {
+  mode?: Session['mode'];
+  remainingText: string;
+  error?: string;
+}
+
+/**
+ * Extract user ID from first @mention in text.
+ * Fallback when context.botUserId is unavailable.
+ */
+export function extractFirstMentionId(text: string): string | undefined {
+  const match = text.match(/<@([A-Z0-9]+)>/i);
+  return match?.[1];
+}
+
+/**
+ * Extract /mode command that directly follows @bot mention.
+ * Must be called BEFORE stripping mentions.
+ * @param text - Raw message text with mentions intact
+ * @param botUserId - The bot's user ID (e.g., "U12345")
+ */
+export function extractMentionMode(text: string, botUserId: string): MentionModeResult {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+
+  // Pattern: @bot mention followed by /mode <arg>
+  // <@BOTID> followed by optional whitespace and /mode <word>
+  const pattern = new RegExp(`<@${botUserId}>\\s*/mode\\s+(\\S+)`, 'gi');
+
+  // Find ALL @bot /mode <arg> patterns
+  const matches: Array<{ fullMatch: string; modeArg: string }> = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(normalized)) !== null) {
+    matches.push({
+      fullMatch: match[0],
+      modeArg: match[1].toLowerCase(),
+    });
+  }
+
+  if (matches.length === 0) {
+    // No @bot /mode pattern found - strip mentions and return
+    const remainingText = normalized
+      .replace(/<@[A-Z0-9]+>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return { remainingText };
+  }
+
+  // Validate ONLY the LAST match
+  const lastMatch = matches[matches.length - 1];
+  const mode = MODE_SHORTCUTS[lastMatch.modeArg];
+
+  if (!mode) {
+    // Strip mentions and return error
+    const remainingText = normalized
+      .replace(/<@[A-Z0-9]+>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return {
+      remainingText,
+      error: `Unknown mode \`${lastMatch.modeArg}\`. Valid modes: plan, bypass, ask, edit`,
+    };
+  }
+
+  // Remove ALL @bot /mode <arg> patterns, then strip remaining mentions
+  let remainingText = normalized;
+  for (const m of matches) {
+    remainingText = remainingText.replace(m.fullMatch, ' ');
+  }
+  remainingText = remainingText
+    .replace(/<@[A-Z0-9]+>/g, '')  // Strip remaining mentions
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return { mode, remainingText };
+}
+
 /**
  * Extract inline /mode command from message text.
  * Only detects /mode <mode> at the START of text (immediately after @bot mention).
