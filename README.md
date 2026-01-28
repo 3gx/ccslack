@@ -187,7 +187,7 @@ npm test -- src/__tests__/unit/blocks.test.ts
 npx tsc --noEmit
 ```
 
-## Environment Variables
+## Environment
 
 | Variable | Required | Description |
 |----------|----------|-------------|
