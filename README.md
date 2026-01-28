@@ -1,6 +1,6 @@
 # Claude Code Slack Bot
 
-A production-grade Slack bot that integrates [Claude Code](https://claude.ai/claude-code) into your Slack workspace, enabling team collaboration with Claude's AI-powered coding assistant.
+A Slack bot that integrates [Claude Code](https://claude.ai/claude-code) into your Slack workspace, enabling AI team collaboration.
 
 ## Features
 
