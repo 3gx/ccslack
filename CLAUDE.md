@@ -37,7 +37,7 @@ src/
 ├── session-reader.ts     # Parses Claude SDK JSONL session files from ~/.claude/projects/
 ├── session-event-stream.ts # Reads session JSONL files as async generator
 ├── streaming.ts          # Slack streaming API with fallback to chat.update
-├── blocks.ts             # Block Kit builders for all UI (~83KB)
+├── blocks.ts             # Block Kit builders for all UI (~86KB)
 ├── commands.ts           # Slash command parsing and execution
 ├── errors.ts             # SlackBotError class and error factories
 ├── retry.ts              # Retry utilities with exponential backoff
@@ -54,8 +54,8 @@ src/
 ├── content-builder.ts    # Builds Claude-compatible multi-modal content blocks
 ├── types.d.ts            # Module declarations for markdown-it plugins
 └── __tests__/
-    ├── unit/             # Unit tests (27 files, mocked dependencies)
-    ├── integration/      # Integration tests (19 files, mocked Slack/SDK)
+    ├── unit/             # Unit tests (28 files, mocked dependencies)
+    ├── integration/      # Integration tests (22 files, mocked Slack/SDK)
     └── sdk-live/         # Live SDK tests (50 files, requires real API key)
 ```
 
@@ -73,6 +73,10 @@ src/
 - Session includes: `sessionId`, `workingDir`, `mode`, `model`, timestamps
 - Channel sessions include `messageMap` for Slack ts → SDK message ID mapping
 - Session configuration: `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `lastUsage`, `planFilePath`
+- `previousSessionIds[]`: Tracks sessions before `/clear` for time-travel forking
+- `syncedMessageUuids`: Tracks which terminal messages have been synced via `/ff`
+- `slackOriginatedUserUuids`: Tracks bot-created messages to skip during `/ff`
+- `planPresentationCount`: Tracks plan presentations (reset on `/clear`)
 - `lastUsage` cleared on `/clear` to show fresh state in `/status` and `/context`
 
 ### Session Cleanup
@@ -96,8 +100,9 @@ Sessions are automatically cleaned up when:
 
 ### Slack API Calls
 - Always wrap in `withSlackRetry()` for rate limit handling
-- Use streaming API with fallback to `chat.update`
-- Split messages over 4000 characters
+- Use streaming API with fallback to `chat.update` (2-second throttle)
+- Messages truncated at `threadCharLimit` (default 500, max 36000)
+- Long content uploaded as `.md` attachment with optional PNG rendering
 
 ### Claude SDK Integration
 - Use `query()` from `@anthropic-ai/claude-agent-sdk`
@@ -174,11 +179,11 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 
 ### Activity Log and Generating Entries
 - Real-time activity tracking via `ActivityEntry` type
-- Entry types: `starting`, `thinking`, `tool_start`, `tool_complete`, `error`, `generating`, `aborted`, `mode_changed`
+- Entry types: `starting`, `thinking`, `tool_start`, `tool_complete`, `error`, `generating`, `aborted`, `mode_changed`, `context_cleared`, `session_changed`
 - `generating` entries track text streaming progress (chunks, chars, duration)
 - Activity logs stored in memory during processing (not persisted to sessions.json)
-- View Log modal shows paginated activity history
-- Download .txt exports full activity log
+- Activity log displayed inline in status message during and after processing
+- Rolling window mode: Shows last 20 entries when activity exceeds 300 entries
 
 ### Plan Mode
 - Claude writes to a plan file via `ExitPlanMode` tool
@@ -191,6 +196,48 @@ In `default` mode, SDK calls `canUseTool` for tool approval:
 - `/stop-watching` stops watching the terminal session
 - `/ff` (fast-forward) command syncs missed messages and starts watching
 - Terminal watcher polls session JSONL files and posts new messages to Slack
+- Turn-based posting: `/ff` groups messages by user turn for fidelity
+- 500ms delay between messages during sync to prevent rate limiting
+
+### DM Notifications
+- Bot sends DMs when users are @mentioned in responses or approval requests
+- 15-second debounce per user+type combination to prevent spam
+- Includes permalink button linking back to original message
+- Skips DM channels and bot users
+- Silently fails if DM delivery fails (non-critical feature)
+
+### Emoji Reaction System
+- `:eyes:` - Processing in progress (added to user message)
+- `:question:` - Waiting for user input (questions, approvals)
+- `:page_with_curl:` - Plan file being presented
+- `:x:` - Error occurred
+- `:octagonal_sign:` - Processing stopped/aborted
+- `:gear:` - Compaction in progress
+- `:checkered_flag:` - Compaction completed
+- Per-message mutex serialization prevents race conditions
+
+### Auto-Compaction
+- Triggers when context usage reaches 80% of remaining output capacity
+- Automatic (no user prompt required)
+- Shows completion message with stats after compaction
+- `compactIsManual` flag distinguishes auto vs manual `/compact`
+- `/status` shows `compactPercent` and `tokensToCompact` until trigger
+
+### Cost Display
+- Query cost shown in completion stats: `$0.XXXX`
+- Source: SDK result `total_cost_usd` field
+- Displayed in status footer after query completion
+
+### Button Handlers
+Interactive buttons and their actions:
+- **Fork here** (`fork_here_`): Creates new channel with forked session
+- **Refresh fork** (`refresh_fork_`): Restores Fork button on messages
+- **Attach thinking** (`attach_thinking_file_`): Uploads thinking content as file
+- **Retry upload** (`retry_upload_`): Retries failed file uploads
+- **Stop watching** (`stop_terminal_watch`): Stops terminal session watching
+- **Stop FF** (`stop_ff_sync`): Aborts fast-forward sync mid-operation
+- **Approve/Deny**: Tool approval in default mode
+- **Plan approval**: 5-button UI for plan mode completion
 
 ## Common Issues
 
