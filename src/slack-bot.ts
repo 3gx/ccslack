@@ -199,20 +199,21 @@ export async function sendDmNotification(params: {
     const dmResult = await client.conversations.open({ users: userId });
     if (!dmResult.ok || !dmResult.channel?.id) return;
 
-    // Build the from clause with query preview in backticks
-    const fromClause = queryPreview ? ` from \`${queryPreview}\`` : '';
+    // Build message: emoji conveys meaning, query preview provides context
+    // Format: ✅ `query preview...` in #channel
+    const queryClause = queryPreview ? ` \`${queryPreview}\`` : '';
 
     // Send DM with permalink button
     await withSlackRetry(() =>
       client.chat.postMessage({
         channel: dmResult.channel.id,
-        text: `${emoji} ${title}${fromClause} in ${channelName}`,
+        text: `${emoji}${queryClause} in ${channelName}`,
         blocks: [
           {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `${emoji} *${title}*${fromClause} in ${channelName}${subtitle ? `\n${subtitle}` : ''}`,
+              text: `${emoji}${queryClause} in ${channelName}${subtitle ? `\n${subtitle}` : ''}`,
             },
             accessory: {
               type: 'button',

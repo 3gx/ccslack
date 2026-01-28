@@ -155,13 +155,14 @@ describe('sendDmNotification', () => {
       messageTs: '123.456',
       emoji: '✅',
       title: 'Query completed',
+      queryPreview: 'fix the bug',
     });
 
     expect(mockClient.conversations.open).toHaveBeenCalledWith({ users: 'U123' });
     expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         channel: 'D123',
-        text: expect.stringContaining('Query completed'),
+        text: expect.stringContaining('fix the bug'),
       })
     );
   });
@@ -383,6 +384,7 @@ describe('sendDmNotification', () => {
       messageTs: '123.456',
       emoji: '📋',
       title: 'Plan ready for review',
+      queryPreview: 'refactor the code',
     });
 
     expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
@@ -392,7 +394,7 @@ describe('sendDmNotification', () => {
             type: 'section',
             text: expect.objectContaining({
               type: 'mrkdwn',
-              text: expect.stringContaining('Plan ready for review'),
+              text: expect.stringContaining('refactor the code'),
             }),
             accessory: expect.objectContaining({
               type: 'button',
@@ -442,13 +444,14 @@ describe('sendDmNotification', () => {
       queryPreview: 'fix the login bug',
     });
 
+    // New simplified format: ✅ `query` in #channel (no "from", no title)
     expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: expect.stringContaining('from `fix the login bug`'),
+        text: expect.stringContaining('`fix the login bug`'),
         blocks: expect.arrayContaining([
           expect.objectContaining({
             text: expect.objectContaining({
-              text: expect.stringContaining('from `fix the login bug`'),
+              text: expect.stringContaining('`fix the login bug`'),
             }),
           }),
         ]),
@@ -486,13 +489,14 @@ describe('sendDmNotification', () => {
       queryPreview: 'update the config',
     });
 
+    // New simplified format: 🔧 `query` in #channel\nsubtitle
     expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         blocks: expect.arrayContaining([
           expect.objectContaining({
             text: expect.objectContaining({
               // Use [\s\S] to match any character including newlines
-              text: expect.stringMatching(/from `update the config`[\s\S]*Claude wants to use: Edit/),
+              text: expect.stringMatching(/`update the config`[\s\S]*Claude wants to use: Edit/),
             }),
           }),
         ]),
