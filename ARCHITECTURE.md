@@ -22,7 +22,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 │  │   Slack Events    │     ┌────────────────────────────────────────────┐   │
 │  │   (Socket Mode)   │────→│  Event Handlers                            │   │
 │  │                   │     │  - app_mention: Channel @mentions          │   │
-│  │  - app_mention    │     │  - message: DM handling (disabled)         │   │
+│  │  - app_mention    │     │  - message: DM text messages               │   │
 │  │  - block_actions  │     │  - channel_deleted: Session cleanup        │   │
 │  │  - channel_deleted│     │  - block_actions: Button clicks            │   │
 │  └───────────────────┘     └────────────────────────────────────────────┘   │
@@ -54,10 +54,10 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 │            │                                       │                         │
 │            ▼                                       ▼                         │
 │  ┌────────────────────────┐          ┌───────────────────────────────────┐  │
-│  │  Real-Time UI          │          │  MCP Server (mcp-server.ts)       │  │
-│  │  (blocks.ts)           │          │  - ask_user tool                  │  │
-│  │                        │          │  - approve_action tool            │  │
-│  │  Message 1: Status     │          │  - File-based IPC                 │  │
+│  │  Real-Time UI          │          │  Tool Approval System             │  │
+│  │  (blocks.ts)           │          │  - canUseTool callback            │  │
+│  │                        │          │  - AskUserQuestion prompts        │  │
+│  │  Message 1: Status     │          │  - Approve/Deny buttons           │  │
 │  │  - Mode | Model        │          │  - 7-day expiry with reminders    │  │
 │  │  - Current activity    │          └───────────────────────────────────┘  │
 │  │  - Abort button        │                                                  │
@@ -81,22 +81,23 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 ## Components
 
 ### Entry Point (`src/index.ts`)
-- Creates and clears answer directory (`/tmp/ccslack-answers/`) for MCP IPC
 - Starts the bot via `startBot()`
 - Sets up graceful shutdown handlers (SIGTERM, SIGINT)
 - Calls `stopAllWatchers()` to stop terminal watchers on shutdown
 
 ### Slack Bot (`src/slack-bot.ts`)
 - Handles `app_mention` events for channel @mentions
-- Handles `message.im` events for DM messages (currently limited)
+- Handles `message.im` events for DM text messages
 - Handles `block_actions` for button clicks (abort, tool approval, mode selection)
 - Handles `channel_deleted` for session cleanup
 - Manages active queries with abort capability via `ClaudeQuery.interrupt()`
 - Posts real-time status panel and activity log during processing
 - Coordinates tool approval flow in `default` permission mode
 - **Fork here button**: Creates new channel with point-in-time forked session
+- **DM notifications**: Sends DMs when users are mentioned (15-sec debounce per type)
+- **Emoji reactions**: Tracks message state (:eyes:, :question:, :x:, etc.)
 - **Error handling**: Top-level try/catch wraps all handlers
-- **Mutex locking**: Prevents race conditions during abort operations
+- **Mutex locking**: Prevents race conditions during abort and emoji operations
 
 ### Claude Client (`src/claude-client.ts`)
 - Wraps Claude Code SDK `query()` function
@@ -106,14 +107,13 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 - Configures `maxThinkingTokens` for extended thinking budget
 - Enables `includePartialMessages` for real-time activity tracking
 
-### MCP Server (`src/mcp-server.ts`)
-- Standalone MCP server spawned by SDK as subprocess
-- Implements `ask_user` tool for interactive Slack questions
-- Implements `approve_action` tool for action approvals
-- Uses file-based IPC via `/tmp/ccslack-answers/` directory
-- Polls for answer files written by main process
-- 7-day expiry with 4-hour reminder intervals
-- Auto-abort after max reminders reached
+### Tool Approval System
+- SDK's `canUseTool` callback handles tool approval in `default` mode
+- `AskUserQuestion` tool always prompts user in ALL permission modes
+- Tool approval UI shows tool name and input preview with Approve/Deny buttons
+- 7-day expiry with 4-hour reminder intervals (42 reminders max)
+- Auto-deny after max reminders reached
+- Pending approvals tracked in memory with cleanup on answer/abort
 
 ### Session Manager (`src/session-manager.ts`)
 - Persists sessions to `sessions.json`
@@ -136,13 +136,14 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 - Block Kit builders for all message types
 - **Status panel**: `buildStatusPanelBlocks()` - mode, model, current activity, spinner, abort button
 - **Activity log**: `buildActivityLogText()` - thinking, tool executions, generating status
-- **Collapsed activity**: `buildCollapsedActivityBlocks()` - summary with View Log/Download buttons
-- **Modal view**: `buildActivityLogModalView()` - paginated activity log with full thinking content
+- **Live activity**: `buildLiveActivityBlocks()` - real-time activity with Fork button on completion
+- **Combined status**: `buildCombinedStatusBlocks()` - unified status and activity display
 - Question blocks with buttons/multi-select dropdowns
 - Tool approval blocks for manual approval mode
-- Plan approval blocks (proceed auto/manual, reject)
+- Plan approval blocks (5 options: clear+bypass, accept edits, bypass, manual, change plan)
 - Mode and model selection blocks
 - Context usage display with visual progress bar
+- Cost display in status footer
 
 ### Commands (`src/commands.ts`)
 - Parses slash commands from user messages
@@ -174,6 +175,73 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 - Tracks aborted conversations to prevent race conditions
 - `markAborted()`, `isAborted()`, `clearAborted()`, `reset()` (testing only)
 - Used during query interrupt flow
+
+### FF Abort Tracker (`src/ff-abort-tracker.ts`)
+- Tracks aborted fast-forward sync operations
+- Similar API to abort-tracker but for `/ff` command
+- Enables "Stop FF" button to halt mid-sync
+
+### File Handler (`src/file-handler.ts`)
+- Downloads and processes Slack file uploads
+- **Limits**: Up to 20 files per message, 30MB max per file
+- **Image handling**: Resizes to max 3.75MB for Claude API
+- **Text detection**: JSON, JS, TS, XML, YAML, Python, shell scripts, etc.
+- **Binary rejection**: PDFs, ZIPs, audio/video, Office docs skipped with warning
+- Returns file metadata with content or base64 data
+
+### Content Builder (`src/content-builder.ts`)
+- Builds Claude-compatible multi-modal content blocks
+- Combines text prompts with image/file content
+- Handles base64 encoding for images
+- Supports multiple files per message
+- Adds file index numbering for user reference
+
+### Session Reader (`src/session-reader.ts`)
+- Parses Claude SDK JSONL session files from `~/.claude/projects/`
+- `readNewMessages()`: Read messages from byte offset
+- `extractTextContent()`: Convert content blocks to text
+- `groupMessagesByTurn()`: Group messages into user turns for `/ff`
+- `hasExitPlanMode()`: Detect plan mode completion
+- `extractPlanFilePathFromMessage()`: Extract plan file paths
+
+### Session Event Stream (`src/session-event-stream.ts`)
+- Reads session JSONL files as async generator
+- Streams events for real-time terminal watching
+- Supports resuming from byte offset
+
+### Terminal Watcher (`src/terminal-watcher.ts`)
+- Polls terminal session files for new messages
+- Posts updates to Slack channel in real-time
+- Tracks watch state per channel
+- Prevents concurrent polls with `pollInProgress` flag
+- `startWatching()`, `stopWatching()`, `stopAllWatchers()`
+
+### Message Sync (`src/message-sync.ts`)
+- Syncs terminal session messages to Slack for `/ff` command
+- **Turn-based posting**: Groups messages by user turn for fidelity
+- **TurnSegment structure**: Activity messages + text output pairs
+- **Interleaved content**: Handles think → text → think → tools → text patterns
+- Tracks synced message UUIDs to prevent duplicates
+- Supports resumable sync (can run `/ff` multiple times)
+
+### Activity Thread (`src/activity-thread.ts`)
+- Posts activity entries as thread replies
+- `formatThreadActivityBatch()`: Batches activity entries
+- `formatThreadThinkingMessage()`: Formats thinking content
+- `formatThreadResponseMessage()`: Formats response content
+- Truncates long content with .md attachment fallback
+- Rate-limited to prevent Slack API limits
+
+### Concurrent Check (`src/concurrent-check.ts`)
+- **DISABLED**: Attempts to detect if session is active in terminal
+- Returns `false` always (no reliable detection method found)
+- macOS `ps` truncates command arguments
+- Documented for potential future implementation
+
+### Utils (`src/utils.ts`)
+- Utility functions for markdown conversion and text processing
+- Markdown-to-Slack mrkdwn conversion
+- Text truncation helpers
 
 ## Data Flow
 
@@ -355,19 +423,20 @@ Real-time log of processing activities:
 - **error**: Error messages
 
 On completion:
-- Collapses to summary: "X thinking + Y tools in Zs"
-- View Log button: Opens modal with paginated full log
-- Download .txt button: Exports full activity log
+- Activity log displayed inline in status message
+- Shows collapsed summary: "X thinking + Y tools in Zs"
+- "Fork here" button on final message segment
+- Cost displayed in status footer ($X.XXXX)
 
 ### Activity Entry Types
 ```typescript
 interface ActivityEntry {
   timestamp: number;
-  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed';
+  type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'error' | 'generating' | 'aborted' | 'mode_changed' | 'context_cleared' | 'session_changed';
   tool?: string;
   durationMs?: number;
   message?: string;
-  thinkingContent?: string;     // Full content for modal/download
+  thinkingContent?: string;     // Full content stored in activity log
   thinkingTruncated?: string;   // First 500 chars for live display
   thinkingInProgress?: boolean;
   generatingChunks?: number;
@@ -471,36 +540,34 @@ Thinking content is:
 - Stored in full for View Log modal
 - Available for download via .txt export
 
-## MCP Server Integration
+## Tool Approval Integration
 
-The MCP server runs as a subprocess spawned by the SDK:
+The SDK uses callbacks for tool approval and questions:
 
 ```
-Main Process                    MCP Subprocess
+Claude SDK                       Slack Bot
      │                               │
-     │  SDK spawns subprocess        │
+     │  canUseTool callback          │
      │  ─────────────────────────────>
      │                               │
-     │                   ask_user tool called
-     │                               │
-     │                   Posts to Slack
+     │                   Posts Approve/Deny UI
      │                               │
      │  User clicks button           │
-     │  ─────────────────>           │
+     │  <─────────────────           │
      │                               │
-     │  Writes /tmp/ccslack-answers/ │
-     │  ─────────────────────────────>
+     │  Promise resolved             │
+     │  <─────────────────────────────
      │                               │
-     │                   Polls for file
-     │                   Reads answer
-     │                   Returns to SDK
+     │  SDK continues execution      │
 ```
 
-IPC mechanism:
-- Answer directory: `/tmp/ccslack-answers/`
-- File format: `{questionId}.json` containing `{ answer: string, timestamp: number }`
-- Main process writes, MCP subprocess polls and reads
-- File deleted after reading
+Approval mechanism:
+- `canUseTool` callback receives tool name and input
+- Bot posts Block Kit message with Approve/Deny buttons
+- User response resolves a Promise stored in `pendingToolApprovals` map
+- `AskUserQuestion` tool always prompts via button/dropdown UI
+- 7-day timeout with 4-hour reminders (max 42 reminders)
+- Auto-deny after timeout expires
 
 ## Development Commands
 
@@ -531,7 +598,6 @@ make clean              # Remove dist/ and coverage/
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (xoxb-...) |
 | `SLACK_APP_TOKEN` | App-Level Token for Socket Mode (xapp-...) |
 | `ANTHROPIC_API_KEY` | API key for SDK live tests (optional) |
-| `SLACK_CONTEXT` | JSON string set dynamically for MCP server subprocess |
 | `SKIP_SDK_TESTS` | Set to 'true' to skip live SDK tests |
 
 ## Commands
@@ -572,3 +638,118 @@ Sessions are automatically cleaned up when a Slack channel is deleted (via `chan
 **What is NOT deleted:**
 - Terminal forks created via `claude --resume <id> --fork-session`
 - These may be user's personal sessions and cannot be distinguished from bot-created forks
+
+## File Upload Support
+
+The bot supports file uploads attached to messages:
+
+### Processing Flow
+1. User attaches files to message mentioning @bot
+2. Bot downloads files from Slack (max 30MB per file, 20 files per message)
+3. Images resized if needed (max 3.75MB for Claude API)
+4. Text files have content extracted
+5. Binary files (PDF, ZIP, etc.) are skipped with warning
+6. Content blocks built for Claude multi-modal API
+
+### Supported Formats
+- **Images**: PNG, JPG, GIF, WebP (converted to base64)
+- **Text/Code**: JSON, JS, TS, XML, YAML, Python, shell scripts, markdown
+- **Skipped**: PDFs, ZIPs, audio/video, Office documents (with warning)
+
+## DM Notifications
+
+The bot sends direct messages to notify users of important events:
+
+### Notification Types
+- **Questions**: When `AskUserQuestion` tool is invoked
+- **Plan approvals**: When plan mode exits and approval is needed
+- **Tool approvals**: When manual tool approval is required
+- **Completions**: When a query completes with user mentions
+
+### Behavior
+- 15-second debounce per user+type combination
+- Skips DM channels (no need to notify about DMs)
+- Skips bot users (can't DM bots)
+- Includes permalink button to original message
+- Silently fails if DM fails (non-critical feature)
+
+## Emoji Reaction System
+
+The bot uses emoji reactions to indicate message state:
+
+| Emoji | Meaning |
+|-------|---------|
+| :eyes: | Processing in progress |
+| :question: | Waiting for user input (questions, approvals) |
+| :page_with_curl: | Plan file being presented |
+| :x: | Error occurred |
+| :octagonal_sign: | Processing stopped/aborted |
+| :twisted_rightwards_arrows: | Fork available |
+
+- Reactions added to original user message
+- Mutex-based serialization prevents race conditions
+- Automatically cleaned up on completion/error
+
+## Auto-Compaction
+
+Sessions are automatically compacted when context usage is high:
+
+### Trigger
+- Auto-compact threshold = 80% of remaining output capacity
+- Checked after each query completion
+
+### Behavior
+- Automatic (no user prompt required)
+- Shows completion message with stats
+- Different from manual `/compact` command
+- `compactIsManual` flag distinguishes auto vs manual
+
+### Status Display
+- `compactPercent`: Percentage of context remaining before trigger
+- `tokensToCompact`: Tokens until auto-compact triggers
+
+## Terminal Integration Details
+
+### Turn-Based Message Posting
+
+The `/ff` command posts messages grouped by user turn for fidelity:
+
+```
+Turn = User input + All associated responses
+     = Activity messages + Text output pairs
+```
+
+### TurnSegment Structure
+- Each turn can have multiple segments
+- Segment = Activity entries + Text output
+- Handles interleaved patterns: think → text → think → tools → text
+
+### Fast-Forward Flow
+1. `/ff` reads session JSONL from `~/.claude/projects/`
+2. Groups messages by turn using `groupMessagesByTurn()`
+3. Posts each turn's segments to Slack with activity
+4. Tracks synced UUIDs to prevent duplicates
+5. Starts watching for new messages
+
+### Watch State
+- `pollInProgress` flag prevents concurrent polls
+- Watch anchor messages show sync progress
+- "Stop FF" button can abort mid-sync
+- Resumable: `/ff` can run multiple times
+
+## Plan Mode Details
+
+### Plan Approval UI (5 Buttons)
+
+When Claude exits plan mode via `ExitPlanMode` tool:
+
+1. **Clear context & bypass** - Clears session AND enables bypass mode
+2. **Accept edits** - Enables `acceptEdits` mode
+3. **Bypass permissions** - Enables `bypassPermissions` mode
+4. **Manual approve** - Each tool needs individual approval
+5. **Change the plan** - User provides feedback on plan rejection
+
+### Plan Tracking
+- `planFilePath`: Path to current plan file (persistent)
+- `planPresentationCount`: Times plan has been presented (reset on `/clear`)
+- `/show-plan` command displays plan file content
