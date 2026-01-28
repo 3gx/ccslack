@@ -117,7 +117,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 
 ### Session Manager (`src/session-manager.ts`)
 - Persists sessions to `sessions.json`
-- **Session interface**: `sessionId`, `previousSessionIds`, `workingDir`, `mode`, `model`, `pathConfigured`, `configuredPath`, `configuredBy`, `configuredAt`, `lastUsage`, `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `planFilePath`, `syncedMessageUuids`, `slackOriginatedUserUuids`
+- **Session interface**: `sessionId`, `previousSessionIds`, `workingDir`, `mode`, `model`, `createdAt`, `lastActiveAt`, `pathConfigured`, `configuredPath`, `configuredBy`, `configuredAt`, `lastUsage`, `maxThinkingTokens`, `updateRateSeconds`, `threadCharLimit`, `planFilePath`, `planPresentationCount`, `syncedMessageUuids`, `slackOriginatedUserUuids`, `forkedFromChannelId`, `forkedFromMessageTs`, `forkedFromThreadTs`, `forkedFromSdkMessageId`, `forkedFromSessionId`, `forkedFromConversationKey`
 - **LastUsage interface**: `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `contextWindow`, `model`, `maxOutputTokens`
 - **ThreadSession interface**: Inherits from Session, adds `forkedFrom`, `forkedFromThreadTs`, `resumeSessionAtMessageId`
 - **Message mapping**: `SlackMessageMapping` links Slack timestamps to SDK message IDs and session IDs
