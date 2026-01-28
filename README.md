@@ -225,4 +225,4 @@ Run `make verify-tools` to check native dependencies. On Linux, run `make setup-
 
 ## License
 
-[Add license information]
+This project is licensed under the [BSD-3-Clause License](./LICENSE).
