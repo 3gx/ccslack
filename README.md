@@ -213,11 +213,6 @@ The bot cannot currently detect if a session is active in your terminal. This fe
 - macOS `ps` command truncates long arguments, hiding session IDs
 - No reliable cross-platform detection method found
 
-**Workaround:** Before using `/watch` to sync with terminal, manually check if Claude is already running:
-```bash
-ps aux | grep "claude --resume"
-```
-
 This limitation will be addressed in a future update.
 
 ### Concurrent Session Warning
