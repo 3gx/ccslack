@@ -49,7 +49,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 │  │  - Session resume/fork with resumeSessionAt                          │   │
 │  │  - Extended thinking (maxThinkingTokens)                             │   │
 │  │  - Model selection                                                   │   │
-│  │  - MCP server configuration                                          │   │
+│  │  - canUseTool callback for approvals                                 │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │            │                                       │                         │
 │            ▼                                       ▼                         │
@@ -101,7 +101,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
 
 ### Claude Client (`src/claude-client.ts`)
 - Wraps Claude Code SDK `query()` function
-- Configures MCP server for `ask_user` and `approve_action` tools
+- Implements `canUseTool` callback for tool approval in `default` mode
 - Maps permission modes directly to SDK (`plan`, `default`, `bypassPermissions`, `acceptEdits`)
 - Supports `forkSession` and `resumeSessionAt` for "Fork here" button
 - Configures `maxThinkingTokens` for extended thinking budget
@@ -284,7 +284,7 @@ The Slack bot enables interaction with Claude Code through Slack channels (via @
                     ┌──────────────────────┼──────────────────────┐
                     │                      │                      │
                     ▼                      ▼                      ▼
-            SDK stream_event        MCP ask_user tool      canUseTool callback
+            SDK stream_event       AskUserQuestion tool    canUseTool callback
             (real-time updates)           │                (default mode)
                     │                      │                      │
                     ▼                      ▼                      ▼
@@ -525,7 +525,7 @@ The "Fork here" button on messages creates a new Slack channel with a point-in-t
 In `default` mode, SDK calls `canUseTool` for tool approval:
 - Must return `{ behavior: 'allow', updatedInput: {...} }` or `{ behavior: 'deny', message: '...' }`
 - 7-day timeout with 4-hour reminders
-- Auto-deny `mcp__ask-user__approve_action` to avoid double prompts
+- `AskUserQuestion` tool always prompts user regardless of mode
 - Tool approval UI shows tool name and input preview
 
 ## Extended Thinking
@@ -537,8 +537,8 @@ Configurable via `/max-thinking-tokens <tokens>` command:
 
 Thinking content is:
 - Streamed in real-time to activity log (rolling window of last 500 chars)
-- Stored in full for View Log modal
-- Available for download via .txt export
+- Full content stored in activity entries during processing
+- Displayed inline in status message on completion
 
 ## Tool Approval Integration
 
