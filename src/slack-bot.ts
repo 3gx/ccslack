@@ -116,6 +116,28 @@ export function clearDmNotificationDebounce(): void {
 }
 
 /**
+ * Extract text from ContentBlock[] for query preview.
+ * Returns the text content or empty string if no text block found.
+ */
+function extractTextFromContent(content: string | ContentBlock[]): string {
+  if (typeof content === 'string') return content;
+  const textBlock = content.find((b): b is { type: 'text'; text: string } => b.type === 'text');
+  return textBlock?.text || '';
+}
+
+/**
+ * Truncate query text for DM notification preview.
+ * Removes backticks (would break formatting) and collapses whitespace.
+ */
+export function truncateQueryForPreview(query: string | undefined, maxLength: number = 50): string {
+  if (!query) return '';
+  // Remove backticks (would break formatting), collapse whitespace
+  const cleaned = query.replace(/`/g, '').replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= maxLength) return cleaned;
+  return cleaned.slice(0, maxLength).trim() + '...';
+}
+
+/**
  * Send a DM notification to user with permalink to the thread.
  * This triggers unread indicator on DM without polluting main channel.
  *
@@ -133,8 +155,9 @@ export async function sendDmNotification(params: {
   emoji: string;
   title: string;
   subtitle?: string;
+  queryPreview?: string;
 }): Promise<void> {
-  const { client, userId, channelId, messageTs, emoji, title, subtitle } = params;
+  const { client, userId, channelId, messageTs, emoji, title, subtitle, queryPreview } = params;
 
   // Skip for DMs - no need to DM about a DM
   if (!userId || channelId.startsWith('D')) return;
@@ -176,17 +199,20 @@ export async function sendDmNotification(params: {
     const dmResult = await client.conversations.open({ users: userId });
     if (!dmResult.ok || !dmResult.channel?.id) return;
 
+    // Build the from clause with query preview in backticks
+    const fromClause = queryPreview ? ` from \`${queryPreview}\`` : '';
+
     // Send DM with permalink button
     await withSlackRetry(() =>
       client.chat.postMessage({
         channel: dmResult.channel.id,
-        text: `${emoji} ${title} in ${channelName}`,
+        text: `${emoji} ${title}${fromClause} in ${channelName}`,
         blocks: [
           {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `${emoji} *${title}* in ${channelName}${subtitle ? `\n${subtitle}` : ''}`,
+              text: `${emoji} *${title}*${fromClause} in ${channelName}${subtitle ? `\n${subtitle}` : ''}`,
             },
             accessory: {
               type: 'button',
@@ -275,6 +301,8 @@ interface ProcessingState {
   compactStartTime: number | null;        // When compaction started
   compactPreTokens: number | null;        // Tokens before compaction (from compact_boundary)
   compactIsManual: boolean;               // true for /compact, false for auto-compact
+  // Original user query for DM notification context
+  originalQuery?: string;
 }
 
 /**
@@ -2085,7 +2113,8 @@ async function handleAskUserQuestion(
   isStillStreaming: () => boolean,
   conversationKey: string,
   originalTs?: string,  // For emoji tracking
-  userId?: string       // For user mention tagging
+  userId?: string,      // For user mention tagging
+  queryPreview?: string // For DM notification context
 ): Promise<PermissionResult> {
   const input = toolInput as unknown as AskUserQuestionInput;
   const answers: Record<string, string> = {};
@@ -2152,6 +2181,7 @@ async function handleAskUserQuestion(
         messageTs: (result as { ts?: string }).ts!,
         emoji: '❓',
         title: 'Question needs your input',
+        queryPreview,
       });
     }
 
@@ -2385,6 +2415,8 @@ async function showPlanApprovalUI(params: {
     durationMs?: number;
     rateLimitHits?: number;
     sessionId?: string;
+    // For DM notification context:
+    originalQuery?: string;
   };
   session: { mode: PermissionMode };
   originalTs?: string;
@@ -2531,6 +2563,7 @@ async function showPlanApprovalUI(params: {
         messageTs: (planApprovalResult as { ts?: string }).ts!,
         emoji: '📋',
         title: 'Plan ready for review',
+        queryPreview: truncateQueryForPreview(processingState.originalQuery),
       });
     }
 
@@ -3230,6 +3263,8 @@ async function handleMessage(params: {
     compactStartTime: null,
     compactPreTokens: null,
     compactIsManual: false,  // auto-compact
+    // Original query for DM notification context
+    originalQuery: textToProcess,
   };
 
   // Sync special entries from existingActivityLog to activityBatch for thread posting
@@ -3356,7 +3391,8 @@ async function handleMessage(params: {
           () => isActivelyStreaming,        // Check if still in middle of streaming
           conversationKey,
           originalTs,  // For emoji tracking
-          userId       // For user mention tagging
+          userId,      // For user mention tagging
+          truncateQueryForPreview(processingState.originalQuery)  // For DM notification context
         );
       }
 
@@ -3416,6 +3452,7 @@ async function handleMessage(params: {
           emoji: '🔧',
           title: 'Tool approval needed',
           subtitle: `Claude wants to use: ${toolName}`,
+          queryPreview: truncateQueryForPreview(processingState.originalQuery),
         });
       }
 
@@ -4585,6 +4622,7 @@ async function handleMessage(params: {
                 messageTs: statusMsgTs,
                 emoji: '✅',
                 title: 'Query completed',
+                queryPreview: truncateQueryForPreview(processingState.originalQuery),
               });
             }
           } catch (error) {

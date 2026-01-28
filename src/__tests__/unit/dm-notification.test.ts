@@ -123,7 +123,7 @@ vi.mock('../../concurrent-check.js', () => ({
   getContinueCommand: vi.fn().mockReturnValue(''),
 }));
 
-import { sendDmNotification, clearDmNotificationDebounce, DM_DEBOUNCE_MS } from '../../slack-bot.js';
+import { sendDmNotification, clearDmNotificationDebounce, DM_DEBOUNCE_MS, truncateQueryForPreview } from '../../slack-bot.js';
 
 describe('sendDmNotification', () => {
   let mockClient: any;
@@ -429,5 +429,116 @@ describe('sendDmNotification', () => {
 
     // Both should have sent
     expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('should include queryPreview in message when provided', async () => {
+    await sendDmNotification({
+      client: mockClient,
+      userId: 'U123',
+      channelId: 'C456',
+      messageTs: '123.456',
+      emoji: '✅',
+      title: 'Query completed',
+      queryPreview: 'fix the login bug',
+    });
+
+    expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('from `fix the login bug`'),
+        blocks: expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.objectContaining({
+              text: expect.stringContaining('from `fix the login bug`'),
+            }),
+          }),
+        ]),
+      })
+    );
+  });
+
+  it('should not include from clause when queryPreview is empty', async () => {
+    await sendDmNotification({
+      client: mockClient,
+      userId: 'U123',
+      channelId: 'C456',
+      messageTs: '123.456',
+      emoji: '✅',
+      title: 'Query completed',
+      queryPreview: '',
+    });
+
+    expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.not.stringContaining('from'),
+      })
+    );
+  });
+
+  it('should include both queryPreview and subtitle when both provided', async () => {
+    await sendDmNotification({
+      client: mockClient,
+      userId: 'U123',
+      channelId: 'C456',
+      messageTs: '123.456',
+      emoji: '🔧',
+      title: 'Tool approval needed',
+      subtitle: 'Claude wants to use: Edit',
+      queryPreview: 'update the config',
+    });
+
+    expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        blocks: expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.objectContaining({
+              // Use [\s\S] to match any character including newlines
+              text: expect.stringMatching(/from `update the config`[\s\S]*Claude wants to use: Edit/),
+            }),
+          }),
+        ]),
+      })
+    );
+  });
+});
+
+describe('truncateQueryForPreview', () => {
+  it('should return empty string for undefined input', () => {
+    expect(truncateQueryForPreview(undefined)).toBe('');
+  });
+
+  it('should return empty string for empty input', () => {
+    expect(truncateQueryForPreview('')).toBe('');
+  });
+
+  it('should return short text unchanged', () => {
+    expect(truncateQueryForPreview('fix the bug')).toBe('fix the bug');
+  });
+
+  it('should truncate long text at 50 characters with ellipsis', () => {
+    const longQuery = 'this is a very long query that should be truncated because it exceeds fifty characters';
+    const result = truncateQueryForPreview(longQuery);
+    expect(result.length).toBeLessThanOrEqual(53); // 50 + '...'
+    expect(result).toMatch(/\.\.\.$/);
+  });
+
+  it('should remove backticks from text', () => {
+    expect(truncateQueryForPreview('fix the `config.ts` file')).toBe('fix the config.ts file');
+  });
+
+  it('should collapse whitespace', () => {
+    expect(truncateQueryForPreview('fix   the\n\nbug')).toBe('fix the bug');
+  });
+
+  it('should handle text with only backticks', () => {
+    expect(truncateQueryForPreview('```code```')).toBe('code');
+  });
+
+  it('should trim whitespace', () => {
+    expect(truncateQueryForPreview('  fix the bug  ')).toBe('fix the bug');
+  });
+
+  it('should handle custom maxLength', () => {
+    const result = truncateQueryForPreview('this is a test query', 10);
+    expect(result).toBe('this is a...');
   });
 });
