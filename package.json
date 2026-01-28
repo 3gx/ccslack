@@ -2,6 +2,7 @@
   "name": "ccslack",
   "version": "1.0.0",
   "description": "Claude Code Slack Bot",
+  "license": "BSD-3-Clause",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
