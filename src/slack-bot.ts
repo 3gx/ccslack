@@ -1740,12 +1740,19 @@ async function createForkToChannel(params: {
           workingDir: getSession(sourceChannelId)?.workingDir ?? process.cwd(),
         });
 
+        // IMPORTANT: Must consume entire stream to ensure SDK writes session file to disk
+        // Early return would abandon the stream and SDK process may terminate before
+        // writing the .jsonl file, causing "session not found" errors after bot restart
+        let forkSessionId: string | null = null;
         for await (const event of forkQuery) {
           if (event.type === 'system' && (event as any).subtype === 'init') {
-            return (event as any).session_id as string;
+            forkSessionId = (event as any).session_id;
           }
         }
-        throw new Error('No session ID received from fork');
+        if (!forkSessionId) {
+          throw new Error('No session ID received from fork');
+        }
+        return forkSessionId;
       },
       {
         maxAttempts: 3,

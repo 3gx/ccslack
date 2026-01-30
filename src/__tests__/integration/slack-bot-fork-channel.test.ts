@@ -1118,4 +1118,101 @@ describe('slack-bot fork to channel handlers', () => {
       expect(forkContext).toBeUndefined();
     });
   });
+
+  describe('fork query stream consumption', () => {
+    it('should consume entire SDK stream to ensure session file is written', async () => {
+      // This test verifies the fix for: Fork Here button breaks after bot restart
+      // Root cause: Early return after init event abandons stream before SDK writes .jsonl file
+      // Fix: Consume entire stream, not just init event
+
+      const handler = registeredHandlers['view_fork_to_channel_modal'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Track how many events were consumed from the stream
+      let eventsConsumed = 0;
+      const totalEvents = 4;
+
+      vi.mocked(startClaudeQuery).mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          // Event 1: init (has session_id)
+          eventsConsumed++;
+          yield { type: 'system', subtype: 'init', session_id: 'forked-session-abc', model: 'claude-sonnet' };
+
+          // Event 2: assistant message (simulates Claude's response to synthetic message)
+          eventsConsumed++;
+          yield { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '.' }] } };
+
+          // Event 3: result
+          eventsConsumed++;
+          yield { type: 'result', result: 'done' };
+
+          // Event 4: final event (simulates stream completion after session file is written)
+          eventsConsumed++;
+          yield { type: 'system', subtype: 'done' };
+        },
+        interrupt: vi.fn(),
+      } as any);
+
+      // Mock session
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'plan',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      });
+
+      // Mock fork point
+      vi.mocked(findForkPointMessageId).mockReturnValue({
+        messageId: 'msg_abc123',
+        sessionId: 'main-session',
+      });
+
+      // Mock channel creation success
+      mockClient.conversations.create.mockResolvedValue({
+        ok: true,
+        channel: { id: 'CNEW123', name: 'fork-stream-test' },
+      });
+
+      await handler({
+        ack,
+        body: { user: { id: 'U123' } },
+        view: {
+          callback_id: 'fork_to_channel_modal',
+          private_metadata: JSON.stringify({
+            sourceChannelId: 'C123',
+            sourceMessageTs: '1234567890.123456',
+            sdkMessageId: 'msg_abc123',
+            sessionId: 'main-session',
+            conversationKey: 'C123',
+          }),
+          state: {
+            values: {
+              channel_name_block: {
+                channel_name_input: { value: 'fork-stream-test' },
+              },
+            },
+          },
+        },
+        client: mockClient,
+      });
+
+      // CRITICAL: All events must be consumed, not just the init event
+      // This ensures the SDK has time to write the session file before the process exits
+      expect(eventsConsumed).toBe(totalEvents);
+
+      // Verify the forked session ID was correctly captured from init event
+      expect(saveSession).toHaveBeenCalledWith(
+        'CNEW123',
+        expect.objectContaining({
+          sessionId: 'forked-session-abc',
+        })
+      );
+    });
+  });
 });
