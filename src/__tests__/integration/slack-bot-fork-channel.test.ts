@@ -937,4 +937,185 @@ describe('slack-bot fork to channel handlers', () => {
       expect(mockClient.chat.update).not.toHaveBeenCalled();
     });
   });
+
+  describe('thread reply message fetching (conversations.replies fix)', () => {
+    it('should use conversations.replies for thread messages when forking', async () => {
+      const handler = registeredHandlers['view_fork_to_channel_modal'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      vi.mocked(getSession).mockReturnValue({
+        sessionId: 'main-session',
+        workingDir: '/test/dir',
+        mode: 'default',
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        pathConfigured: true,
+        configuredPath: '/test/dir',
+        configuredBy: 'U123',
+        configuredAt: Date.now(),
+      } as any);
+
+      // Mock channel creation success
+      mockClient.conversations.create.mockResolvedValue({
+        ok: true,
+        channel: { id: 'CNEW123', name: 'test-fork' },
+      });
+
+      // Mock conversations.replies for thread message (the FIX)
+      mockClient.conversations.replies.mockResolvedValue({
+        messages: [{
+          ts: '1234567890.999999',  // Status message ts
+          text: 'Complete',
+          blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text: 'Activity log' } },
+            { type: 'context', elements: [{ type: 'mrkdwn', text: 'Status line' }] },
+            {
+              type: 'actions',
+              elements: [
+                { type: 'button', action_id: 'fork_here_C123_1234567890.123456', text: { type: 'plain_text', text: 'Fork here' } },
+              ],
+            },
+          ],
+        }],
+      });
+
+      // conversations.history should NOT be called for thread messages
+      mockClient.conversations.history.mockResolvedValue({ messages: [] });
+
+      const threadTs = '1234567890.123456';  // Thread parent (user's message)
+      const statusMsgTs = '1234567890.999999';  // Status message in thread
+
+      await handler({
+        ack,
+        body: { user: { id: 'U123' } },
+        view: {
+          callback_id: 'fork_to_channel_modal',
+          private_metadata: JSON.stringify({
+            sourceChannelId: 'C123',
+            sourceMessageTs: statusMsgTs,
+            threadTs: threadTs,  // KEY: threadTs is set
+            sdkMessageId: 'msg_abc123',
+            sessionId: 'main-session',
+            conversationKey: `C123_${threadTs}`,
+          }),
+          state: {
+            values: {
+              channel_name_block: {
+                channel_name_input: { value: 'test-fork' },
+              },
+            },
+          },
+        },
+        client: mockClient,
+      });
+
+      // CRITICAL: conversations.replies should be called (not conversations.history)
+      expect(mockClient.conversations.replies).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          ts: threadTs,           // Thread parent (fetches all replies, we find by ts)
+        })
+      );
+
+      // Source message should be updated with fork link
+      expect(mockClient.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C123',
+          ts: statusMsgTs,
+        })
+      );
+
+      const updateCall = mockClient.chat.update.mock.calls.find(
+        (call: any) => call[0].channel === 'C123' && call[0].ts === statusMsgTs
+      );
+      expect(updateCall).toBeDefined();
+
+      // Fork here button should be removed, fork link context should be added
+      const contextBlock = updateCall[0].blocks.find((b: any) =>
+        b.type === 'context' && b.elements?.[0]?.text?.includes('Fork:')
+      );
+      expect(contextBlock).toBeDefined();
+      expect(contextBlock.elements[0].text).toContain('<#CNEW123|');
+    });
+
+    it('should use conversations.replies for refresh fork on thread messages', async () => {
+      const handler = registeredHandlers['action_^refresh_fork_(.+)$'];
+      const mockClient = createMockSlackClient();
+      const ack = vi.fn();
+
+      // Mock conversations.info to fail (channel deleted)
+      mockClient.conversations.info.mockRejectedValue(new Error('channel_not_found'));
+
+      const threadTs = '1234567890.123456';
+      const statusMsgTs = '1111111111.111111';
+
+      // Mock conversations.replies for thread message
+      mockClient.conversations.replies.mockResolvedValue({
+        messages: [{
+          ts: statusMsgTs,
+          text: 'Complete',
+          blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text: 'Activity log' } },
+            { type: 'context', elements: [{ type: 'mrkdwn', text: '↗️ Fork: <#C_FORK|deleted>' }] },
+            {
+              type: 'actions',
+              elements: [
+                { type: 'button', action_id: 'refresh_fork_C_SOURCE', text: { type: 'plain_text', text: 'Refresh fork' } },
+              ],
+            },
+          ],
+        }],
+      });
+
+      await handler({
+        action: {
+          action_id: 'refresh_fork_C_SOURCE',
+          value: JSON.stringify({
+            forkChannelId: 'C_FORK',
+            threadTs: threadTs,  // KEY: threadTs is set
+            sdkMessageId: 'msg_original',
+            sessionId: 'source-session',
+            conversationKey: `C_SOURCE_${threadTs}`,
+          }),
+        },
+        ack,
+        body: {
+          channel: { id: 'C_SOURCE' },
+          message: { ts: statusMsgTs },
+        },
+        client: mockClient,
+      });
+
+      // CRITICAL: conversations.replies should be called (not conversations.history)
+      expect(mockClient.conversations.replies).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C_SOURCE',
+          ts: threadTs,           // Thread parent (fetches all replies, we find by ts)
+        })
+      );
+
+      // Message should be updated with Fork here button restored
+      expect(mockClient.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C_SOURCE',
+          ts: statusMsgTs,
+        })
+      );
+
+      const updateCall = mockClient.chat.update.mock.calls[0][0];
+
+      // Fork here button should be restored
+      const actionsBlock = updateCall.blocks.find((b: any) => b.type === 'actions');
+      expect(actionsBlock).toBeDefined();
+      const forkButton = actionsBlock.elements.find((e: any) => e.action_id?.startsWith('fork_here_'));
+      expect(forkButton).toBeDefined();
+
+      // Fork context block should be removed
+      const forkContext = updateCall.blocks.find((b: any) =>
+        b.type === 'context' && b.elements?.[0]?.text?.includes('Fork:')
+      );
+      expect(forkContext).toBeUndefined();
+    });
+  });
 });

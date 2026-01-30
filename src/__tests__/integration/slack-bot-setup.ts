@@ -36,6 +36,7 @@ export function createMockSlackClient() {
     },
     conversations: {
       history: vi.fn().mockResolvedValue({ ok: true, messages: [] }),
+      replies: vi.fn().mockResolvedValue({ ok: true, messages: [] }),
       create: vi.fn().mockResolvedValue({ ok: true, channel: { id: 'CNEW123', name: 'new-channel' } }),
       invite: vi.fn().mockResolvedValue({ ok: true }),
       info: vi.fn().mockResolvedValue({ ok: true, channel: { id: 'C123' } }),

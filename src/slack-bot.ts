@@ -1835,16 +1835,31 @@ async function updateSourceMessageWithJumpLink(
   const mutex = getUpdateMutex(mutexKey);
 
   await mutex.runExclusive(async () => {
-    const historyResult = await withSlackRetry(() =>
-      client.conversations.history({
-        channel: channelId,
-        latest: messageTs,
-        inclusive: true,
-        limit: 1,
-      })
-    ) as { messages?: any[] };
+    // Use conversations.replies for thread messages, conversations.history for channel messages
+    // IMPORTANT: conversations.replies ALWAYS includes thread parent as first message,
+    // so we must fetch all and find by exact ts match
+    const historyResult = forkInfo.threadTs
+      ? await withSlackRetry(() =>
+          client.conversations.replies({
+            channel: channelId,
+            ts: forkInfo.threadTs,    // Thread parent timestamp
+          })
+        )
+      : await withSlackRetry(() =>
+          client.conversations.history({
+            channel: channelId,
+            latest: messageTs,
+            inclusive: true,
+            limit: 1,
+          })
+        );
+    const result = historyResult as { messages?: any[] };
 
-    const msg = historyResult.messages?.[0];
+    // Find the exact message by ts (conversations.replies returns parent + all replies)
+    const msg = forkInfo.threadTs
+      ? result.messages?.find(m => m.ts === messageTs)
+      : result.messages?.[0];
+
     if (!msg?.blocks) return;
 
     const updatedBlocks: any[] = [];
@@ -1915,16 +1930,30 @@ async function restoreForkHereButton(
   const mutex = getUpdateMutex(mutexKey);
 
   await mutex.runExclusive(async () => {
-    const historyResult = await withSlackRetry(() =>
-      client.conversations.history({
-        channel: sourceChannelId,
-        latest: sourceMessageTs,
-        inclusive: true,
-        limit: 1,
-      })
-    ) as { messages?: any[] };
+    // Use conversations.replies for thread messages, conversations.history for channel messages
+    // IMPORTANT: conversations.replies ALWAYS includes thread parent as first message,
+    // so we must fetch all and find by exact ts match
+    const historyResult = threadTs
+      ? await withSlackRetry(() =>
+          client.conversations.replies({
+            channel: sourceChannelId,
+            ts: threadTs,              // Thread parent timestamp
+          })
+        )
+      : await withSlackRetry(() =>
+          client.conversations.history({
+            channel: sourceChannelId,
+            latest: sourceMessageTs,
+            inclusive: true,
+            limit: 1,
+          })
+        );
+    const result = historyResult as { messages?: any[] };
 
-    const msg = historyResult.messages?.[0];
+    // Find the exact message by ts (conversations.replies returns parent + all replies)
+    const msg = threadTs
+      ? result.messages?.find(m => m.ts === sourceMessageTs)
+      : result.messages?.[0];
     if (!msg?.blocks) return;
 
     // Find and remove fork context block, filter refresh_fork from actions
@@ -4584,7 +4613,7 @@ async function handleMessage(params: {
               isNewSession: newSessionId !== null && session.sessionId === null,
               isFinalSegment: isQueryComplete,  // Show Fork button on successful completion
               forkInfo: {
-                threadTs,
+                threadTs: effectiveThreadTs,  // Use effectiveThreadTs (where status msg is posted)
                 conversationKey,
                 sdkMessageId: currentAssistantUuid || undefined,
                 sessionId: newSessionId || session.sessionId || undefined,
@@ -4594,7 +4623,7 @@ async function handleMessage(params: {
                 ? {
                     activityLogKey,  // Use activityLogKey, NOT conversationKey
                     channelId,
-                    threadTs,  // Pass explicitly for thread/channel parity
+                    threadTs: effectiveThreadTs,  // Use effectiveThreadTs for thread/channel parity
                     statusMsgTs: statusMsgTs!,
                   }
                 : undefined,
