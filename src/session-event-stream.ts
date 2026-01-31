@@ -504,6 +504,9 @@ export interface ActivityEntry {
   toolErrorMessage?: string;         // Error message if failed
   mode?: string;                     // For mode_changed entries
   previousSessionId?: string;        // For session_changed entries
+  // Thread message linking (for clickable activity in main status)
+  threadMessageTs?: string;          // Slack ts of thread message for this activity
+  threadMessageLink?: string;        // Permalink URL to thread message
 }
 
 /**

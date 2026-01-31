@@ -7,6 +7,7 @@ import {
   postStartingToThread,
   postErrorToThread,
   ActivityBatchState,
+  getMessagePermalink,
 } from '../../activity-thread.js';
 import type { ActivityEntry } from '../../blocks.js';
 
@@ -18,6 +19,11 @@ vi.mock('../../streaming.js', () => ({
   }),
 }));
 
+// Mock retry module
+vi.mock('../../retry.js', () => ({
+  withSlackRetry: vi.fn((fn: () => Promise<any>) => fn()),
+}));
+
 import { uploadMarkdownAndPngWithResponse } from '../../streaming.js';
 
 // Helper to create mock Slack client
@@ -26,6 +32,7 @@ function createMockClient() {
     chat: {
       postMessage: vi.fn().mockResolvedValue({ ts: 'posted-ts-123' }),
       update: vi.fn().mockResolvedValue({ ok: true }),
+      getPermalink: vi.fn().mockResolvedValue({ ok: true, permalink: 'https://slack.com/archives/C123/p123456' }),
     },
   } as any;
 }
@@ -252,7 +259,7 @@ describe('activity-thread', () => {
   });
 
   describe('postResponseToThread', () => {
-    it('should post response with short content', async () => {
+    it('should post response with short content and return ts + permalink', async () => {
       const client = createMockClient();
 
       const result = await postResponseToThread(
@@ -264,11 +271,18 @@ describe('activity-thread', () => {
         500
       );
 
-      expect(result).toBe('posted-ts-123');
+      expect(result).toEqual({
+        ts: 'posted-ts-123',
+        permalink: 'https://slack.com/archives/C123/p123456',
+      });
       expect(client.chat.postMessage).toHaveBeenCalled();
       const call = client.chat.postMessage.mock.calls[0][0];
       expect(call.text).toContain(':speech_balloon: *Response*');
-      // No duration in header (simplified format)
+      // Verify getPermalink was called
+      expect(client.chat.getPermalink).toHaveBeenCalledWith({
+        channel: 'C123',
+        message_ts: 'posted-ts-123',
+      });
     });
 
     it('should upload .md for long response', async () => {
@@ -330,6 +344,135 @@ describe('activity-thread', () => {
         thread_ts: 'parent-ts',
         text: ':x: *Error:* Connection timeout',
         mrkdwn: true,
+      });
+    });
+  });
+
+  describe('getMessagePermalink', () => {
+    it('should return permalink from Slack API', async () => {
+      const client = createMockClient();
+
+      const permalink = await getMessagePermalink(client, 'C123', '1234567890.123456');
+
+      expect(permalink).toBe('https://slack.com/archives/C123/p123456');
+      expect(client.chat.getPermalink).toHaveBeenCalledWith({
+        channel: 'C123',
+        message_ts: '1234567890.123456',
+      });
+    });
+
+    it('should return fallback URL when API fails', async () => {
+      const client = createMockClient();
+      client.chat.getPermalink.mockRejectedValue(new Error('API error'));
+
+      const permalink = await getMessagePermalink(client, 'C123', '1234567890.123456');
+
+      // Fallback format: removes dot from timestamp
+      expect(permalink).toBe('https://slack.com/archives/C123/p1234567890123456');
+    });
+  });
+
+  describe('permalink capture', () => {
+    it('should capture permalink on entry when posting thinking to thread', async () => {
+      const client = createMockClient();
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'thinking',
+        thinkingContent: 'Analyzing the code...',
+        durationMs: 2000,
+      };
+
+      await postThinkingToThread(client, 'C123', 'parent-ts', entry, 500);
+
+      // Entry should be updated with permalink info
+      expect(entry.threadMessageTs).toBe('posted-ts-123');
+      expect(entry.threadMessageLink).toBe('https://slack.com/archives/C123/p123456');
+    });
+
+    it('should capture permalink on all entries when flushing activity batch', async () => {
+      const client = createMockClient();
+      const entry1: ActivityEntry = { timestamp: 1000, type: 'tool_complete', tool: 'Read', durationMs: 500 };
+      const entry2: ActivityEntry = { timestamp: 2000, type: 'tool_complete', tool: 'Edit', durationMs: 800 };
+      const state: ActivityBatchState = {
+        activityThreadMsgTs: null,
+        activityBatch: [entry1, entry2],
+        activityBatchStartIndex: 0,
+        lastActivityPostTime: 0,
+        threadParentTs: 'parent-ts',
+        postedBatchTs: null,
+        postedBatchToolUseIds: new Set(),
+      };
+
+      await flushActivityBatch(state, client, 'C123', 500, 'timer');
+
+      // Both entries should have the same permalink (same batch message)
+      expect(entry1.threadMessageTs).toBe('posted-ts-123');
+      expect(entry1.threadMessageLink).toBe('https://slack.com/archives/C123/p123456');
+      expect(entry2.threadMessageTs).toBe('posted-ts-123');
+      expect(entry2.threadMessageLink).toBe('https://slack.com/archives/C123/p123456');
+    });
+
+    it('should not set permalink when batch post fails', async () => {
+      const client = createMockClient();
+      client.chat.postMessage.mockRejectedValue(new Error('Post failed'));
+      const entry: ActivityEntry = { timestamp: 1000, type: 'tool_complete', tool: 'Read', durationMs: 500 };
+      const state: ActivityBatchState = {
+        activityThreadMsgTs: null,
+        activityBatch: [entry],
+        activityBatchStartIndex: 0,
+        lastActivityPostTime: 0,
+        threadParentTs: 'parent-ts',
+        postedBatchTs: null,
+        postedBatchToolUseIds: new Set(),
+      };
+
+      await flushActivityBatch(state, client, 'C123', 500, 'timer');
+
+      // Entry should NOT have permalink since post failed
+      expect(entry.threadMessageTs).toBeUndefined();
+      expect(entry.threadMessageLink).toBeUndefined();
+    });
+
+    it('should capture permalink on starting entry when entry is provided', async () => {
+      const client = createMockClient();
+      const entry: ActivityEntry = {
+        timestamp: 1000,
+        type: 'starting',
+      };
+
+      await postStartingToThread(client, 'C123', 'parent-ts', entry);
+
+      // Entry should be updated with permalink info
+      expect(entry.threadMessageTs).toBe('posted-ts-123');
+      expect(entry.threadMessageLink).toBe('https://slack.com/archives/C123/p123456');
+    });
+
+    it('should not crash when starting entry is not provided', async () => {
+      const client = createMockClient();
+
+      // Should work without entry parameter (backward compatible)
+      const result = await postStartingToThread(client, 'C123', 'parent-ts');
+
+      expect(result).toBe('posted-ts-123');
+      expect(client.chat.postMessage).toHaveBeenCalled();
+    });
+
+    it('should capture permalink on response entry via postResponseToThread', async () => {
+      const client = createMockClient();
+
+      const result = await postResponseToThread(
+        client,
+        'C123',
+        'parent-ts',
+        'Response content',
+        1000,
+        500
+      );
+
+      // Result should contain both ts and permalink
+      expect(result).toEqual({
+        ts: 'posted-ts-123',
+        permalink: 'https://slack.com/archives/C123/p123456',
       });
     });
   });

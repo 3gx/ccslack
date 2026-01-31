@@ -1107,6 +1107,9 @@ export interface ActivityEntry {
   toolErrorMessage?: string;         // Error message if failed
   mode?: string;                     // For mode_changed entries
   previousSessionId?: string;        // For session_changed entries
+  // Thread message linking (for clickable activity in main status)
+  threadMessageTs?: string;          // Slack ts of thread message for this activity
+  threadMessageLink?: string;        // Permalink URL to thread message
 }
 
 // Constants for activity log display
@@ -1115,6 +1118,22 @@ const MAX_LIVE_ENTRIES = 300;
 const ROLLING_WINDOW_SIZE = 20;
 export const ACTIVITY_LOG_MAX_CHARS = 1000; // Reduced from 2000 for cleaner display
 export const TODO_LIST_MAX_CHARS = 500; // Max chars for todo section at top of activity message
+
+/**
+ * Escape pipe characters in link labels to prevent Slack mrkdwn parsing issues.
+ */
+function escapeLinkLabel(label: string): string {
+  return label.replace(/\|/g, '¦');
+}
+
+/**
+ * Wrap an activity label with a clickable link to its thread message.
+ * If no link is provided, returns the label unchanged.
+ */
+export function linkifyActivityLabel(label: string, link?: string): string {
+  if (!link) return label;
+  return `<${link}|${escapeLinkLabel(label)}>`;
+}
 
 /**
  * Todo item from SDK TodoWrite tool.
@@ -2170,11 +2189,14 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
   }
 
   for (const entry of displayEntries) {
+    const link = entry.threadMessageLink;
     switch (entry.type) {
-      case 'starting':
-        lines.push(':brain: *Analyzing request...*');
+      case 'starting': {
+        const label = linkifyActivityLabel('Analyzing request...', link);
+        lines.push(`:brain: *${label}*`);
         break;
-      case 'thinking':
+      }
+      case 'thinking': {
         // Show thinking content - rolling window for in-progress, truncated for complete
         const thinkingText = entry.thinkingTruncated || entry.thinkingContent || '';
         const charCount = entry.thinkingContent?.length || thinkingText.length;
@@ -2185,7 +2207,8 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
         if (entry.thinkingInProgress) {
           // In-progress: show "Thinking..." with rolling window of latest content
           const charIndicator = charCount > 0 ? ` _[${charCount} chars]_` : '';
-          lines.push(`:brain: *Thinking...*${thinkingDuration}${charIndicator}`);
+          const label = linkifyActivityLabel('Thinking...', link);
+          lines.push(`:brain: *${label}*${thinkingDuration}${charIndicator}`);
           if (thinkingText) {
             // Rolling window: thinkingTruncated contains last 500 chars with "..." prefix
             // Show up to 300 chars for live display to keep it readable
@@ -2204,7 +2227,8 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
           const truncatedIndicator = charCount > THINKING_TRUNCATE_LENGTH
             ? ` _[${charCount} chars]_`
             : '';
-          lines.push(`:brain: *Thinking*${thinkingDuration}${truncatedIndicator}`);
+          const label = linkifyActivityLabel('Thinking', link);
+          lines.push(`:brain: *${label}*${thinkingDuration}${truncatedIndicator}`);
           if (thinkingText) {
             // Show last 500 chars of thinking (thinkingTruncated already contains last 500 with "..." prefix)
             const displayText = thinkingText.replace(/\n/g, ' ').trim();
@@ -2217,15 +2241,18 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
           }
         }
         break;
-      case 'tool_start':
+      }
+      case 'tool_start': {
         // Only show tool_start if tool hasn't completed yet (in progress)
         if (!completedTools.has(entry.tool || '')) {
           const startEmoji = getToolEmoji(entry.tool);
           const startInputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
-          lines.push(`${startEmoji} *${formatToolName(entry.tool || 'Unknown')}*${startInputSummary} [in progress]`);
+          const toolLabel = linkifyActivityLabel(formatToolName(entry.tool || 'Unknown'), link);
+          lines.push(`${startEmoji} *${toolLabel}*${startInputSummary} [in progress]`);
         }
         break;
-      case 'tool_complete':
+      }
+      case 'tool_complete': {
         // Show completed tool with checkmark, input summary, result metrics, output hint, and duration
         const tcInputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
         const resultSummary = formatToolResultSummary(entry);
@@ -2235,12 +2262,16 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
         const outputHint = (!entry.toolIsError && entry.toolOutputPreview)
           ? ` → \`${entry.toolOutputPreview.replace(/\s+/g, ' ').slice(0, 50)}${entry.toolOutputPreview.length > 50 ? '...' : ''}\``
           : '';
-        lines.push(`:white_check_mark: *${formatToolName(entry.tool || 'Unknown')}*${tcInputSummary}${resultSummary}${outputHint}${tcDuration}${errorFlag}`);
+        const toolLabel = linkifyActivityLabel(formatToolName(entry.tool || 'Unknown'), link);
+        lines.push(`:white_check_mark: *${toolLabel}*${tcInputSummary}${resultSummary}${outputHint}${tcDuration}${errorFlag}`);
         break;
-      case 'error':
-        lines.push(`:x: Error: ${entry.message}`);
+      }
+      case 'error': {
+        const label = linkifyActivityLabel('Error', link);
+        lines.push(`:x: ${label}: ${entry.message}`);
         break;
-      case 'generating':
+      }
+      case 'generating': {
         // Show text generation progress with optional content preview
         const responseText = entry.generatingTruncated || entry.generatingContent || '';
         const responseCharCount = entry.generatingContent?.length || entry.generatingChars || responseText.length;
@@ -2248,7 +2279,8 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
         const charInfo = responseCharCount > 0 ? ` _[${responseCharCount.toLocaleString()} chars]_` : '';
 
         if (entry.generatingInProgress) {
-          lines.push(`:pencil: *Generating...*${genDuration}${charInfo}`);
+          const label = linkifyActivityLabel('Generating...', link);
+          lines.push(`:pencil: *${label}*${genDuration}${charInfo}`);
           if (responseText) {
             // Show preview of response (up to 300 chars)
             const displayText = responseText.replace(/\n/g, ' ').trim();
@@ -2260,7 +2292,8 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
             }
           }
         } else {
-          lines.push(`:pencil: *Response*${genDuration}${charInfo}`);
+          const label = linkifyActivityLabel('Response', link);
+          lines.push(`:pencil: *${label}*${genDuration}${charInfo}`);
           if (responseText) {
             // Show preview of completed response (first 300 chars)
             const displayText = responseText.replace(/\n/g, ' ').trim();
@@ -2273,6 +2306,7 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
           }
         }
         break;
+      }
       case 'mode_changed':
         lines.push(`:gear: Mode changed to *${entry.mode}*`);
         break;
@@ -2284,9 +2318,11 @@ export function buildActivityLogText(entries: ActivityEntry[], inProgress: boole
           lines.push(`:bookmark: Previous session: \`${entry.previousSessionId}\``);
         }
         break;
-      case 'aborted':
-        lines.push(':octagonal_sign: *Aborted by user*');
+      case 'aborted': {
+        const label = linkifyActivityLabel('Aborted by user', link);
+        lines.push(`:octagonal_sign: *${label}*`);
         break;
+      }
     }
   }
 

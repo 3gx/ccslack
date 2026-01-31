@@ -15,11 +15,39 @@ import {
   formatThreadErrorMessage,
 } from './blocks.js';
 import { uploadMarkdownAndPngWithResponse } from './streaming.js';
+import { withSlackRetry } from './retry.js';
 
 /**
  * Default character limit for thread messages before truncation + attachment.
  */
 const DEFAULT_THREAD_CHAR_LIMIT = 500;
+
+/**
+ * Get permalink URL for a message using Slack API.
+ * Returns workspace-specific URL that works properly on iOS mobile app.
+ * Falls back to manual URL construction if API call fails.
+ */
+export async function getMessagePermalink(
+  client: WebClient,
+  channel: string,
+  messageTs: string
+): Promise<string> {
+  try {
+    const result = await withSlackRetry(() =>
+      client.chat.getPermalink({
+        channel,
+        message_ts: messageTs,
+      })
+    ) as { ok?: boolean; permalink?: string };
+    if (result.ok && result.permalink) {
+      return result.permalink;
+    }
+  } catch (error) {
+    console.error('[getMessagePermalink] Failed to get permalink, using fallback:', error);
+  }
+  // Fallback to manual URL construction (works on desktop but may not open in iOS app)
+  return `https://slack.com/archives/${channel}/p${messageTs.replace('.', '')}`;
+}
 
 /**
  * Post activity content to a thread reply.
@@ -154,6 +182,17 @@ export async function flushActivityBatch(
       );
       // Update last post time for rate limiting
       state.lastActivityPostTime = Date.now();
+
+      // Capture permalink and store on all batch entries for clickable activity links
+      try {
+        const permalink = await getMessagePermalink(client, channelId, result.ts);
+        for (const entry of state.activityBatch) {
+          entry.threadMessageTs = result.ts;
+          entry.threadMessageLink = permalink;
+        }
+      } catch (permalinkError) {
+        console.error('[activity-thread] Failed to get permalink for batch:', permalinkError);
+      }
     }
   } catch (error) {
     console.error('[activity-thread] Failed to flush batch:', error);
@@ -244,7 +283,19 @@ export async function postThinkingToThread(
     }
   );
 
-  return result?.ts ?? null;
+  const ts = result?.ts ?? null;
+
+  // Capture permalink and store on entry for clickable activity links
+  if (ts) {
+    try {
+      entry.threadMessageTs = ts;
+      entry.threadMessageLink = await getMessagePermalink(client, channelId, ts);
+    } catch (error) {
+      console.error('[postThinkingToThread] Failed to get permalink:', error);
+    }
+  }
+
+  return ts;
 }
 
 /**
@@ -260,7 +311,7 @@ export async function postThinkingToThread(
  * @param durationMs - Response generation duration
  * @param charLimit - Character limit for truncation
  * @param userId - User ID for file uploads
- * @returns Posted message ts or null
+ * @returns Object with posted message ts and permalink, or null
  */
 export async function postResponseToThread(
   client: WebClient,
@@ -270,7 +321,7 @@ export async function postResponseToThread(
   durationMs: number | undefined,
   charLimit: number,
   userId?: string
-): Promise<string | null> {
+): Promise<{ ts: string; permalink: string } | null> {
   const truncated = content.length > charLimit;
   const formattedText = formatThreadResponseMessage(
     content.length,
@@ -292,7 +343,19 @@ export async function postResponseToThread(
     }
   );
 
-  return result?.ts ?? null;
+  const ts = result?.ts;
+  if (!ts) return null;
+
+  // Get permalink for clickable activity links
+  let permalink: string;
+  try {
+    permalink = await getMessagePermalink(client, channelId, ts);
+  } catch (error) {
+    console.error('[postResponseToThread] Failed to get permalink:', error);
+    permalink = `https://slack.com/archives/${channelId}/p${ts.replace('.', '')}`;
+  }
+
+  return { ts, permalink };
 }
 
 /**
@@ -306,7 +369,8 @@ export async function postResponseToThread(
 export async function postStartingToThread(
   client: WebClient,
   channelId: string,
-  parentTs: string
+  parentTs: string,
+  entry?: ActivityEntry
 ): Promise<string | null> {
   const result = await postActivityToThread(
     client,
@@ -315,7 +379,19 @@ export async function postStartingToThread(
     formatThreadStartingMessage()
   );
 
-  return result?.ts ?? null;
+  const ts = result?.ts ?? null;
+
+  // Capture permalink and store on entry for clickable activity links
+  if (ts && entry) {
+    try {
+      entry.threadMessageTs = ts;
+      entry.threadMessageLink = await getMessagePermalink(client, channelId, ts);
+    } catch (error) {
+      console.error('[postStartingToThread] Failed to get permalink:', error);
+    }
+  }
+
+  return ts;
 }
 
 /**

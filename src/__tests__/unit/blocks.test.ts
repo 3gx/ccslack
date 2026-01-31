@@ -44,6 +44,7 @@ import {
   formatThreadStartingMessage,
   formatThreadErrorMessage,
   buildAttachThinkingFileButton,
+  linkifyActivityLabel,
 } from '../../blocks.js';
 import type { ModelInfo } from '../../model-cache.js';
 import type { LastUsage } from '../../session-manager.js';
@@ -2429,6 +2430,125 @@ describe('blocks', () => {
       const text = buildActivityLogText(entries, true);
       expect(text).not.toContain(':bookmark:');
       expect(text).not.toContain('Previous session');
+    });
+
+    // Clickable activity links tests
+    it('should make activity labels clickable when threadMessageLink is set', () => {
+      const permalink = 'https://slack.com/archives/C123/p1234567890123456';
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting', threadMessageLink: permalink },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(`<${permalink}|Analyzing request...>`);
+    });
+
+    it('should make thinking label clickable when threadMessageLink is set', () => {
+      const permalink = 'https://slack.com/archives/C123/p1234567890123456';
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'thinking',
+          thinkingContent: 'Analyzing...',
+          thinkingTruncated: 'Analyzing...',
+          threadMessageLink: permalink,
+        },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(`<${permalink}|Thinking>`);
+    });
+
+    it('should make tool_complete label clickable when threadMessageLink is set', () => {
+      const permalink = 'https://slack.com/archives/C123/p1234567890123456';
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'tool_complete',
+          tool: 'Read',
+          durationMs: 500,
+          threadMessageLink: permalink,
+        },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(`<${permalink}|Read>`);
+    });
+
+    it('should make generating/Response label clickable when threadMessageLink is set', () => {
+      const permalink = 'https://slack.com/archives/C123/p1234567890123456';
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'generating',
+          generatingChars: 500,
+          generatingInProgress: false,
+          threadMessageLink: permalink,
+        },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(`<${permalink}|Response>`);
+    });
+
+    it('should make error label clickable when threadMessageLink is set', () => {
+      const permalink = 'https://slack.com/archives/C123/p1234567890123456';
+      const entries: ActivityEntry[] = [
+        {
+          timestamp: Date.now(),
+          type: 'error',
+          message: 'Something went wrong',
+          threadMessageLink: permalink,
+        },
+      ];
+      const text = buildActivityLogText(entries, true);
+      expect(text).toContain(`<${permalink}|Error>`);
+    });
+
+    it('should make aborted label clickable when threadMessageLink is set', () => {
+      const permalink = 'https://slack.com/archives/C123/p1234567890123456';
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'aborted', threadMessageLink: permalink },
+      ];
+      const text = buildActivityLogText(entries, false);
+      expect(text).toContain(`<${permalink}|Aborted by user>`);
+    });
+
+    it('should render plain labels when threadMessageLink is not set', () => {
+      const entries: ActivityEntry[] = [
+        { timestamp: Date.now(), type: 'starting' },
+        { timestamp: Date.now(), type: 'tool_complete', tool: 'Read', durationMs: 500 },
+      ];
+      const text = buildActivityLogText(entries, true);
+      // Should NOT have link syntax
+      expect(text).not.toContain('<https://');
+      expect(text).toContain('Analyzing request...');
+      expect(text).toContain('*Read*');
+    });
+
+    it('should escape pipe characters in labels to prevent link parsing issues', () => {
+      // Pipe characters in Slack mrkdwn links need escaping
+      const result = linkifyActivityLabel('Test|Label', 'https://example.com');
+      expect(result).toContain('Test¦Label');
+      expect(result).not.toContain('Test|Label');
+    });
+  });
+
+  describe('linkifyActivityLabel', () => {
+    it('should wrap label with Slack mrkdwn link when link is provided', () => {
+      const result = linkifyActivityLabel('Thinking', 'https://slack.com/archives/C123/p123');
+      expect(result).toBe('<https://slack.com/archives/C123/p123|Thinking>');
+    });
+
+    it('should return plain label when no link is provided', () => {
+      const result = linkifyActivityLabel('Thinking');
+      expect(result).toBe('Thinking');
+    });
+
+    it('should return plain label when link is undefined', () => {
+      const result = linkifyActivityLabel('Thinking', undefined);
+      expect(result).toBe('Thinking');
+    });
+
+    it('should escape pipe characters in label', () => {
+      const result = linkifyActivityLabel('Label|With|Pipes', 'https://example.com');
+      expect(result).toBe('<https://example.com|Label¦With¦Pipes>');
     });
   });
 

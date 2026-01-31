@@ -3402,7 +3402,8 @@ async function handleMessage(params: {
 
   // Post starting entry to thread (activity thread reply) - ONLY if NOT reusing status message
   if (processingState.threadParentTs && !existingStatusMsgTs) {
-    postStartingToThread(client, channelId, processingState.threadParentTs).catch(err => {
+    const startingEntry = processingState.activityLog.find(e => e.type === 'starting');
+    postStartingToThread(client, channelId, processingState.threadParentTs, startingEntry).catch(err => {
       console.error('[Activity Thread] Failed to post starting entry:', err);
     });
   }
@@ -3775,6 +3776,9 @@ async function handleMessage(params: {
                 blocks,
               });
               console.log(`[Activity Thread] Thinking updated with retry button (upload failed)`);
+              // Capture permalink for clickable activity links
+              finalEntry.threadMessageTs = processingState.activityThreadMsgTs;
+              finalEntry.threadMessageLink = await getMessagePermalink(client, channelId, processingState.activityThreadMsgTs);
             } catch (err) {
               console.error('[Activity Thread] Failed to update thinking with retry button:', err);
             }
@@ -3800,6 +3804,9 @@ async function handleMessage(params: {
               ts: processingState.activityThreadMsgTs,
               text: formattedText,
             });
+            // Capture permalink for clickable activity links
+            finalEntry.threadMessageTs = processingState.activityThreadMsgTs;
+            finalEntry.threadMessageLink = await getMessagePermalink(client, channelId, processingState.activityThreadMsgTs);
           } catch (err) {
             console.error('[Activity Thread] Failed to finalize thinking in-place:', err);
           }
@@ -3907,7 +3914,7 @@ async function handleMessage(params: {
             ? { sdkMessageId: currentAssistantUuid, sessionId: newSessionId }
             : undefined;
 
-          const threadPostTs = await postResponseToThread(
+          const threadPostResult = await postResponseToThread(
             client,
             channelId,
             processingState.threadParentTs,
@@ -3921,14 +3928,20 @@ async function handleMessage(params: {
           });
 
           // Save mapping for activity thread post (required for Fork here functionality)
-          if (threadPostTs && threadMappingInfo) {
-            saveMessageMapping(channelId, threadPostTs, {
+          if (threadPostResult && threadMappingInfo) {
+            saveMessageMapping(channelId, threadPostResult.ts, {
               sdkMessageId: threadMappingInfo.sdkMessageId,
               sessionId: threadMappingInfo.sessionId,
               type: 'assistant',
             });
             mappedAssistantUuids.add(threadMappingInfo.sdkMessageId);
-            console.log(`[Activity Thread] Saved mapping: ${threadMappingInfo.sdkMessageId} -> ${threadPostTs}`);
+            console.log(`[Activity Thread] Saved mapping: ${threadMappingInfo.sdkMessageId} -> ${threadPostResult.ts}`);
+          }
+
+          // Update generating entry with permalink for clickable activity links
+          if (threadPostResult && entry) {
+            entry.threadMessageTs = threadPostResult.ts;
+            entry.threadMessageLink = threadPostResult.permalink;
           }
         }
 
