@@ -1206,7 +1206,7 @@ async function runClearSession(
       sessionId: null,  // Next message will start fresh without resuming
       previousSessionIds: previousIds,
       lastUsage: undefined,  // Clear stale usage data so /status and /context show fresh state
-      mode: 'default',  // Reset to safe default mode
+      mode: 'bypassPermissions',  // Reset to bypass mode on clear
       planFilePath: null,  // Reset plan file path on clear
       planPresentationCount: undefined,  // Reset plan presentation counter on clear
     });
