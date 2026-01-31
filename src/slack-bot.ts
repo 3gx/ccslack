@@ -1768,28 +1768,11 @@ async function createForkToChannel(params: {
     return { success: false, error: 'Failed to fork session' };
   }
 
-  // 4. Get permalink to source message
-  const forkLink = await getMessagePermalink(client, sourceChannelId, sourceMessageTs);
-
-  // 5. Post first message in new channel with sessionId
-  await withSlackRetry(() =>
-    client.chat.postMessage({
-      channel: newChannelId,
-      text: `🔀 This is a fork of ${forkLink}`,
-      blocks: [{
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `🔀 Point-in-time fork from <${forkLink}|this message>\n\nSession: \`${forkedSessionId}\``,
-        },
-      }],
-    })
-  );
-
-  // 6. Create session for new channel with sessionId already populated
+  // 4. Create session for new channel BEFORE posting message
+  // This prevents race condition where user navigates to channel before session exists
   const mainSession = getSession(sourceChannelId);
   await saveSession(newChannelId, {
-    sessionId: forkedSessionId,  // Already have it!
+    sessionId: forkedSessionId,
     workingDir: mainSession?.workingDir ?? process.cwd(),
     mode: mainSession?.mode ?? 'default',
     model: mainSession?.model,
@@ -1810,6 +1793,24 @@ async function createForkToChannel(params: {
     forkedFromSessionId: params.sessionId,
     forkedFromConversationKey: params.conversationKey,
   });
+
+  // 5. Get permalink to source message
+  const forkLink = await getMessagePermalink(client, sourceChannelId, sourceMessageTs);
+
+  // 6. Post first message in new channel with sessionId
+  await withSlackRetry(() =>
+    client.chat.postMessage({
+      channel: newChannelId,
+      text: `🔀 This is a fork of ${forkLink}`,
+      blocks: [{
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `🔀 Point-in-time fork from <${forkLink}|this message>\n\nSession: \`${forkedSessionId}\``,
+        },
+      }],
+    })
+  );
 
   // 7. Update source message - replace "Fork here" with channel link + Refresh fork button
   await updateSourceMessageWithJumpLink(client, sourceChannelId, sourceMessageTs, newChannelId, actualName, {
