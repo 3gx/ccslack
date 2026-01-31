@@ -5177,9 +5177,20 @@ app.view('fork_to_channel_modal', async ({ ack, body, view, client }) => {
     return;
   }
 
+  const metadata = JSON.parse(view.private_metadata || '{}');
+
+  // Check if source conversation is busy - forking from active session causes SDK crash
+  const sourceConversationKey = getConversationKey(metadata.sourceChannelId, metadata.threadTs);
+  if (busyConversations.has(sourceConversationKey)) {
+    await ack({
+      response_action: 'errors',
+      errors: { channel_name_block: 'Cannot fork while a query is running. Please wait for it to complete.' },
+    });
+    return;
+  }
+
   await ack(); // Close modal
 
-  const metadata = JSON.parse(view.private_metadata || '{}');
   const result = await createForkToChannel({
     channelName,
     ...metadata,
@@ -6175,6 +6186,21 @@ app.action(/^fork_here_(.+)$/, async ({ action, ack, body, client }) => {
   const actionId = 'action_id' in action ? action.action_id : '';
   const match = actionId.match(/^fork_here_(.+)$/);
   const conversationKey = match ? match[1] : '';
+
+  // Check if source conversation is busy - forking from active session causes SDK crash
+  if (busyConversations.has(conversationKey)) {
+    const bodyWithChannel = body as any;
+    const channelId = bodyWithChannel.channel?.id;
+    const userId = bodyWithChannel.user?.id;
+    if (channelId && userId) {
+      await (client as any).chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: ':warning: Cannot fork while a query is running. Please wait for it to complete or click Abort.',
+      });
+    }
+    return;
+  }
 
   // Get messageTs from the message the button is on (Slack provides this)
   const bodyWithMessage = body as any;
