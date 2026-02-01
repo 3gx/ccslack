@@ -74,6 +74,26 @@ export function isTextFile(mimetype: string): boolean {
 }
 
 /**
+ * Check if filename has a text file extension.
+ */
+export function isTextFileByExtension(filename: string): boolean {
+  const textExtensions = [
+    'txt', 'md', 'markdown',
+    'json', 'yaml', 'yml',
+    'js', 'ts', 'jsx', 'tsx',
+    'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp',
+    'html', 'css', 'scss', 'less',
+    'xml', 'svg',
+    'sh', 'bash', 'zsh',
+    'toml', 'ini', 'cfg', 'conf',
+    'sql', 'graphql',
+    'csv', 'log',
+  ];
+  const ext = filename.split('.').pop()?.toLowerCase();
+  return ext ? textExtensions.includes(ext) : false;
+}
+
+/**
  * Check if file is a binary type that cannot be read by Claude.
  */
 export function isBinaryFile(mimetype: string): boolean {
@@ -231,8 +251,8 @@ export async function processSlackFiles(
     const name = file.name || getFallbackName(file);
     const mimetype = file.mimetype || 'application/octet-stream';
     const isImage = isImageFile(mimetype);
-    const isText = isTextFile(mimetype);
-    const isBinary = isBinaryFile(mimetype);
+    const isText = isTextFile(mimetype) || isTextFileByExtension(name);
+    const isBinary = isBinaryFile(mimetype) && !isText;  // Don't skip if extension says text
 
     // Skip binary files (PDF, audio, video, etc.)
     if (isBinary) {

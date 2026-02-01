@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   isImageFile,
   isTextFile,
+  isTextFileByExtension,
   isBinaryFile,
   formatFileSize,
   processSlackFiles,
@@ -68,6 +69,38 @@ describe('file-handler', () => {
       expect(isTextFile('application/pdf')).toBe(false);
       expect(isTextFile('image/png')).toBe(false);
       expect(isTextFile('application/octet-stream')).toBe(false);
+    });
+  });
+
+  describe('isTextFileByExtension', () => {
+    it('returns true for .md files', () => {
+      expect(isTextFileByExtension('readme.md')).toBe(true);
+      expect(isTextFileByExtension('NOTES.MD')).toBe(true);
+    });
+
+    it('returns true for .txt files', () => {
+      expect(isTextFileByExtension('file.txt')).toBe(true);
+      expect(isTextFileByExtension('FILE.TXT')).toBe(true);
+    });
+
+    it('returns true for code files', () => {
+      expect(isTextFileByExtension('script.js')).toBe(true);
+      expect(isTextFileByExtension('app.ts')).toBe(true);
+      expect(isTextFileByExtension('main.py')).toBe(true);
+      expect(isTextFileByExtension('config.json')).toBe(true);
+      expect(isTextFileByExtension('style.css')).toBe(true);
+    });
+
+    it('returns false for binary extensions', () => {
+      expect(isTextFileByExtension('image.png')).toBe(false);
+      expect(isTextFileByExtension('doc.pdf')).toBe(false);
+      expect(isTextFileByExtension('archive.zip')).toBe(false);
+      expect(isTextFileByExtension('video.mp4')).toBe(false);
+    });
+
+    it('returns false for files without extension', () => {
+      expect(isTextFileByExtension('Makefile')).toBe(false);
+      expect(isTextFileByExtension('noextension')).toBe(false);
     });
   });
 
@@ -404,6 +437,54 @@ describe('file-handler', () => {
       expect(result.files[0].error).toBe('Network error');
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain('could not be downloaded');
+    });
+
+    it('processes .md files with application/octet-stream mimetype', async () => {
+      const mdContent = '# Hello\n\nThis is markdown';
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(new TextEncoder().encode(mdContent).buffer),
+      });
+
+      const files: SlackFile[] = [{
+        id: 'F123',
+        name: 'readme.md',
+        mimetype: 'application/octet-stream',
+        size: mdContent.length,
+        created: 1000,
+        url_private_download: 'https://files.slack.com/readme.md',
+      }];
+
+      const result = await processSlackFiles(files, 'xoxb-token');
+
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].isText).toBe(true);
+      expect(result.files[0].buffer.toString()).toBe(mdContent);
+      expect(result.warnings).toHaveLength(0);  // Not skipped as binary
+    });
+
+    it('processes .txt files with application/octet-stream mimetype', async () => {
+      const txtContent = 'Plain text content';
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(new TextEncoder().encode(txtContent).buffer),
+      });
+
+      const files: SlackFile[] = [{
+        id: 'F456',
+        name: 'notes.txt',
+        mimetype: 'application/octet-stream',
+        size: txtContent.length,
+        created: 1000,
+        url_private_download: 'https://files.slack.com/notes.txt',
+      }];
+
+      const result = await processSlackFiles(files, 'xoxb-token');
+
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].isText).toBe(true);
+      expect(result.files[0].buffer.toString()).toBe(txtContent);
+      expect(result.warnings).toHaveLength(0);
     });
   });
 });
