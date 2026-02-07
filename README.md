@@ -1,5 +1,7 @@
 # Claude Code Slack Bot
 
+[**DEPRECATED** in favour of [C.A.I.A. project](https://github.com/3gx/caia)]
+
 A Slack bot that integrates [Claude Code](https://claude.ai/claude-code) into your Slack workspace, enabling AI team collaboration.
 
 ## Features
